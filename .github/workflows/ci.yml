@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # @needleye/shared is a git dependency (see package.json). If
+      # needleye-shared is a private repo, this install step needs
+      # credentials -- either make needleye-shared public, or configure a
+      # deploy key / PAT here (e.g. via `git config --global url."https://<token>@github.com/".insteadOf "https://github.com/"`
+      # using a secrets.SHARED_REPO_TOKEN before `npm install`).
+      - name: Install dependencies
+        run: npm install
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      # Deploy step goes here once a hosting target is chosen
+      # (Railway/Fly/Render/etc.) -- typically `deploy` only on `main`.
