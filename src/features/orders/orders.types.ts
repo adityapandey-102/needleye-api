@@ -1,4 +1,4 @@
-import type { GranularStatus } from "@needleye/shared";
+import type { GranularStatus } from "../../shared/domain";
 
 export const ORDER_SELECT = `
   id, order_number, customer_name, phone, bill_number, booking_date, due_date,

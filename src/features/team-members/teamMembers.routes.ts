@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { ROLES } from "@needleye/shared";
+import { ROLES } from "../../shared/domain";
 import { requireAuth } from "../../shared/middleware/auth";
 import { supabaseAdmin } from "../../shared/supabaseAdmin";
 import { asyncHandler } from "../../shared/asyncHandler";

@@ -5,7 +5,7 @@ import {
   type CreateOrderInput,
   type Profile,
   type UpdateOrderInput,
-} from "@needleye/shared";
+} from "../../shared/domain";
 import { supabaseAdmin } from "../../shared/supabaseAdmin";
 import { storageProvider } from "../../shared/storage/storageProvider";
 import { BadRequestError, ForbiddenError, InternalError, NotFoundError } from "../../shared/errors";

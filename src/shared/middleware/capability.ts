@@ -1,5 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
-import { getCapabilityScope, type Capability } from "@needleye/shared";
+import { getCapabilityScope, type Capability } from "../domain";
 import { ForbiddenError, UnauthorizedError } from "../errors";
 
 declare global {

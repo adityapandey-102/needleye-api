@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
-import type { Profile } from "@needleye/shared";
+import type { Profile } from "../domain";
 import { supabaseAdmin } from "../supabaseAdmin";
 import { asyncHandler } from "../asyncHandler";
 import { ForbiddenError, InternalError, UnauthorizedError } from "../errors";

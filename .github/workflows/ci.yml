@@ -16,11 +16,6 @@ jobs:
         with:
           node-version: 20
 
-      # @needleye/shared is a git dependency (see package.json). If
-      # needleye-shared is a private repo, this install step needs
-      # credentials -- either make needleye-shared public, or configure a
-      # deploy key / PAT here (e.g. via `git config --global url."https://<token>@github.com/".insteadOf "https://github.com/"`
-      # using a secrets.SHARED_REPO_TOKEN before `npm install`).
       - name: Install dependencies
         run: npm install
 

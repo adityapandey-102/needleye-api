@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { inviteUserSchema, updateUserSchema } from "@needleye/shared";
+import { inviteUserSchema, updateUserSchema } from "../../shared/domain";
 import { requireAuth } from "../../shared/middleware/auth";
 import { requireCapability } from "../../shared/middleware/capability";
 import { supabaseAdmin } from "../../shared/supabaseAdmin";
