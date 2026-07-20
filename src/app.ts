@@ -1,12 +1,18 @@
 import cors from "cors";
 import express from "express";
 import { env } from "./config/env";
-import { authRouter } from "./features/auth/auth.routes";
-import { usersRouter } from "./features/users/users.routes";
-import { ordersRouter } from "./features/orders/orders.routes";
-import { teamMembersRouter } from "./features/team-members/teamMembers.routes";
-import { errorHandler, notFoundHandler } from "./shared/middleware/errorHandler";
+import { authRouter } from "./modules/auth/auth.routes";
+import { usersRouter } from "./modules/users/users.routes";
+import { ordersRouter } from "./modules/orders/orders.routes";
+import { teamMembersRouter } from "./modules/team-members/team-members.routes";
+import { errorHandler, notFoundHandler } from "./common/middleware/error.middleware";
 
+/**
+ * Composition root: builds the Express app and mounts every module's
+ * router. Each module wires its own controller/service/repository/mapper
+ * internally (see e.g. modules/orders/orders.routes.ts); this file only
+ * knows about the resulting routers, never about a module's internals.
+ */
 export function createApp() {
   const app = express();
 
