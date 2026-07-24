@@ -1,0 +1,1110 @@
+openapi: 3.0.3
+info:
+  title: Needle Eye API
+  version: 0.1.0
+  description: |
+    Express + TypeScript backend for the Needle Eye boutique/tailoring ERP.
+    Stateless REST: every request carries its own bearer token, verified
+    independently -- nothing about a client's session is stored server-side
+    between requests. `needleye-web` never talks to Supabase directly; every
+    auth operation goes through the `/auth/*` endpoints documented here.
+
+    See the repo README for the layered architecture (Controller ->
+    Validation -> Service -> Repository -> Mapper) and the Mermaid flow-map
+    diagrams -- this document covers the *what* (request/response contracts),
+    the README's Flow Map section covers the *how* (which function calls
+    which).
+  contact:
+    name: Needle Eye API
+servers:
+  - url: http://localhost:4000/api/v1
+    description: Local dev
+tags:
+  - name: Auth
+    description: Login, session refresh, password reset, bootstrap -- everything needleye-web needs instead of talking to Supabase directly.
+  - name: Users
+    description: Owner/Manager-only staff administration -- direct account creation with a generated password (no email invite), password/QR-login regeneration, role changes, deactivation.
+  - name: Orders
+    description: Order CRUD, field-level RBAC, image uploads.
+  - name: Payments
+    description: Per-order payment ledger. owner_manager/accountant see and manage every order's ledger; designer only their own assigned orders; master_tailor has zero access, enforced at every layer (router capability gate, RLS, and the response never includes payment fields at all).
+  - name: Team Members
+    description: Lightweight designer/master-tailor lookup, backs selects and filters.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Get the current caller's profile
+      description: |
+        Verifies the bearer token against Supabase Auth, then loads the
+        matching `profiles` row. Every page in needleye-web calls this once
+        (server-side, in `app/(app)/layout.tsx`) to know who's logged in and
+        what role they have.
+      responses:
+        "200":
+          description: The caller's profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  profile:
+                    $ref: "#/components/schemas/Profile"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/bootstrap-status:
+    get:
+      tags: [Auth]
+      summary: Whether an Owner/Manager account already exists
+      description: Drives the frontend's `/register` page -- shows the first-time-setup form if `ownerExists` is false, an "invite-only" message otherwise.
+      security: []
+      responses:
+        "200":
+          description: Bootstrap status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ownerExists:
+                    type: boolean
+
+  /auth/bootstrap:
+    post:
+      tags: [Auth]
+      summary: Create the first Owner/Manager account
+      description: |
+        Self-disabling: throws 403 the instant one Owner/Manager already
+        exists, so it can never be used to self-escalate after go-live.
+        Every account after this one is created directly via `POST /users`
+        (no email invite -- a password is generated and returned once).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, fullName]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+                fullName: { type: string, minLength: 1 }
+      responses:
+        "201":
+          description: Owner/Manager account created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { ok: { type: boolean, enum: [true] } }
+        "403":
+          description: An Owner/Manager already exists
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Sign in with email + password
+      description: |
+        The only place needleye-web sends a raw password. Returns a fresh
+        session; if the account turns out to be inactive, the session is
+        immediately revoked again server-side before the error is returned --
+        a deactivated user never walks away holding a live token.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        "200":
+          description: Session established
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthSession" }
+        "401":
+          description: Invalid email or password
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate a refresh token for a new session
+      description: |
+        Called by needleye-web's `proxy.ts` (on every request, if the access
+        token is missing/expired) and by `lib/api/client.ts`/`lib/api/server.ts`
+        before any API call whose token has expired. Supabase rotates the
+        refresh token itself on every use -- the old one stops working the
+        moment a new one is issued.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        "200":
+          description: New session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthSession" }
+        "401":
+          description: Invalid or expired refresh token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke the current session
+      description: |
+        Real server-side revocation (`auth.admin.signOut`), not just "the
+        client forgets the token" -- a refresh attempt with the same token
+        after this call fails with 401. Best-effort: an already-invalid token
+        is not treated as an error.
+      responses:
+        "204": { description: Session revoked }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/password-reset-request:
+    post:
+      tags: [Auth]
+      summary: Request a password-reset email
+      description: |
+        Always returns 204, whether or not the email matches an account --
+        never confirms account existence. The email's link points at
+        `${WEB_APP_URL}/auth/callback?next=/update-password`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties: { email: { type: string, format: email } }
+      responses:
+        "204": { description: Always -- see description }
+
+  /auth/password-update:
+    post:
+      tags: [Auth]
+      summary: Update the caller's own password
+      description: Requires a bearer token (either a normal session, or the session established right after following a password-reset email link).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [newPassword]
+              properties: { newPassword: { type: string, minLength: 8 } }
+      responses:
+        "204": { description: Password updated }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/exchange-code:
+    post:
+      tags: [Auth]
+      summary: Exchange a PKCE code for a session
+      description: |
+        Only exercised if the Supabase project is configured for the PKCE
+        flow (a `?code=` query param on the email link). This project's
+        current config uses the *implicit* flow instead (tokens arrive
+        directly in the URL fragment), which `app/auth/callback/page.tsx`
+        handles client-side without calling this endpoint -- it's kept for
+        if that configuration ever changes.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties: { code: { type: string } }
+      responses:
+        "200":
+          description: Session established
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthSession" }
+        "401":
+          description: Invalid or expired code
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /auth/qr-login:
+    post:
+      tags: [Auth]
+      summary: Sign in via a Master Tailor's QR code
+      description: |
+        Public -- the token comes from the `?token=` query param on the
+        scanned QR's URL (`${WEB_APP_URL}/qr-login?token=...`). Internally
+        looks up the token's hash against `qr_login_tokens`, then mints a
+        real session via Supabase's admin `generateLink` + `verifyOtp`
+        (the magic link is never emailed, just redeemed server-side
+        immediately) -- see the README's Flow Map. Only ever issued for
+        `master_tailor` accounts; deactivating an account or regenerating
+        its QR immediately invalidates the old token.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties: { token: { type: string } }
+      responses:
+        "200":
+          description: Session established
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthSession" }
+        "401":
+          description: Invalid, expired, or revoked QR code
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /users:
+    get:
+      tags: [Users]
+      summary: List every staff account
+      description: Owner/Manager only (`users:manage`).
+      responses:
+        "200":
+          description: All users
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items: { $ref: "#/components/schemas/User" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+    post:
+      tags: [Users]
+      summary: Create a staff account directly
+      description: |
+        Owner/Manager only. No email invite -- the account is created with a
+        real password immediately (generated as "readable name + random
+        suffix", e.g. `Aditya-9kQ2Xf7q`), returned once in this response.
+        The Owner/Manager is responsible for communicating it to the new
+        hire. The `handle_new_user()` DB trigger reads `full_name`/`role`
+        from the created user's metadata and creates the matching `profiles`
+        row automatically.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, fullName, role]
+              properties:
+                email: { type: string, format: email }
+                fullName: { type: string, minLength: 1 }
+                role: { $ref: "#/components/schemas/Role" }
+      responses:
+        "201":
+          description: Account created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  userId: { type: string, format: uuid }
+                  password: { type: string, description: "Shown only in this response -- never retrievable again." }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /users/{id}/generate-password:
+    post:
+      tags: [Users]
+      summary: Regenerate a staff member's password
+      description: |
+        Owner/Manager only. Always allowed for `designer`/`master_tailor`
+        accounts. For `owner_manager`/`accountant` accounts, only allowed
+        until that account's first real login (`profiles.last_login_at`) --
+        after that they're expected to manage their own password via
+        `POST /auth/password-reset-request` instead. The new password is
+        returned once, same as account creation.
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "201":
+          description: Password regenerated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { password: { type: string } }
+        "403":
+          description: "This owner_manager/accountant account has already completed its first login"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /users/{id}/qr-token:
+    post:
+      tags: [Users]
+      summary: Generate (or regenerate) a Master Tailor's QR login code
+      description: |
+        Owner/Manager only, and only for `master_tailor` accounts (400 for
+        any other role). Only the token's SHA-256 hash is stored
+        (`qr_login_tokens`, a table with no anon/authenticated grant at
+        all -- unreachable except through this API's service-role client).
+        The raw token/URL is returned once; regenerating immediately
+        invalidates whatever QR code was printed/displayed before.
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "201":
+          description: QR login token generated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  loginUrl: { type: string, example: "http://localhost:3000/qr-login?token=..." }
+        "400":
+          description: The target account is not a master_tailor
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /users/{id}:
+    patch:
+      tags: [Users]
+      summary: Update a staff member's name, role, or active flag
+      description: Owner/Manager only. All fields optional; at least one is required.
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fullName: { type: string, minLength: 1 }
+                role: { $ref: "#/components/schemas/Role" }
+                active: { type: boolean }
+      responses:
+        "204": { description: Updated }
+        "400":
+          description: No fields to update
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /users/{id}/deactivate:
+    post:
+      tags: [Users]
+      summary: Deactivate a staff member
+      description: |
+        Owner/Manager only. Sets `profiles.active = false` AND bans the
+        account at the Supabase Auth layer (`ban_duration`), so the block is
+        enforced at sign-in, not just app-level. Also clears any QR login
+        token immediately -- a deactivated account's QR must stop working
+        right away, not linger. Rejects self-deactivation.
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "204": { description: Deactivated }
+        "400":
+          description: You cannot deactivate your own account
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /orders:
+    get:
+      tags: [Orders]
+      summary: List orders (row-scoped by role)
+      description: |
+        Owner/Manager and Accountant see every order; Designer and Master
+        Tailor only ever see orders where they're `designerId`/`masterTailorId`
+        -- enforced inside the repository's query construction, not just a
+        UI filter.
+      parameters:
+        - name: search
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/GranularStatus" }
+        - name: designerId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: masterTailorId
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Orders visible to the caller
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  orders:
+                    type: array
+                    items: { $ref: "#/components/schemas/Order" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+    post:
+      tags: [Orders]
+      summary: Create an order
+      description: Owner/Manager and Designer only (`orders:create`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateOrderRequest" }
+      responses:
+        "201":
+          description: Order created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { order: { $ref: "#/components/schemas/Order" } }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /orders/stats:
+    get:
+      tags: [Orders]
+      summary: Dashboard aggregates for the caller's row scope
+      description: |
+        Registered before `/orders/{id}` -- Express would otherwise match
+        `stats` as `:id`. Counts/sums are computed in Postgres (COUNT/SUM
+        FILTER), never by fetching every order into Node. `pendingPayments`,
+        `collectedRevenue`, and `outstandingRevenue` are absent entirely
+        (not zero) for callers without `payments:read` (master_tailor) --
+        the same real server-side omission `Order`'s own payment fields get.
+      responses:
+        "200":
+          description: Aggregates scoped to the caller's role (row-scoped the same way GET /orders is)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrderStats" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /orders/{id}:
+    get:
+      tags: [Orders]
+      summary: Get a single order
+      description: 404s (not 403) if the order exists but is outside the caller's row scope -- doesn't confirm the order's existence to someone who shouldn't see it.
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "200":
+          description: The order
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { order: { $ref: "#/components/schemas/Order" } }
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    patch:
+      tags: [Orders]
+      summary: Edit an order
+      description: |
+        The core field-level RBAC: customer/product fields
+        (`orders:edit:customer_product_fields`) and pricing/assignment fields
+        (`totalAmount`, `designerId`, `masterTailorId`, gated by
+        `orders:edit:pricing_assignment`) are checked *independently* -- a
+        Designer can edit their own order's notes but gets 403 touching
+        `totalAmount`. `productionStatus` is accepted by the request schema
+        but silently stripped by the controller before it reaches the service
+        -- status changes go through `PATCH /orders/{id}/status` instead,
+        which enforces design-stage vs production-stage RBAC.
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateOrderRequest" }
+      responses:
+        "200":
+          description: Updated order
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { order: { $ref: "#/components/schemas/Order" } }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /orders/{id}/status:
+    patch:
+      tags: [Orders]
+      summary: Change an order's production status
+      description: |
+        Stage-ownership RBAC, not the flat `orders:edit:*` capabilities:
+        moving into a design-stage status (design_pending/design_approved/
+        fabric_purchased) requires `orders:status:design_stages`; moving into
+        any other (production-stage) status requires
+        `orders:status:production_stages`. Deliberately not gated by a
+        `requireCapability` middleware call -- which capability applies
+        depends on the *target* status in the request body, so the check
+        happens entirely inside the service/domain layer
+        (assertCanTransitionStatus). Also appends one row to this order's
+        status history, in the same DB transaction as the status update.
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateOrderStatusRequest" }
+      responses:
+        "200":
+          description: Updated order
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { order: { $ref: "#/components/schemas/Order" } }
+        "403":
+          description: Role has no access to this stage at all, or the order isn't assigned to this caller
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /orders/{id}/history:
+    get:
+      tags: [Orders]
+      summary: List an order's status-change audit trail
+      description: Newest first. Each entry's `label` is a frozen snapshot of the status's label at the time of the change, not recomputed from the current vocabulary.
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "200":
+          description: Status history entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  history:
+                    type: array
+                    items: { $ref: "#/components/schemas/OrderStatusHistoryEntry" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /orders/{id}/images:
+    post:
+      tags: [Orders]
+      summary: Upload a reference image into one of the 4 slots
+      description: Gated by `orders:edit:customer_product_fields` (same permission as editing the order's content fields). `multipart/form-data`, max 10MB, one of 4 slots.
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [slot, file]
+              properties:
+                slot: { type: integer, minimum: 1, maximum: 4 }
+                file: { type: string, format: binary }
+      responses:
+        "201":
+          description: Image stored, returns a fresh signed URL
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrderImage" }
+        "400":
+          description: Invalid slot, missing file, or unsupported content type
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /orders/{id}/images/{slot}:
+    delete:
+      tags: [Orders]
+      summary: Remove an image from a slot
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+        - name: slot
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1, maximum: 4 }
+      responses:
+        "204": { description: Removed }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /orders/{orderId}/payments:
+    get:
+      tags: [Payments]
+      summary: List an order's payment ledger
+      description: Gated by `payments:read` at the router level; a scoped (designer) caller additionally must be the order's designer, checked in the service.
+      parameters:
+        - $ref: "#/components/parameters/OrderIdPath"
+      responses:
+        "200":
+          description: Ledger entries, most recent paid_at first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  payments:
+                    type: array
+                    items: { $ref: "#/components/schemas/Payment" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    post:
+      tags: [Payments]
+      summary: Record a payment
+      description: |
+        Gated by `payments:manage`. If the order is currently marked
+        `fully_paid`, this is rejected with 409 unless the resulting ledger
+        sum would still exactly equal `total_amount` -- see the README's
+        Flow Map for the full consistency rule (it runs in both directions:
+        here, and on `PATCH /orders/{id}` when *setting* `fully_paid`).
+      parameters:
+        - $ref: "#/components/parameters/OrderIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreatePaymentRequest" }
+      responses:
+        "201":
+          description: Payment recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { payment: { $ref: "#/components/schemas/Payment" } }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Would leave a fully_paid order's ledger not matching its total_amount
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /orders/{orderId}/payments/{paymentId}:
+    patch:
+      tags: [Payments]
+      summary: Edit a payment entry
+      description: Same `fully_paid` consistency rule as POST, evaluated against the edited amount.
+      parameters:
+        - $ref: "#/components/parameters/OrderIdPath"
+        - $ref: "#/components/parameters/PaymentId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdatePaymentRequest" }
+      responses:
+        "200":
+          description: Updated payment
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { payment: { $ref: "#/components/schemas/Payment" } }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Would leave a fully_paid order's ledger not matching its total_amount
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+    delete:
+      tags: [Payments]
+      summary: Remove a payment entry
+      description: Rejected with 409 if the order is `fully_paid` and removing this entry would break the ledger-sum-equals-total_amount invariant -- change the order's payment status first if that's intentional.
+      parameters:
+        - $ref: "#/components/parameters/OrderIdPath"
+        - $ref: "#/components/parameters/PaymentId"
+      responses:
+        "204": { description: Removed }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Would leave a fully_paid order's ledger not matching its total_amount
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /team-members:
+    get:
+      tags: [Team Members]
+      summary: Lightweight designer/master-tailor lookup
+      description: Backs the designer/master-tailor selects on the order form and the filter dropdowns on the orders list. Any authenticated role can read it (no capability gate beyond `requireAuth`).
+      parameters:
+        - name: role
+          in: query
+          schema: { $ref: "#/components/schemas/Role" }
+      responses:
+        "200":
+          description: Active team members, optionally filtered by role
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  members:
+                    type: array
+                    items: { $ref: "#/components/schemas/TeamMember" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Supabase-issued access token, obtained from `POST /auth/login` (or `/refresh`, `/exchange-code`). Verified independently on every request -- see `common/middleware/auth.middleware.ts`.
+
+  parameters:
+    OrderId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    OrderIdPath:
+      name: orderId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    UserId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Authenticated, but the caller's role/scope doesn't allow this
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Not found (or outside the caller's row scope)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      description: The one shape every error response takes, produced by common/middleware/error.middleware.ts regardless of which layer threw.
+      properties:
+        error: { type: string }
+        code: { type: string, example: FORBIDDEN }
+        details: {}
+
+    Role:
+      type: string
+      enum: [owner_manager, designer, master_tailor, accountant]
+
+    GranularStatus:
+      type: string
+      enum:
+        - design_pending
+        - design_approved
+        - fabric_purchased
+        - cutting
+        - stitching
+        - hand_work
+        - machine_work
+        - finishing
+        - quality_check
+        - ready_for_delivery
+        - delivered
+
+    ProductCategory:
+      type: string
+      enum: [designer_blouse, saree, bridal_lehenga, custom_ethnic_wear, boutique_fashion]
+
+    PaymentStatus:
+      type: string
+      enum: [advance_paid, partially_paid, fully_paid]
+
+    PaymentMethod:
+      type: string
+      enum: [cash, card, upi, bank_transfer, cheque, other]
+
+    Profile:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        fullName: { type: string }
+        email: { type: string, format: email }
+        role: { $ref: "#/components/schemas/Role" }
+        active: { type: boolean }
+        createdAt: { type: string, format: date-time }
+
+    AuthSession:
+      type: object
+      description: Returned by login/refresh/exchange-code. Tokens only ever appear in this response body -- the API never sets a cookie itself.
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        expiresAt: { type: integer, description: Unix seconds }
+        profile: { $ref: "#/components/schemas/Profile" }
+
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        fullName: { type: string }
+        email: { type: string, format: email }
+        role: { $ref: "#/components/schemas/Role" }
+        active: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        lastLoginAt: { type: string, format: date-time, nullable: true, description: "Gates whether generate-password stays available for owner_manager/accountant accounts." }
+        hasQrLogin: { type: boolean, description: "Whether a QR login token exists. Never the token/hash itself." }
+
+    TeamMember:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        fullName: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+
+    Payment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        orderId: { type: string, format: uuid }
+        amount: { type: number, description: Always > 0 -- a correction is a payment update/delete, not a negative entry. }
+        method: { $ref: "#/components/schemas/PaymentMethod" }
+        paidAt: { type: string, format: date }
+        recordedBy: { type: string, format: uuid, nullable: true }
+        recordedByName: { type: string }
+        notes: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    CreatePaymentRequest:
+      type: object
+      required: [amount, method]
+      properties:
+        amount: { type: number, minimum: 0, exclusiveMinimum: true }
+        method: { $ref: "#/components/schemas/PaymentMethod" }
+        paidAt: { type: string, format: date, description: Defaults to today if omitted. }
+        notes: { type: string }
+
+    UpdatePaymentRequest:
+      type: object
+      description: Every field from CreatePaymentRequest, but optional (partial update).
+      properties:
+        amount: { type: number, minimum: 0, exclusiveMinimum: true }
+        method: { $ref: "#/components/schemas/PaymentMethod" }
+        paidAt: { type: string, format: date }
+        notes: { type: string }
+
+    UpdateOrderStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status: { $ref: "#/components/schemas/GranularStatus" }
+
+    OrderStatusHistoryEntry:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        orderId: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/GranularStatus" }
+        label: { type: string, description: Snapshot of the status's label at the time of the change. }
+        changedBy: { type: string, format: uuid, nullable: true }
+        changedByName: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    OrderImage:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        orderId: { type: string, format: uuid }
+        slot: { type: integer, minimum: 1, maximum: 4 }
+        storagePath: { type: string }
+        url: { type: string, description: Freshly-signed Supabase Storage URL, re-resolved on every read -- never stored. }
+        originalFilename: { type: string, nullable: true }
+        contentType: { type: string, nullable: true }
+        sizeBytes: { type: integer, nullable: true }
+        uploadedBy: { type: string, format: uuid, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    Order:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        orderNumber: { type: string, example: ORD-2026-014 }
+        customerName: { type: string }
+        phone: { type: string }
+        billNumber: { type: string }
+        bookingDate: { type: string, format: date }
+        dueDate: { type: string, format: date }
+        designerId: { type: string, format: uuid }
+        designerName: { type: string }
+        masterTailorId: { type: string, format: uuid }
+        masterTailorName: { type: string }
+        productCategory: { $ref: "#/components/schemas/ProductCategory" }
+        orderDetails: { type: string }
+        handWork: { type: boolean }
+        machineWork: { type: boolean }
+        purchaseRequired: { type: boolean }
+        paymentStatus:
+          allOf: [{ $ref: "#/components/schemas/PaymentStatus" }]
+          description: Absent entirely (not null) for callers without payments:read (master_tailor) -- a real server-side omission, not a UI-only hide.
+        totalAmount: { type: number, description: "Absent for master_tailor -- see paymentStatus." }
+        amountPaid: { type: number, description: "Absent for master_tailor. The real sum of GET /orders/{orderId}/payments -- never stored, always derived at read time." }
+        outstanding: { type: number, description: "Absent for master_tailor -- see paymentStatus." }
+        productionStatus: { $ref: "#/components/schemas/GranularStatus" }
+        designerInstructions: { type: string, nullable: true }
+        specialNotes: { type: string, nullable: true }
+        images:
+          type: array
+          items: { $ref: "#/components/schemas/OrderImage" }
+        createdBy: { type: string, format: uuid, nullable: true }
+        updatedBy: { type: string, format: uuid, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    OrderStats:
+      type: object
+      properties:
+        total: { type: integer, description: Every order in the caller's row scope. }
+        active: { type: integer, description: "Not yet in a completed canonical stage (ready_for_delivery/delivered)." }
+        completed: { type: integer, description: In the ready_for_delivery or delivered canonical stage. }
+        pendingPayments: { type: integer, description: "Absent for master_tailor. Orders whose paymentStatus isn't fully_paid." }
+        collectedRevenue: { type: number, description: "Absent for master_tailor. SUM(payments.amount) across the scope." }
+        outstandingRevenue: { type: number, description: "Absent for master_tailor. SUM(orders.total_amount) - collectedRevenue, floored at 0." }
+
+    CreateOrderRequest:
+      type: object
+      required:
+        - customerName
+        - phone
+        - billNumber
+        - dueDate
+        - designerId
+        - masterTailorId
+        - productCategory
+        - orderDetails
+        - paymentStatus
+        - productionStatus
+      properties:
+        customerName: { type: string }
+        phone: { type: string, pattern: "^\\d{10}$" }
+        billNumber: { type: string }
+        bookingDate: { type: string, format: date }
+        dueDate: { type: string, format: date }
+        designerId: { type: string, format: uuid }
+        masterTailorId: { type: string, format: uuid }
+        productCategory: { $ref: "#/components/schemas/ProductCategory" }
+        orderDetails: { type: string }
+        handWork: { type: boolean, default: false }
+        machineWork: { type: boolean, default: false }
+        purchaseRequired: { type: boolean, default: false }
+        paymentStatus: { $ref: "#/components/schemas/PaymentStatus" }
+        totalAmount: { type: number, minimum: 0, default: 0 }
+        productionStatus: { $ref: "#/components/schemas/GranularStatus" }
+        designerInstructions: { type: string }
+        specialNotes: { type: string }
+
+    UpdateOrderRequest:
+      type: object
+      description: |
+        Every field from CreateOrderRequest, but optional (partial update) --
+        deliberately a single role-agnostic schema rather than one per role.
+        Which fields a given caller is actually allowed to touch is enforced
+        by the service layer's RBAC field-splitting (see PATCH /orders/{id}),
+        not by this schema. `productionStatus` is accepted here but the
+        controller strips it before the service ever sees it.
+      properties:
+        customerName: { type: string }
+        phone: { type: string, pattern: "^\\d{10}$" }
+        billNumber: { type: string }
+        bookingDate: { type: string, format: date }
+        dueDate: { type: string, format: date }
+        designerId: { type: string, format: uuid }
+        masterTailorId: { type: string, format: uuid }
+        productCategory: { $ref: "#/components/schemas/ProductCategory" }
+        orderDetails: { type: string }
+        handWork: { type: boolean }
+        machineWork: { type: boolean }
+        purchaseRequired: { type: boolean }
+        paymentStatus: { $ref: "#/components/schemas/PaymentStatus" }
+        totalAmount: { type: number, minimum: 0 }
+        productionStatus: { $ref: "#/components/schemas/GranularStatus" }
+        designerInstructions: { type: string }
+        specialNotes: { type: string }

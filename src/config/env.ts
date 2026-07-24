@@ -6,9 +6,13 @@ const envSchema = z.object({
   API_PORT: z.coerce.number().default(4000),
   SUPABASE_URL: z.string().url(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
+  SUPABASE_ANON_KEY: z.string().min(1),
   DATABASE_URL: z.string().min(1),
   STORAGE_BUCKET_NAME: z.string().default("order-images"),
   CORS_ALLOWED_ORIGIN: z.string().default("http://localhost:3000"),
+  /** Where the frontend lives -- used to build the redirect URL Supabase puts in password-reset emails. */
+  WEB_APP_URL: z.string().default("http://localhost:3000"),
+  LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
 });
 
 const parsed = envSchema.safeParse(process.env);
