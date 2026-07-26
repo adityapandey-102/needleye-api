@@ -8,10 +8,10 @@ export function notFoundHandler(req: Request, res: Response) {
 
 /** Postgrest/Supabase errors surface as plain objects with message/code/details/hint, not Error instances. */
 function isPostgrestLikeError(err: unknown): err is { message: string; code?: string; details?: string; hint?: string } {
-  return typeof err === "object" && err !== null && "message" in err && typeof (err as { message: unknown }).message === "string";
+  return typeof err === "object" && err !== null && "message" in err && typeof err.message === "string";
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars -- Express identifies error middleware by arity (4 params)
+// Express identifies error middleware by arity (4 params) -- `_next` must stay declared even though it's never called.
 export function errorHandler(err: unknown, req: Request, res: Response, _next: NextFunction) {
   if (err instanceof ZodError) {
     req.log.warn({ err }, "Validation failed");
@@ -21,7 +21,10 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
 
   if (err instanceof AppError) {
     if (err.statusCode >= 500) {
-      req.log.error({ err }, "Request failed with a 5xx AppError");
+      // `cause` is the original error a repository/provider caught and wrapped
+      // (see InternalError) -- logged explicitly so a DB/infra failure's real
+      // root cause is diagnosable, not just the generic wrapper message.
+      req.log.error({ err, cause: err.cause }, "Request failed with a 5xx AppError");
     } else {
       req.log.warn({ err: { message: err.message, code: err.code } }, "Request rejected");
     }

@@ -3,8 +3,8 @@ import { requireAuth } from "../../../common/middleware/auth.middleware";
 import { requireCapability } from "../../../common/middleware/capability.middleware";
 import { asyncHandler } from "../../../common/http/async-handler";
 import { validateBody } from "../../../common/http/validate.middleware";
-import { createPaymentDtoSchema } from "./dto/create-payment.dto";
-import { updatePaymentDtoSchema } from "./dto/update-payment.dto";
+import { createPaymentDtoSchema, type CreatePaymentDto } from "./dto/create-payment.dto";
+import { updatePaymentDtoSchema, type UpdatePaymentDto } from "./dto/update-payment.dto";
 import { PaymentsService } from "../application/payments.service";
 import { DrizzlePaymentsRepository } from "../infrastructure/drizzle-payments.repository";
 
@@ -39,7 +39,7 @@ paymentsRouter.post(
     const payment = await paymentsService.addPayment(
       { profile: req.profile!, authUserId: req.authUserId!, capabilityScope: req.capabilityScope },
       req.params.orderId!,
-      req.body,
+      req.body as CreatePaymentDto,
     );
     res.status(201).json({ payment });
   }),
@@ -54,7 +54,7 @@ paymentsRouter.patch(
       { profile: req.profile!, authUserId: req.authUserId!, capabilityScope: req.capabilityScope },
       req.params.orderId!,
       req.params.paymentId!,
-      req.body,
+      req.body as UpdatePaymentDto,
     );
     res.json({ payment });
   }),

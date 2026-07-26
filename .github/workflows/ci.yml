@@ -14,16 +14,74 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+          cache: npm
 
       - name: Install dependencies
         run: npm install
 
+      - name: Lint
+        run: npm run lint
+
       - name: Typecheck
         run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test:unit
 
       - name: Build
         run: npm run build
 
+      - name: Docker image build verification
+        run: docker build -t needleye-api:ci .
+
       # Deploy step goes here once a hosting target is chosen
       # (Railway/Fly/Render/etc.) -- typically `deploy` only on `main`.
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      # GitHub-hosted ubuntu runners already have Docker, which this needs
+      # to run the same local Postgres/Auth/Storage stack as local dev.
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Start local Supabase stack
+        run: supabase start -x imgproxy,edge-runtime,studio,analytics,vector
+
+      # Turns `supabase status`'s local URLs/keys into this app's own env
+      # var names (see .env.example) -- same values a developer would copy
+      # by hand after `npx supabase start` locally.
+      - name: Write .env from the running local stack
+        run: |
+          eval "$(supabase status -o env)"
+          {
+            echo "NODE_ENV=test"
+            echo "API_PORT=4000"
+            echo "CORS_ALLOWED_ORIGIN=http://localhost:3000"
+            echo "WEB_APP_URL=http://localhost:3000"
+            echo "LOG_LEVEL=error"
+            echo "SUPABASE_URL=$API_URL"
+            echo "SUPABASE_SERVICE_ROLE_KEY=$SERVICE_ROLE_KEY"
+            echo "SUPABASE_ANON_KEY=$ANON_KEY"
+            echo "DATABASE_URL=$DB_URL"
+            echo "STORAGE_BUCKET_NAME=order-images"
+          } > .env
+
+      - name: Integration tests
+        run: npm run test:integration
+
+      - name: Stop local Supabase stack
+        if: always()
+        run: supabase stop

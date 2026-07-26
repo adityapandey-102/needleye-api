@@ -7,7 +7,14 @@ import { toOrderStatusHistoryResponseDto } from "../api/order-status-history.pre
 import { toOrderStatsResponseDto } from "../api/order-stats.presenter";
 import type { GranularStatus, Profile } from "../../../domain";
 import type { StorageProvider } from "../../../common/storage/storage-provider";
-import type { OrdersRepositoryPort, OrderListFilters, NewOrderRecord, UpdateOrderRecord } from "./ports/orders-repository.port";
+import type { OrderEntity } from "../domain/order.entity";
+import type {
+  OrdersRepositoryPort,
+  OrderListFilters,
+  OrderListPage,
+  NewOrderRecord,
+  UpdateOrderRecord,
+} from "./ports/orders-repository.port";
 import type { CreateOrderDto } from "../api/dto/create-order.dto";
 import type { UpdateOrderDto } from "../api/dto/update-order.dto";
 import type { OrderResponseDto } from "../api/dto/order.response.dto";
@@ -17,6 +24,14 @@ import type { OrderStatsResponseDto } from "../api/dto/order-stats.response.dto"
 interface AuthContext {
   profile: Profile;
   authUserId: string;
+}
+
+/** A page of orders plus the total matching the filters, so the client can render a pager. */
+export interface OrderListResult {
+  orders: OrderResponseDto[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 /**
@@ -31,19 +46,37 @@ export class OrdersService {
     private readonly storageProvider: StorageProvider,
   ) {}
 
-  async listOrders(ctx: AuthContext, filters: OrderListFilters): Promise<OrderResponseDto[]> {
-    const entities = await this.ordersRepository.findMany({ role: ctx.profile.role, userId: ctx.authUserId }, filters);
-    const sums = await this.ordersRepository.sumPaymentsForOrders(entities.map((e) => e.id));
-    return Promise.all(
-      entities.map((entity) => toOrderResponseDto(entity, sums[entity.id] ?? 0, ctx.profile.role, this.storageProvider)),
-    );
+  /**
+   * Resolves every image's signed URL for the given orders in ONE batched
+   * storage call, returning a path->url map the presenter reads from. Pulled
+   * up here (rather than each presenter signing its own images) so a list of
+   * N orders costs one storage round trip, not up to 4N -- see
+   * StorageProvider.getSignedUrls.
+   */
+  private signImageUrls(entities: OrderEntity[]): Promise<Map<string, string>> {
+    const paths = entities.flatMap((e) => e.images.map((img) => img.storagePath));
+    return this.storageProvider.getSignedUrls(paths);
+  }
+
+  async listOrders(ctx: AuthContext, filters: OrderListFilters, page: OrderListPage): Promise<OrderListResult> {
+    const scope = { role: ctx.profile.role, userId: ctx.authUserId };
+    const [entities, total] = await Promise.all([
+      this.ordersRepository.findMany(scope, filters, page),
+      this.ordersRepository.countMany(scope, filters),
+    ]);
+    const [sums, signedUrls] = await Promise.all([
+      this.ordersRepository.sumPaymentsForOrders(entities.map((e) => e.id)),
+      this.signImageUrls(entities),
+    ]);
+    const orders = entities.map((entity) => toOrderResponseDto(entity, sums[entity.id] ?? 0, ctx.profile.role, signedUrls));
+    return { orders, total, limit: page.limit, offset: page.offset };
   }
 
   async getOrder(ctx: AuthContext, orderId: string): Promise<OrderResponseDto> {
     const entity = await this.ordersRepository.findById({ role: ctx.profile.role, userId: ctx.authUserId }, orderId);
     if (!entity) throw new NotFoundError("Order not found");
     const amountPaid = await this.ordersRepository.sumPaymentsForOrder(orderId);
-    return toOrderResponseDto(entity, amountPaid, ctx.profile.role, this.storageProvider);
+    return toOrderResponseDto(entity, amountPaid, ctx.profile.role, await this.signImageUrls([entity]));
   }
 
   async createOrder(ctx: AuthContext, dto: CreateOrderDto): Promise<OrderResponseDto> {
@@ -59,7 +92,7 @@ export class OrdersService {
     // A brand-new order has no ledger entries yet, but fetch for real rather
     // than assume 0 -- keeps this call site identical to every other one.
     const amountPaid = await this.ordersRepository.sumPaymentsForOrder(entity.id);
-    return toOrderResponseDto(entity, amountPaid, ctx.profile.role, this.storageProvider);
+    return toOrderResponseDto(entity, amountPaid, ctx.profile.role, await this.signImageUrls([entity]));
   }
 
   async updateOrder(ctx: AuthContext, orderId: string, dto: UpdateOrderDto): Promise<OrderResponseDto> {
@@ -84,7 +117,7 @@ export class OrdersService {
     const record: UpdateOrderRecord = { ...dto, updatedBy: ctx.authUserId };
     const entity = await this.ordersRepository.update(orderId, record);
     const amountPaid = await this.ordersRepository.sumPaymentsForOrder(orderId);
-    return toOrderResponseDto(entity, amountPaid, ctx.profile.role, this.storageProvider);
+    return toOrderResponseDto(entity, amountPaid, ctx.profile.role, await this.signImageUrls([entity]));
   }
 
   /**
@@ -102,7 +135,7 @@ export class OrdersService {
 
     const entity = await this.ordersRepository.updateStatus(orderId, status, ctx.authUserId);
     const amountPaid = await this.ordersRepository.sumPaymentsForOrder(orderId);
-    return toOrderResponseDto(entity, amountPaid, ctx.profile.role, this.storageProvider);
+    return toOrderResponseDto(entity, amountPaid, ctx.profile.role, await this.signImageUrls([entity]));
   }
 
   async getStats(ctx: AuthContext): Promise<OrderStatsResponseDto> {

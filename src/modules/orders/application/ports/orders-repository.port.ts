@@ -15,6 +15,12 @@ export interface OrderListFilters {
   masterTailorId?: string;
 }
 
+/** Offset pagination for the orders list -- keeps the default list response bounded regardless of how many orders exist. */
+export interface OrderListPage {
+  limit: number;
+  offset: number;
+}
+
 export interface NewOrderRecord {
   customerName: string;
   phone: string;
@@ -96,7 +102,9 @@ export interface OrderStatsRaw {
 
 /** Persistence contract for the Orders module -- pure data access, no business rules. */
 export interface OrdersRepositoryPort {
-  findMany(scope: RowScope, filters: OrderListFilters): Promise<OrderEntity[]>;
+  findMany(scope: RowScope, filters: OrderListFilters, page: OrderListPage): Promise<OrderEntity[]>;
+  /** Total orders matching the same scope+filters as findMany, ignoring pagination -- backs the list's total count. */
+  countMany(scope: RowScope, filters: OrderListFilters): Promise<number>;
   findById(scope: RowScope, id: string): Promise<OrderEntity | null>;
   getStats(scope: RowScope): Promise<OrderStatsRaw>;
   findBasicById(id: string): Promise<OrderBasicInfo | null>;

@@ -19,6 +19,7 @@ import type {
   OrdersRepositoryPort,
   RowScope,
   OrderListFilters,
+  OrderListPage,
   NewOrderRecord,
   UpdateOrderRecord,
   NewImageRecord,
@@ -38,7 +39,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     return undefined;
   }
 
-  async findMany(scope: RowScope, filters: OrderListFilters): Promise<OrderEntity[]> {
+  /** Row scope + filters, shared by findMany and countMany so the page and its total always agree. */
+  private listConditions(scope: RowScope, filters: OrderListFilters) {
     const conditions = [this.rowScopeCondition(scope)];
 
     if (filters.search?.trim()) {
@@ -49,17 +51,36 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     if (filters.designerId) conditions.push(eq(orders.designerId, filters.designerId));
     if (filters.masterTailorId) conditions.push(eq(orders.masterTailorId, filters.masterTailorId));
 
+    return and(...conditions);
+  }
+
+  async findMany(scope: RowScope, filters: OrderListFilters, page: OrderListPage): Promise<OrderEntity[]> {
     try {
       // One round trip for every order plus its designer/masterTailor/images --
       // not N+1 -- via Drizzle's relational query API (see order.relations.ts).
+      // limit/offset keep this bounded regardless of total order count.
       const rows = await db.query.orders.findMany({
-        where: and(...conditions),
+        where: this.listConditions(scope, filters),
         orderBy: [desc(orders.createdAt)],
         with: { designer: true, masterTailor: true, images: true },
+        limit: page.limit,
+        offset: page.offset,
       });
-      return (rows as OrderQueryResult[]).map(OrderMapper.toEntity);
-    } catch {
-      throw new InternalError("Failed to load orders");
+      return (rows as OrderQueryResult[]).map((row) => OrderMapper.toEntity(row));
+    } catch (error) {
+      throw new InternalError("Failed to load orders", error);
+    }
+  }
+
+  async countMany(scope: RowScope, filters: OrderListFilters): Promise<number> {
+    try {
+      const [row] = await db
+        .select({ total: sql<string>`count(*)` })
+        .from(orders)
+        .where(this.listConditions(scope, filters));
+      return row ? Number(row.total) : 0;
+    } catch (error) {
+      throw new InternalError("Failed to count orders", error);
     }
   }
 
@@ -70,10 +91,10 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         where: and(eq(orders.id, id), this.rowScopeCondition(scope)),
         with: { designer: true, masterTailor: true, images: true },
       });
-    } catch {
-      throw new InternalError("Failed to load order");
+    } catch (error) {
+      throw new InternalError("Failed to load order", error);
     }
-    return row ? OrderMapper.toEntity(row as OrderQueryResult) : null;
+    return row ? OrderMapper.toEntity(row) : null;
   }
 
   async getStats(scope: RowScope): Promise<OrderStatsRaw> {
@@ -91,8 +112,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         })
         .from(orders)
         .where(condition);
-    } catch {
-      throw new InternalError("Failed to load order stats");
+    } catch (error) {
+      throw new InternalError("Failed to load order stats", error);
     }
 
     let paymentRows;
@@ -102,8 +123,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         .from(payments)
         .innerJoin(orders, eq(orders.id, payments.orderId))
         .where(condition);
-    } catch {
-      throw new InternalError("Failed to load order stats");
+    } catch (error) {
+      throw new InternalError("Failed to load order stats", error);
     }
 
     const row = orderRows[0];
@@ -125,7 +146,7 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
       where: eq(orders.id, id),
       with: { designer: true, masterTailor: true, images: true },
     });
-    return row ? OrderMapper.toEntity(row as OrderQueryResult) : null;
+    return row ? OrderMapper.toEntity(row) : null;
   }
 
   async findBasicById(id: string): Promise<OrderBasicInfo | null> {
@@ -142,8 +163,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         .from(orders)
         .where(eq(orders.id, id))
         .limit(1);
-    } catch {
-      throw new InternalError("Failed to load order");
+    } catch (error) {
+      throw new InternalError("Failed to load order", error);
     }
     const row = rows[0];
     if (!row) return null;
@@ -196,8 +217,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
 
         return inserted.id;
       });
-    } catch {
-      throw new InternalError("Failed to create order");
+    } catch (error) {
+      throw new InternalError("Failed to create order", error);
     }
 
     const entity = await this.findByIdUnscoped(insertedId);
@@ -214,8 +235,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
 
     try {
       await db.update(orders).set(record).where(eq(orders.id, id));
-    } catch {
-      throw new InternalError("Failed to save order");
+    } catch (error) {
+      throw new InternalError("Failed to save order", error);
     }
 
     const entity = await this.findByIdUnscoped(id);
@@ -235,8 +256,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
           changedBy,
         });
       });
-    } catch {
-      throw new InternalError("Failed to update order status");
+    } catch (error) {
+      throw new InternalError("Failed to update order status", error);
     }
 
     const entity = await this.findByIdUnscoped(id);
@@ -261,10 +282,10 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         .leftJoin(profiles, eq(profiles.id, orderStatusHistory.changedBy))
         .where(eq(orderStatusHistory.orderId, orderId))
         .orderBy(desc(orderStatusHistory.createdAt));
-    } catch {
-      throw new InternalError("Failed to load order status history");
+    } catch (error) {
+      throw new InternalError("Failed to load order status history", error);
     }
-    return rows.map(OrderStatusHistoryMapper.toEntity);
+    return rows.map((row) => OrderStatusHistoryMapper.toEntity(row));
   }
 
   async upsertImage(data: NewImageRecord): Promise<void> {
@@ -290,8 +311,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
             uploadedBy: data.uploadedBy,
           },
         });
-    } catch {
-      throw new InternalError("Failed to save uploaded image");
+    } catch (error) {
+      throw new InternalError("Failed to save uploaded image", error);
     }
   }
 
@@ -315,8 +336,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         .select({ total: sql<string>`coalesce(sum(${payments.amount}), 0)` })
         .from(payments)
         .where(eq(payments.orderId, orderId));
-    } catch {
-      throw new InternalError("Failed to sum payments");
+    } catch (error) {
+      throw new InternalError("Failed to sum payments", error);
     }
     return Number(rows[0]?.total ?? 0);
   }
@@ -331,8 +352,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         .from(payments)
         .where(inArray(payments.orderId, orderIds))
         .groupBy(payments.orderId);
-    } catch {
-      throw new InternalError("Failed to sum payments");
+    } catch (error) {
+      throw new InternalError("Failed to sum payments", error);
     }
 
     const sums: Record<string, number> = {};

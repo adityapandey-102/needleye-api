@@ -11,7 +11,8 @@ flowchart TD
     Index --> CreateApp["app.ts: createApp()<br/>composition root -- mounts every module's router"]
 
     CreateApp --> MW1["requestLogger<br/>common/logger/request-logger.middleware.ts (pino-http)"]
-    MW1 --> MW2["cors()<br/>CORS_ALLOWED_ORIGIN"]
+    MW1 --> MW1b["helmet()<br/>secure headers (HSTS, nosniff, frameguard, ...); CSP off"]
+    MW1b --> MW2["cors()<br/>CORS_ALLOWED_ORIGIN"]
     MW2 --> MW3["express.json()"]
     MW3 --> Health{"GET /health"}
     Health -->|match| HealthResp["200 { status, timestamp }"]

@@ -36,10 +36,10 @@ export class DrizzleUsersRepository implements UsersRepositoryPort {
         .from(profiles)
         .leftJoin(qrLoginTokens, eq(qrLoginTokens.profileId, profiles.id))
         .orderBy(profiles.createdAt);
-    } catch {
-      throw new InternalError("Failed to load users");
+    } catch (error) {
+      throw new InternalError("Failed to load users", error);
     }
-    return rows.map(UserAccountMapper.toEntity);
+    return rows.map((row) => UserAccountMapper.toEntity(row));
   }
 
   async findById(id: string): Promise<UserAccountEntity | null> {
@@ -51,8 +51,8 @@ export class DrizzleUsersRepository implements UsersRepositoryPort {
         .leftJoin(qrLoginTokens, eq(qrLoginTokens.profileId, profiles.id))
         .where(eq(profiles.id, id))
         .limit(1);
-    } catch {
-      throw new InternalError("Failed to load user");
+    } catch (error) {
+      throw new InternalError("Failed to load user", error);
     }
     const row = rows[0];
     return row ? UserAccountMapper.toEntity(row) : null;
@@ -75,8 +75,8 @@ export class DrizzleUsersRepository implements UsersRepositoryPort {
 
     try {
       await db.update(profiles).set(record).where(eq(profiles.id, id));
-    } catch {
-      throw new InternalError("Failed to update user");
+    } catch (error) {
+      throw new InternalError("Failed to update user", error);
     }
   }
 
@@ -93,16 +93,16 @@ export class DrizzleUsersRepository implements UsersRepositoryPort {
           target: qrLoginTokens.profileId,
           set: { tokenHash, createdAt: new Date() },
         });
-    } catch {
-      throw new InternalError("Failed to save QR login token");
+    } catch (error) {
+      throw new InternalError("Failed to save QR login token", error);
     }
   }
 
   async clearQrToken(profileId: string): Promise<void> {
     try {
       await db.delete(qrLoginTokens).where(eq(qrLoginTokens.profileId, profileId));
-    } catch {
-      throw new InternalError("Failed to clear QR login token");
+    } catch (error) {
+      throw new InternalError("Failed to clear QR login token", error);
     }
   }
 

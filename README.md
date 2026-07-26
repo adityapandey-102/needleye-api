@@ -23,7 +23,9 @@ schedule.
 
 ## Prerequisites
 
-- Node.js 20+
+- Node.js 22+ (`@supabase/supabase-js`'s Realtime client needs native
+  `WebSocket`, only available from Node 22 -- on 20 or below the process
+  crashes at startup; see the Dockerfile, pinned to `node:22-alpine`)
 - Docker Desktop, running (the local Supabase stack is Dockerized)
 
 ## Quick start
@@ -40,16 +42,48 @@ cp .env.example .env
 # the local stack -- every repository connects through it via Drizzle.
 
 npm run dev
-# ⤷ http://localhost:4000, health check at /health, interactive API docs at /api-docs
+# ⤷ http://localhost:4000, liveness at /health, readiness (DB-checked) at /health/ready, interactive API docs at /api-docs
 ```
 
 Stop the stack with `npx supabase stop` (data persists); `npx supabase db reset` wipes and re-applies all migrations from `supabase/migrations/`.
 
-Once an Owner/Manager account exists (`POST /auth/bootstrap`, once), two
-scripts are useful for local development:
+Or, once `.env` is filled in, **one command** does the whole local bring-up
+(start Postgres/Auth/Storage, apply any pending migrations, seed dev data,
+start the backend): `npm run dev:up`.
+
+`npm run lint` (ESLint, flat config in `eslint.config.mjs`, type-aware via
+`typescript-eslint`'s `recommendedTypeChecked`), `npm run typecheck`, and
+`npm run test:unit` should all be clean before pushing -- lint, typecheck,
+unit tests, and a Docker image build all run in CI on every push/PR (see
+"Deployment" below), alongside `npm run build`.
+
+Once an Owner/Manager account exists (`POST /auth/bootstrap`, once), a few
+more scripts are useful for local development:
 
 - **`npm run seed`** (`src/db/seed.ts`) -- populates ~40 orders spanning every production status, payment state, and due-date bucket, with real multi-step status history, a reconciling payment ledger, and a handful of reference images, plus the 5 designer / 5 master-tailor / 1 accountant staff accounts (the designer/master names are the prototype's own, for continuity). Safe to re-run -- staff are looked up by email first, so a second run reuses the same accounts instead of duplicating them; it never deletes anything.
-- **`npm run test:rbac`** (`tests/rbac-matrix.mjs`) -- a small, self-contained per-role 200/403 check against the running API: `orders:create`, `orders:edit:pricing_assignment`, `payments:read`/`payments:manage`, `orders:status:design_stages`/`production_stages`, `users:manage`, row-scoping, and the unauthenticated case. Not a full test suite -- this repo doesn't have one yet -- but enough to catch a real RBAC regression before it ships. Needs `SEED_OWNER_PASSWORD` set to an existing Owner/Manager's password; creates its own throwaway fixtures, so it never depends on `npm run seed` having been run first.
+- **`npm run test:integration`** (`tests/integration/`, Vitest) -- repository↔database, service↔repository, authentication, and API-endpoint coverage against the real local Supabase stack (no mocking). Creates and tears down its own fixtures every run. See `tests/integration/README.md`.
+- **`npm run test:rbac`** (`tests/rbac-matrix.mjs`) -- a small, self-contained per-role 200/403 check against the running API: `orders:create`, `orders:edit:pricing_assignment`, `payments:read`/`payments:manage`, `orders:status:design_stages`/`production_stages`, `users:manage`, row-scoping, and the unauthenticated case. Needs `SEED_OWNER_PASSWORD` set to an existing Owner/Manager's password; creates its own throwaway fixtures, so it never depends on `npm run seed` having been run first.
+
+### Docker
+
+`Dockerfile` (multi-stage: `npm run build` in a full `node:22-alpine`, then
+only production dependencies + the `dist/` bundle + `openapi.yaml` in the
+runtime stage, running as the non-root `node` user) builds this API into a
+single deployable image -- `npm run docker:build`. Verified in CI on every
+push/PR (build only, not a run -- see "Deployment" below). To actually run
+it locally against the Supabase CLI's stack, point `SUPABASE_URL`/
+`DATABASE_URL` at `host.docker.internal` instead of `127.0.0.1` (the
+container can't reach the host's `localhost`), e.g.:
+
+```bash
+docker build -t needleye-api .
+docker run --rm -p 4000:4000 --add-host=host.docker.internal:host-gateway \
+  -e SUPABASE_URL=http://host.docker.internal:54321 \
+  -e DATABASE_URL=postgres://postgres:postgres@host.docker.internal:54322/postgres \
+  -e SUPABASE_SERVICE_ROLE_KEY=... -e SUPABASE_ANON_KEY=... \
+  -e CORS_ALLOWED_ORIGIN=http://localhost:3000 -e WEB_APP_URL=http://localhost:3000 \
+  needleye-api
+```
 
 ## Architecture
 
@@ -297,6 +331,11 @@ second round trip; every ledger sum (`sumByOrderId`, `sumPaymentsForOrder(s)`) i
 computed with `SUM()`/`GROUP BY` in Postgres, not by fetching every payment
 row and adding them up in Node.
 
+Two further list-path optimizations:
+
+- **`GET /orders` is offset-paginated** (`limit` default 20, max 100; `offset`; response is `{ orders, total, limit, offset }`). The list is the one endpoint whose result set grows without bound as orders accumulate, so it's capped rather than returning every order on every load. `DrizzleOrdersRepository.findMany` applies `limit`/`offset`; `countMany` returns the matching total (they share one `listConditions` builder so the page and its count can never disagree).
+- **Signed image URLs are resolved in one batched storage call per response**, not one per image. `OrdersService.signImageUrls` collects every image path across the whole page and calls `StorageProvider.getSignedUrls` (Supabase's `createSignedUrls`) once -- previously a list of N orders made up to 4N round trips to Storage. The presenter is now a pure function that reads from the resulting path→url map.
+
 ### No shared package, on purpose
 
 `needleye-web` and `needleye-api` are separate repos with separate CI/CD and
@@ -326,6 +365,16 @@ server-side. `asyncHandler` wraps every async controller/middleware so a
 rejected promise reaches that middleware instead of crashing the process
 (Express 4 doesn't catch async errors on its own).
 
+Every repository catches persistence failures and re-throws `InternalError`
+with the original error passed as `cause` (native ES2022 `Error.cause` --
+`AppError`'s constructor accepts and forwards it) rather than discarding it
+-- `error.middleware.ts` logs `err.cause` alongside the wrapper on every
+5xx, so a DB failure's actual root cause (a constraint violation, a
+connection error, whatever) is diagnosable from the logs, not just the
+generic "Failed to load orders"-style message. `cause` never appears in
+`details` (which can reach the client response) -- it's server-side-only,
+same as everything else that goes to `req.log`.
+
 ### Logging
 
 `common/logger/logger.ts` exports a single process-wide `pino` instance,
@@ -341,6 +390,21 @@ of needing a logger threaded through every function signature.
 - **Redaction**: `req.headers.authorization` (and the equivalent on the response) is redacted to `[redacted]` -- a bearer token must never end up in a log line, in dev or prod. Never add a field containing a raw token/password to a log call without redacting it the same way.
 - **Format**: pretty-printed + colorized in development (`pino-pretty`, easy to read in a terminal); plain JSON on stdout in production (`NODE_ENV=production`), so it's pipeable into any log aggregator (Datadog, CloudWatch, etc.) without extra parsing config.
 - **Startup logging** (`src/index.ts`) uses the same `logger` instance directly, not `req.log` (there's no request yet).
+
+### Operational concerns (health, pool, shutdown)
+
+- **Health probes**: `GET /health` is a shallow **liveness** check (process up? no dependencies touched -- an orchestrator uses it to decide whether to restart the container). `GET /health/ready` is a **readiness** check that runs `select 1` against Postgres and returns `503` if the DB is unreachable, so a load balancer stops routing to an instance whose database is down instead of sending it doomed requests.
+- **Connection pool**: `common/database/drizzle-client.ts` configures the `pg` pool explicitly (`max: 10`, `idleTimeoutMillis: 30_000`, `connectionTimeoutMillis: 5_000`) rather than relying on pg's defaults -- most importantly, a request fails fast after 5s if no connection is free, instead of pg's default of hanging forever.
+- **Graceful shutdown**: `src/index.ts` handles `SIGTERM`/`SIGINT` by closing the HTTP server (letting in-flight requests finish), then draining the pool (`db.$client.end()`), then exiting -- with a hard 10s cap so the process always exits. This matters for container redeploys (Docker/Railway/Fly/etc.): without it, a deploy would kill active requests and leak DB connections.
+
+### Security
+
+- **Secure headers**: `helmet()` is mounted first in `app.ts` (before CORS) on every response -- HSTS, `X-Content-Type-Options: nosniff`, frameguard, hidden `X-Powered-By`, etc. Content-Security-Policy is off (`contentSecurityPolicy: false`): this is a pure JSON API with one HTML view of its own (`/api-docs`, Swagger UI, which needs inline style/script a default CSP would block) -- a same-origin CSP for one internal docs page isn't worth the complexity at this app's scale.
+- **CSRF**: not applicable, on purpose. The API is stateless and bearer-token-only -- it never reads or sets cookies, and CSRF exploits ambient cookie-based auth. There is nothing here for a CSRF token to protect.
+- **SQL injection**: every query goes through Drizzle's query builder (parameterized) or its `sql\`...\`` tagged-template helper used only for typed column expressions, never for interpolating raw user input into a string. No repository builds a query by string concatenation.
+- **File uploads**: `orders.validation.ts`'s `validateImageUpload` enforces a `1-4` slot range and an `image/*` MIME type (client-supplied `Content-Type`, not magic-byte sniffed -- a deliberate, proportionate check at this app's scale, not a defense against a determined attacker) plus a 10MB `multer` size limit.
+- **Auth/authz**: see "Authentication" and "RBAC" below -- every route is bearer-token-verified (`requireAuth`) and capability-gated (`requireCapability`/field-level checks in the service layer); `profiles.role` is server-side truth, never trusted from the JWT/client.
+- **Input validation**: every request body is parsed against a zod schema (`validateBody`) before a controller calls a service; a service can assume its input already matches the DTO shape.
 
 ### RBAC
 
@@ -884,8 +948,17 @@ build the link inside password-reset emails), `LOG_LEVEL` (`fatal` `error`
 
 Independent from needleye-web -- deploy this to whatever Node host you like
 (Railway/Fly/Render/etc.), pointed at a hosted Supabase project via the same
-env vars used locally. `.github/workflows/ci.yml` runs typecheck + build on
-every push/PR; add a deploy step once a hosting target is chosen.
+env vars used locally, or deploy the Docker image (`Dockerfile`) if the host
+prefers a container. `.github/workflows/ci.yml` runs two jobs on every
+push/PR:
+
+- **`build`**: install, lint, typecheck, unit tests, `npm run build`, and a
+  Docker image build (verification only -- not run, not pushed anywhere).
+- **`integration`**: spins up the same local Supabase stack CI uses for
+  everything else (via `supabase/setup-cli`, GitHub-hosted runners already
+  have Docker), points `.env` at it, and runs `npm run test:integration`.
+
+Add a deploy step once a hosting target is chosen.
 
 See `docs/cutover-checklist.md` for the full step-by-step local→prod cutover
 (applying `supabase/migrations/*.sql` against the hosted project, every env

@@ -3,7 +3,6 @@ import { BadRequestError, NotFoundError } from "../../../common/errors/app-error
 import { generatePassword, generateQrToken, hashToken } from "../../../common/crypto/credentials";
 import { assertPasswordCanBeRegenerated, assertRoleSupportsQrLogin } from "../domain/account-credential.rules";
 import { toUserResponseDto } from "../api/user.presenter";
-import type { Role } from "../../../domain";
 import type { UsersRepositoryPort, ProfileUpdate } from "./ports/users-repository.port";
 import type { UserResponseDto } from "../api/dto/user.response.dto";
 import type { CreateUserDto } from "../api/dto/create-user.dto";
@@ -53,7 +52,7 @@ export class UsersService {
   async updateUser(targetId: string, dto: UpdateUserDto): Promise<void> {
     const updates: ProfileUpdate = {};
     if (dto.fullName !== undefined) updates.fullName = dto.fullName;
-    if (dto.role !== undefined) updates.role = dto.role as Role;
+    if (dto.role !== undefined) updates.role = dto.role;
     if (dto.active !== undefined) updates.active = dto.active;
 
     if (Object.keys(updates).length === 0) {

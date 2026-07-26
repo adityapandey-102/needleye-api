@@ -4,13 +4,13 @@ import { asyncHandler } from "../../../common/http/async-handler";
 import { validateBody } from "../../../common/http/validate.middleware";
 import { AuthService } from "../application/auth.service";
 import { DrizzleAuthRepository } from "../infrastructure/drizzle-auth.repository";
-import { bootstrapDtoSchema } from "./dto/bootstrap.dto";
-import { loginDtoSchema } from "./dto/login.dto";
-import { refreshDtoSchema } from "./dto/refresh.dto";
-import { passwordResetRequestDtoSchema } from "./dto/password-reset-request.dto";
-import { passwordUpdateDtoSchema } from "./dto/password-update.dto";
-import { exchangeCodeDtoSchema } from "./dto/exchange-code.dto";
-import { qrLoginDtoSchema } from "./dto/qr-login.dto";
+import { bootstrapDtoSchema, type BootstrapDto } from "./dto/bootstrap.dto";
+import { loginDtoSchema, type LoginDto } from "./dto/login.dto";
+import { refreshDtoSchema, type RefreshDto } from "./dto/refresh.dto";
+import { passwordResetRequestDtoSchema, type PasswordResetRequestDto } from "./dto/password-reset-request.dto";
+import { passwordUpdateDtoSchema, type PasswordUpdateDto } from "./dto/password-update.dto";
+import { exchangeCodeDtoSchema, type ExchangeCodeDto } from "./dto/exchange-code.dto";
+import { qrLoginDtoSchema, type QrLoginDto } from "./dto/qr-login.dto";
 import { authProvider } from "../../../common/auth/supabase-auth-provider";
 
 /** Composition root for the Auth module -- wires the concrete (Infrastructure) adapter into the Application service. */
@@ -18,13 +18,9 @@ const authService = new AuthService(new DrizzleAuthRepository(authProvider));
 
 export const authRouter = Router();
 
-authRouter.get(
-  "/me",
-  requireAuth,
-  asyncHandler(async (req, res) => {
-    res.json({ profile: req.profile });
-  }),
-);
+authRouter.get("/me", requireAuth, (req, res) => {
+  res.json({ profile: req.profile });
+});
 
 authRouter.get(
   "/bootstrap-status",
@@ -37,7 +33,7 @@ authRouter.post(
   "/bootstrap",
   validateBody(bootstrapDtoSchema),
   asyncHandler(async (req, res) => {
-    await authService.bootstrap(req.body);
+    await authService.bootstrap(req.body as BootstrapDto);
     res.status(201).json({ ok: true });
   }),
 );
@@ -46,7 +42,7 @@ authRouter.post(
   "/login",
   validateBody(loginDtoSchema),
   asyncHandler(async (req, res) => {
-    res.json(await authService.login(req.body));
+    res.json(await authService.login(req.body as LoginDto));
   }),
 );
 
@@ -54,7 +50,7 @@ authRouter.post(
   "/refresh",
   validateBody(refreshDtoSchema),
   asyncHandler(async (req, res) => {
-    res.json(await authService.refresh(req.body));
+    res.json(await authService.refresh(req.body as RefreshDto));
   }),
 );
 
@@ -71,7 +67,7 @@ authRouter.post(
   "/password-reset-request",
   validateBody(passwordResetRequestDtoSchema),
   asyncHandler(async (req, res) => {
-    await authService.requestPasswordReset(req.body);
+    await authService.requestPasswordReset(req.body as PasswordResetRequestDto);
     // Always 204, whether or not the email matches an account -- never confirms existence.
     res.status(204).send();
   }),
@@ -82,7 +78,7 @@ authRouter.post(
   requireAuth,
   validateBody(passwordUpdateDtoSchema),
   asyncHandler(async (req, res) => {
-    await authService.updatePassword(req.authUserId!, req.body);
+    await authService.updatePassword(req.authUserId!, req.body as PasswordUpdateDto);
     res.status(204).send();
   }),
 );
@@ -91,7 +87,7 @@ authRouter.post(
   "/exchange-code",
   validateBody(exchangeCodeDtoSchema),
   asyncHandler(async (req, res) => {
-    res.json(await authService.exchangeCode(req.body));
+    res.json(await authService.exchangeCode(req.body as ExchangeCodeDto));
   }),
 );
 
@@ -99,6 +95,6 @@ authRouter.post(
   "/qr-login",
   validateBody(qrLoginDtoSchema),
   asyncHandler(async (req, res) => {
-    res.json(await authService.qrLogin(req.body));
+    res.json(await authService.qrLogin(req.body as QrLoginDto));
   }),
 );

@@ -43,8 +43,8 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
         .from(orders)
         .where(eq(orders.id, orderId))
         .limit(1);
-    } catch {
-      throw new InternalError("Failed to load order");
+    } catch (error) {
+      throw new InternalError("Failed to load order", error);
     }
     const row = rows[0];
     if (!row) return null;
@@ -60,8 +60,8 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
         .leftJoin(profiles, eq(profiles.id, payments.recordedBy))
         .where(eq(payments.orderId, orderId))
         .orderBy(desc(payments.paidAt));
-    } catch {
-      throw new InternalError("Failed to load payments");
+    } catch (error) {
+      throw new InternalError("Failed to load payments", error);
     }
     return rows.map((row) => this.mapper.toEntity(row));
   }
@@ -75,8 +75,8 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
         .leftJoin(profiles, eq(profiles.id, payments.recordedBy))
         .where(and(eq(payments.orderId, orderId), eq(payments.id, paymentId)))
         .limit(1);
-    } catch {
-      throw new InternalError("Failed to load payment");
+    } catch (error) {
+      throw new InternalError("Failed to load payment", error);
     }
     const row = rows[0];
     return row ? this.mapper.toEntity(row) : null;
@@ -90,8 +90,8 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
         .select({ total: sql<string>`coalesce(sum(${payments.amount}), 0)` })
         .from(payments)
         .where(eq(payments.orderId, orderId));
-    } catch {
-      throw new InternalError("Failed to sum payments");
+    } catch (error) {
+      throw new InternalError("Failed to sum payments", error);
     }
     return Number(rows[0]?.total ?? 0);
   }
@@ -110,8 +110,8 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
           notes: record.notes,
         })
         .returning({ id: payments.id });
-    } catch {
-      throw new InternalError("Failed to record payment");
+    } catch (error) {
+      throw new InternalError("Failed to record payment", error);
     }
     if (!inserted) throw new InternalError("Failed to record payment");
 
@@ -124,8 +124,8 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
     let existing;
     try {
       [existing] = await db.select({ orderId: payments.orderId }).from(payments).where(eq(payments.id, paymentId)).limit(1);
-    } catch {
-      throw new InternalError("Failed to update payment");
+    } catch (error) {
+      throw new InternalError("Failed to update payment", error);
     }
     if (!existing) throw new InternalError("Payment not found");
 
@@ -137,8 +137,8 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
 
     try {
       await db.update(payments).set(record).where(eq(payments.id, paymentId));
-    } catch {
-      throw new InternalError("Failed to update payment");
+    } catch (error) {
+      throw new InternalError("Failed to update payment", error);
     }
 
     const entity = await this.findById(existing.orderId, paymentId);
@@ -149,8 +149,8 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
   async delete(paymentId: string): Promise<void> {
     try {
       await db.delete(payments).where(eq(payments.id, paymentId));
-    } catch {
-      throw new InternalError("Failed to delete payment");
+    } catch (error) {
+      throw new InternalError("Failed to delete payment", error);
     }
   }
 }

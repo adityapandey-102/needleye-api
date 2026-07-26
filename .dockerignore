@@ -1,0 +1,10 @@
+node_modules
+dist
+drizzle
+supabase/.temp
+tests
+docs
+*.md
+.env
+.env.local
+.git

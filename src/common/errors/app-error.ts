@@ -10,8 +10,8 @@ export class AppError extends Error {
   readonly code: string;
   readonly details?: unknown;
 
-  constructor(statusCode: number, message: string, code: string, details?: unknown) {
-    super(message);
+  constructor(statusCode: number, message: string, code: string, details?: unknown, cause?: unknown) {
+    super(message, cause !== undefined ? { cause } : undefined);
     this.name = "AppError";
     this.statusCode = statusCode;
     this.code = code;
@@ -49,9 +49,15 @@ export class ConflictError extends AppError {
   }
 }
 
-/** For unexpected persistence/infra failures -- message is safe to show, real detail goes to server logs only. */
+/**
+ * For unexpected persistence/infra failures -- message is safe to show,
+ * real detail goes to server logs only. `cause` is the original error
+ * (e.g. the raw pg/Postgrest error) repositories catch and wrap -- see
+ * error.middleware.ts, which logs it. Never put `cause` in `details`:
+ * `details` can reach the client response, `cause` never does.
+ */
 export class InternalError extends AppError {
-  constructor(message = "Internal server error") {
-    super(500, message, "INTERNAL");
+  constructor(message = "Internal server error", cause?: unknown) {
+    super(500, message, "INTERNAL", undefined, cause);
   }
 }

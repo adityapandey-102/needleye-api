@@ -36,6 +36,15 @@ const schema = {
   ...orderRelationsSchema,
 };
 
-const pool = new Pool({ connectionString: env.DATABASE_URL });
+const pool = new Pool({
+  connectionString: env.DATABASE_URL,
+  // Explicit bounds rather than pg's silent defaults: cap concurrent
+  // connections (the whole app shares this one pool), reap idle ones, and --
+  // most importantly -- fail a request fast if no connection is available
+  // within 5s instead of hanging it forever (pg's default is no timeout).
+  max: 10,
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 5_000,
+});
 
 export const db = drizzle(pool, { schema });

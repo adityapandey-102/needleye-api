@@ -1,12 +1,12 @@
-import { Router } from "express";
+import { Router, type Request } from "express";
 import multer from "multer";
 import { requireAuth } from "../../../common/middleware/auth.middleware";
 import { requireCapability } from "../../../common/middleware/capability.middleware";
 import { asyncHandler } from "../../../common/http/async-handler";
 import { validateBody } from "../../../common/http/validate.middleware";
-import { createOrderDtoSchema } from "./dto/create-order.dto";
+import { createOrderDtoSchema, type CreateOrderDto } from "./dto/create-order.dto";
 import { updateOrderDtoSchema, type UpdateOrderDto } from "./dto/update-order.dto";
-import { updateOrderStatusDtoSchema } from "./dto/update-order-status.dto";
+import { updateOrderStatusDtoSchema, type UpdateOrderStatusDto } from "./dto/update-order-status.dto";
 import { validateImageUpload } from "./orders.validation";
 import { OrdersService } from "../application/orders.service";
 import { DrizzleOrdersRepository } from "../infrastructure/drizzle-orders.repository";
@@ -18,6 +18,18 @@ const ordersService = new OrdersService(new DrizzleOrdersRepository(), storagePr
 export const ordersRouter = Router();
 const upload = multer({ limits: { fileSize: 10 * 1024 * 1024 } });
 
+/** Pagination bounds for GET /orders -- keep the default list response bounded, cap how much one request can pull. */
+const DEFAULT_ORDERS_LIMIT = 20;
+const MAX_ORDERS_LIMIT = 100;
+
+function parseOrdersPage(query: Request["query"]): { limit: number; offset: number } {
+  const rawLimit = Number(query.limit);
+  const rawOffset = Number(query.offset);
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), MAX_ORDERS_LIMIT) : DEFAULT_ORDERS_LIMIT;
+  const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? Math.floor(rawOffset) : 0;
+  return { limit, offset };
+}
+
 ordersRouter.use(requireAuth);
 
 ordersRouter.get(
@@ -25,7 +37,7 @@ ordersRouter.get(
   requireCapability("orders:read"),
   asyncHandler(async (req, res) => {
     const { search, status, designerId, masterTailorId } = req.query;
-    const orders = await ordersService.listOrders(
+    const result = await ordersService.listOrders(
       { profile: req.profile!, authUserId: req.authUserId! },
       {
         search: typeof search === "string" ? search : undefined,
@@ -33,8 +45,9 @@ ordersRouter.get(
         designerId: typeof designerId === "string" ? designerId : undefined,
         masterTailorId: typeof masterTailorId === "string" ? masterTailorId : undefined,
       },
+      parseOrdersPage(req.query),
     );
-    res.json({ orders });
+    res.json(result);
   }),
 );
 
@@ -62,7 +75,7 @@ ordersRouter.post(
   requireCapability("orders:create"),
   validateBody(createOrderDtoSchema),
   asyncHandler(async (req, res) => {
-    const order = await ordersService.createOrder({ profile: req.profile!, authUserId: req.authUserId! }, req.body);
+    const order = await ordersService.createOrder({ profile: req.profile!, authUserId: req.authUserId! }, req.body as CreateOrderDto);
     res.status(201).json({ order });
   }),
 );
@@ -85,7 +98,8 @@ ordersRouter.patch(
   "/:id/status",
   validateBody(updateOrderStatusDtoSchema),
   asyncHandler(async (req, res) => {
-    const order = await ordersService.updateStatus({ profile: req.profile!, authUserId: req.authUserId! }, req.params.id!, req.body.status);
+    const { status } = req.body as UpdateOrderStatusDto;
+    const order = await ordersService.updateStatus({ profile: req.profile!, authUserId: req.authUserId! }, req.params.id!, status);
     res.json({ order });
   }),
 );
@@ -104,7 +118,8 @@ ordersRouter.post(
   requireCapability("orders:edit:customer_product_fields"),
   upload.single("file"),
   asyncHandler(async (req, res) => {
-    const slot = Number(req.body.slot);
+    // multipart/form-data, not JSON -- multer puts text fields on req.body as plain strings, no validateBody DTO for this one (see orders.validation.ts).
+    const slot = Number((req.body as { slot?: string }).slot);
     validateImageUpload(slot, req.file);
 
     const result = await ordersService.uploadOrderImage(

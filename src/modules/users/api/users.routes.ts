@@ -3,8 +3,8 @@ import { requireAuth } from "../../../common/middleware/auth.middleware";
 import { requireCapability } from "../../../common/middleware/capability.middleware";
 import { asyncHandler } from "../../../common/http/async-handler";
 import { validateBody } from "../../../common/http/validate.middleware";
-import { createUserDtoSchema } from "./dto/create-user.dto";
-import { updateUserDtoSchema } from "./dto/update-user.dto";
+import { createUserDtoSchema, type CreateUserDto } from "./dto/create-user.dto";
+import { updateUserDtoSchema, type UpdateUserDto } from "./dto/update-user.dto";
 import { UsersService } from "../application/users.service";
 import { DrizzleUsersRepository } from "../infrastructure/drizzle-users.repository";
 import { authProvider } from "../../../common/auth/supabase-auth-provider";
@@ -27,7 +27,7 @@ usersRouter.post(
   "/",
   validateBody(createUserDtoSchema),
   asyncHandler(async (req, res) => {
-    const result = await usersService.createUser(req.body);
+    const result = await usersService.createUser(req.body as CreateUserDto);
     res.status(201).json(result);
   }),
 );
@@ -52,7 +52,7 @@ usersRouter.patch(
   "/:id",
   validateBody(updateUserDtoSchema),
   asyncHandler(async (req, res) => {
-    await usersService.updateUser(req.params.id!, req.body);
+    await usersService.updateUser(req.params.id!, req.body as UpdateUserDto);
     res.status(204).send();
   }),
 );

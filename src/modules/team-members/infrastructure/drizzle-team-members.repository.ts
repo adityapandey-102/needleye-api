@@ -25,8 +25,8 @@ export class DrizzleTeamMembersRepository implements TeamMembersRepositoryPort {
         .from(profiles)
         .where(condition)
         .orderBy(profiles.fullName);
-    } catch {
-      throw new InternalError("Failed to load team members");
+    } catch (error) {
+      throw new InternalError("Failed to load team members", error);
     }
   }
 }

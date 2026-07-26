@@ -38,6 +38,7 @@ classDiagram
             +statusCode number
             +code string
             +details unknown
+            +cause unknown
         }
         class BadRequestError["BadRequestError (400)"]
         class UnauthorizedError["UnauthorizedError (401)"]

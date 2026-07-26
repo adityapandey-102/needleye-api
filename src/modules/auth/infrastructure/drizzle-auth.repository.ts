@@ -27,8 +27,8 @@ export class DrizzleAuthRepository implements AuthRepositoryPort {
         .select({ count: sql<number>`count(*)::int` })
         .from(profiles)
         .where(eq(profiles.role, "owner_manager"));
-    } catch {
-      throw new InternalError("Failed to check bootstrap status");
+    } catch (error) {
+      throw new InternalError("Failed to check bootstrap status", error);
     }
     return rows[0]?.count ?? 0;
   }
@@ -84,8 +84,8 @@ export class DrizzleAuthRepository implements AuthRepositoryPort {
     let qrRows;
     try {
       qrRows = await db.select({ profileId: qrLoginTokens.profileId }).from(qrLoginTokens).where(eq(qrLoginTokens.tokenHash, tokenHash)).limit(1);
-    } catch {
-      throw new InternalError("Failed to verify QR login token");
+    } catch (error) {
+      throw new InternalError("Failed to verify QR login token", error);
     }
     const qrRow = qrRows[0];
     if (!qrRow) throw new UnauthorizedError("Invalid or expired QR code");
@@ -97,8 +97,8 @@ export class DrizzleAuthRepository implements AuthRepositoryPort {
         .from(profiles)
         .where(eq(profiles.id, qrRow.profileId))
         .limit(1);
-    } catch {
-      throw new InternalError("Failed to verify QR login token");
+    } catch (error) {
+      throw new InternalError("Failed to verify QR login token", error);
     }
     const profileRow = profileRows[0];
     if (!profileRow || !profileRow.active) throw new UnauthorizedError("Invalid or expired QR code");
@@ -109,8 +109,8 @@ export class DrizzleAuthRepository implements AuthRepositoryPort {
   async recordLogin(userId: string): Promise<void> {
     try {
       await db.update(profiles).set({ lastLoginAt: new Date() }).where(eq(profiles.id, userId));
-    } catch {
-      throw new InternalError("Failed to record login");
+    } catch (error) {
+      throw new InternalError("Failed to record login", error);
     }
   }
 }

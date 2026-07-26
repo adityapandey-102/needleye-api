@@ -1,30 +1,27 @@
 import { canViewPaymentFields } from "../domain/order-visibility.rules";
-import type { StorageProvider } from "../../../common/storage/storage-provider";
 import type { Role } from "../../../domain";
 import type { OrderEntity } from "../domain/order.entity";
 import type { OrderResponseDto } from "./dto/order.response.dto";
 
 /**
- * Domain entity -> API response DTO: resolves each image's signed URL (I/O,
- * hence async -- this is why it's a separate step from the repository's
- * row->entity mapping rather than folded into it) and strips payment
- * fields the caller's role can't see. Takes `storageProvider` as a plain
- * argument (rather than a constructor dependency, unlike OrdersService)
- * so this stays a plain function, consistent with every other converted
- * module's presenter.
+ * Domain entity -> API response DTO: attaches each image's signed URL and
+ * strips payment fields the caller's role can't see. Signed URLs are
+ * resolved by the caller (OrdersService) in a single batched storage call
+ * and passed in as a path->url map, so this stays a pure, synchronous
+ * function -- the URL I/O was pulled up to the service specifically to
+ * avoid an N+1 across a list of orders (see OrdersService.signImageUrls).
+ * A path missing from the map degrades to an empty URL rather than failing.
  */
-export async function toOrderResponseDto(
+export function toOrderResponseDto(
   entity: OrderEntity,
   amountPaid: number,
   role: Role,
-  storageProvider: StorageProvider,
-): Promise<OrderResponseDto> {
-  const images = await Promise.all(
-    entity.images.map(async (img) => ({
-      ...img,
-      url: await storageProvider.getSignedUrl(img.storagePath),
-    })),
-  );
+  signedUrls: Map<string, string>,
+): OrderResponseDto {
+  const images = entity.images.map((img) => ({
+    ...img,
+    url: signedUrls.get(img.storagePath) ?? "",
+  }));
 
   const dto: OrderResponseDto = {
     ...entity,
