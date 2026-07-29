@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { requireAuth } from "../../../common/middleware/auth.middleware";
+import { authRateLimiter } from "../../../common/middleware/rate-limit.middleware";
 import { asyncHandler } from "../../../common/http/async-handler";
 import { validateBody } from "../../../common/http/validate.middleware";
 import { AuthService } from "../application/auth.service";
@@ -31,6 +32,7 @@ authRouter.get(
 
 authRouter.post(
   "/bootstrap",
+  authRateLimiter,
   validateBody(bootstrapDtoSchema),
   asyncHandler(async (req, res) => {
     await authService.bootstrap(req.body as BootstrapDto);
@@ -40,6 +42,7 @@ authRouter.post(
 
 authRouter.post(
   "/login",
+  authRateLimiter,
   validateBody(loginDtoSchema),
   asyncHandler(async (req, res) => {
     res.json(await authService.login(req.body as LoginDto));
@@ -48,6 +51,7 @@ authRouter.post(
 
 authRouter.post(
   "/refresh",
+  authRateLimiter,
   validateBody(refreshDtoSchema),
   asyncHandler(async (req, res) => {
     res.json(await authService.refresh(req.body as RefreshDto));
@@ -65,6 +69,7 @@ authRouter.post(
 
 authRouter.post(
   "/password-reset-request",
+  authRateLimiter,
   validateBody(passwordResetRequestDtoSchema),
   asyncHandler(async (req, res) => {
     await authService.requestPasswordReset(req.body as PasswordResetRequestDto);
@@ -75,6 +80,7 @@ authRouter.post(
 
 authRouter.post(
   "/password-update",
+  authRateLimiter,
   requireAuth,
   validateBody(passwordUpdateDtoSchema),
   asyncHandler(async (req, res) => {
@@ -85,6 +91,7 @@ authRouter.post(
 
 authRouter.post(
   "/exchange-code",
+  authRateLimiter,
   validateBody(exchangeCodeDtoSchema),
   asyncHandler(async (req, res) => {
     res.json(await authService.exchangeCode(req.body as ExchangeCodeDto));
@@ -93,6 +100,7 @@ authRouter.post(
 
 authRouter.post(
   "/qr-login",
+  authRateLimiter,
   validateBody(qrLoginDtoSchema),
   asyncHandler(async (req, res) => {
     res.json(await authService.qrLogin(req.body as QrLoginDto));

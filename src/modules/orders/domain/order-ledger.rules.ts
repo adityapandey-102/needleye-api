@@ -1,4 +1,5 @@
 import { ConflictError } from "../../../common/errors/app-error";
+import { ERROR_CODES } from "../../../common/errors/error-codes";
 
 /**
  * An order can only be marked fully_paid if the recorded ledger sum already
@@ -14,6 +15,7 @@ export function assertOrderCanBeMarkedFullyPaid(paymentsSum: number, totalAmount
     throw new ConflictError(
       `Cannot mark this order fully paid: the recorded payments total (₹${paymentsSum}) does not match ` +
         `the order total (₹${totalAmount}). Record the remaining payment first.`,
+      ERROR_CODES.ORDER_PAYMENT_MISMATCH,
     );
   }
 }

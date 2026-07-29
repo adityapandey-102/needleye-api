@@ -3,13 +3,14 @@ import { randomUUID } from "node:crypto";
 import { logger } from "./logger";
 
 /**
- * Logs every request/response (method, path, status, duration) and attaches
- * `req.log` -- a child logger already carrying the request id -- so any
- * handler or middleware can log with request context for free, without
- * threading a logger through every function signature.
+ * Logs every request/response with a consistent shape -- method, path,
+ * status, duration (pino-http's `responseTime`), request id, and (once
+ * authenticated) the caller's user id and role. Attaches `req.log`, a child
+ * logger already carrying the request id, so any handler/middleware logs
+ * with request context for free without threading a logger everywhere.
  *
- * `authorization` is redacted: the bearer token must never end up in a log
- * line, in dev or prod.
+ * Sensitive material is redacted, in dev and prod alike: the bearer token
+ * (`authorization`) and any cookies -- these must never reach a log line.
  */
 export const requestLogger = pinoHttp({
   logger,
@@ -20,8 +21,22 @@ export const requestLogger = pinoHttp({
     return id;
   },
   redact: {
-    paths: ["req.headers.authorization", "res.headers.authorization"],
+    paths: [
+      "req.headers.authorization",
+      "req.headers.cookie",
+      "res.headers.authorization",
+      'res.headers["set-cookie"]',
+    ],
     censor: "[redacted]",
+  },
+  // Identity of the caller, added to every request log once requireAuth has
+  // run. `req.profile` is populated before the handler, so it's present by
+  // the time this fires at response finish (absent on unauthenticated routes).
+  // pino-http types `req` as the raw IncomingMessage, so reach the Express
+  // augmentation (auth.middleware.ts's `Request.profile`) via a narrow cast.
+  customProps: (req) => {
+    const profile = (req as { profile?: { id: string; role: string } }).profile;
+    return { userId: profile?.id, role: profile?.role };
   },
   customLogLevel: (_req, res, err) => {
     if (err || res.statusCode >= 500) return "error";

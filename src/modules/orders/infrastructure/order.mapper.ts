@@ -19,6 +19,7 @@ export type OrderQueryResult = {
   paymentStatus: OrderEntity["paymentStatus"];
   totalAmount: string;
   productionStatus: OrderEntity["productionStatus"];
+  version: number;
   designerInstructions: string | null;
   specialNotes: string | null;
   createdBy: string | null;
@@ -63,6 +64,7 @@ export const OrderMapper = {
       productionStatus: row.productionStatus,
       designerInstructions: row.designerInstructions,
       specialNotes: row.specialNotes,
+      version: row.version,
       images: row.images
         .sort((a, b) => a.slot - b.slot)
         .map((img) => ({

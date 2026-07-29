@@ -7,6 +7,7 @@ import { qrLoginTokens } from "./qr-login.schema";
 import { fetchActiveProfile } from "../../../common/database/profiles";
 import { hashToken } from "../../../common/crypto/credentials";
 import { InternalError, UnauthorizedError } from "../../../common/errors/app-error";
+import { ERROR_CODES } from "../../../common/errors/error-codes";
 import type { AuthProvider, AuthSession } from "../../../common/auth/auth-provider";
 import type { Profile } from "../../../domain";
 import type { AuthRepositoryPort } from "../application/ports/auth-repository.port";
@@ -88,7 +89,7 @@ export class DrizzleAuthRepository implements AuthRepositoryPort {
       throw new InternalError("Failed to verify QR login token", error);
     }
     const qrRow = qrRows[0];
-    if (!qrRow) throw new UnauthorizedError("Invalid or expired QR code");
+    if (!qrRow) throw new UnauthorizedError("Invalid or expired QR code", ERROR_CODES.AUTH_QR_INVALID);
 
     let profileRows;
     try {
@@ -101,7 +102,7 @@ export class DrizzleAuthRepository implements AuthRepositoryPort {
       throw new InternalError("Failed to verify QR login token", error);
     }
     const profileRow = profileRows[0];
-    if (!profileRow || !profileRow.active) throw new UnauthorizedError("Invalid or expired QR code");
+    if (!profileRow || !profileRow.active) throw new UnauthorizedError("Invalid or expired QR code", ERROR_CODES.AUTH_QR_INVALID);
 
     return this.authProvider.mintSessionForUser(profileRow.email);
   }

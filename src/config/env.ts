@@ -13,6 +13,11 @@ const envSchema = z.object({
   /** Where the frontend lives -- used to build the redirect URL Supabase puts in password-reset emails. */
   WEB_APP_URL: z.string().default("http://localhost:3000"),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
+  /** Queries slower than this (ms) are logged at WARN for observability. See common/database/query-timing. */
+  SLOW_QUERY_MS: z.coerce.number().default(250),
+  /** Auth rate-limit window (ms) and max requests per window per IP. Defaults: 15 min / 30 attempts. */
+  AUTH_RATE_LIMIT_WINDOW_MS: z.coerce.number().default(15 * 60 * 1000),
+  AUTH_RATE_LIMIT_MAX: z.coerce.number().default(30),
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -1,6 +1,7 @@
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { env } from "../../config/env";
+import { instrumentPoolTiming } from "./query-timing";
 import * as paymentsSchema from "../../modules/payments/infrastructure/payments.schema";
 import * as usersSchema from "../../modules/users/infrastructure/profile.schema";
 import * as authSchema from "../../modules/auth/infrastructure/qr-login.schema";
@@ -9,6 +10,7 @@ import * as orderImageSchema from "../../modules/orders/infrastructure/order-ima
 import * as orderCounterSchema from "../../modules/orders/infrastructure/order-counter.schema";
 import * as orderStatusHistorySchema from "../../modules/orders/infrastructure/order-status-history.schema";
 import * as orderRelationsSchema from "../../modules/orders/infrastructure/order.relations";
+import * as auditLogSchema from "../audit/audit-log.schema";
 
 /**
  * The one Postgres connection pool every repository queries through.
@@ -34,6 +36,7 @@ const schema = {
   ...orderCounterSchema,
   ...orderStatusHistorySchema,
   ...orderRelationsSchema,
+  ...auditLogSchema,
 };
 
 const pool = new Pool({
@@ -46,5 +49,9 @@ const pool = new Pool({
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 5_000,
 });
+
+// Slow-query observability -- logs any statement over SLOW_QUERY_MS. Must wrap
+// the pool before Drizzle starts issuing queries through it.
+instrumentPoolTiming(pool);
 
 export const db = drizzle(pool, { schema });

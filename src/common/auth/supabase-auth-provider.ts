@@ -1,5 +1,6 @@
 import { supabaseClient, supabaseAuthClient } from "../database/supabase-client";
 import { BadRequestError, InternalError, UnauthorizedError } from "../errors/app-error";
+import { ERROR_CODES } from "../errors/error-codes";
 import type { AuthProvider, AuthSession, NewAuthUser } from "./auth-provider";
 
 function toAuthSession(session: {
@@ -28,13 +29,13 @@ function toAuthSession(session: {
 export class SupabaseAuthProvider implements AuthProvider {
   async signInWithPassword(email: string, password: string): Promise<AuthSession> {
     const { data, error } = await supabaseAuthClient.auth.signInWithPassword({ email, password });
-    if (error || !data.session) throw new UnauthorizedError("Invalid email or password");
+    if (error || !data.session) throw new UnauthorizedError("Invalid email or password", ERROR_CODES.AUTH_INVALID_CREDENTIALS);
     return toAuthSession(data.session);
   }
 
   async refreshSession(refreshToken: string): Promise<AuthSession> {
     const { data, error } = await supabaseAuthClient.auth.refreshSession({ refresh_token: refreshToken });
-    if (error || !data.session) throw new UnauthorizedError("Invalid or expired session");
+    if (error || !data.session) throw new UnauthorizedError("Invalid or expired session", ERROR_CODES.AUTH_SESSION_INVALID);
     return toAuthSession(data.session);
   }
 
@@ -63,7 +64,7 @@ export class SupabaseAuthProvider implements AuthProvider {
 
   async exchangeCodeForSession(code: string): Promise<AuthSession> {
     const { data, error } = await supabaseAuthClient.auth.exchangeCodeForSession(code);
-    if (error || !data.session) throw new UnauthorizedError("Invalid or expired link");
+    if (error || !data.session) throw new UnauthorizedError("Invalid or expired link", ERROR_CODES.AUTH_LINK_INVALID);
     return toAuthSession(data.session);
   }
 

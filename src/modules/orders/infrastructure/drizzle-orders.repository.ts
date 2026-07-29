@@ -9,7 +9,8 @@ import { payments } from "../../payments/infrastructure/payments.schema";
 // Cross-module Infrastructure-only read: `profiles` is owned by the Users
 // module's schema. See docs/adr/0003-per-module-schema-ownership.md.
 import { profiles } from "../../users/infrastructure/profile.schema";
-import { InternalError } from "../../../common/errors/app-error";
+import { ConflictError, InternalError, NotFoundError } from "../../../common/errors/app-error";
+import { ERROR_CODES } from "../../../common/errors/error-codes";
 import { CANONICAL_TO_GRANULAR, COMPLETED_CANONICAL_STAGES, granularLabel, type GranularStatus } from "../../../domain";
 import { OrderMapper, type OrderQueryResult } from "./order.mapper";
 import { OrderStatusHistoryMapper, type OrderStatusHistoryRow } from "./order-status-history.mapper";
@@ -226,17 +227,37 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     return entity;
   }
 
-  async update(id: string, data: UpdateOrderRecord): Promise<OrderEntity> {
+  async update(id: string, data: UpdateOrderRecord, expectedVersion?: number): Promise<OrderEntity> {
     // updated_at is deliberately not touched: orders_set_updated_at (a
-    // BEFORE UPDATE trigger) already keeps it current.
+    // BEFORE UPDATE trigger) already keeps it current. `version` is always
+    // bumped so the next reader/editor sees a moved-on value (optimistic lock).
     const { totalAmount, ...rest } = data;
     const record: Partial<typeof orders.$inferInsert> = { ...rest };
     if (totalAmount !== undefined) record.totalAmount = String(totalAmount);
 
+    // When a version is supplied, the write only lands if the stored version
+    // still matches -- so a concurrent edit (holding the old version) hits 0 rows.
+    const where =
+      expectedVersion !== undefined ? and(eq(orders.id, id), eq(orders.version, expectedVersion)) : eq(orders.id, id);
+
+    let updated: { id: string }[];
     try {
-      await db.update(orders).set(record).where(eq(orders.id, id));
+      updated = await db
+        .update(orders)
+        .set({ ...record, version: sql`${orders.version} + 1` })
+        .where(where)
+        .returning({ id: orders.id });
     } catch (error) {
       throw new InternalError("Failed to save order", error);
+    }
+
+    if (updated.length === 0) {
+      // Nothing matched. With a version guard, disambiguate "gone" from
+      // "changed under me" so the client can show the right message.
+      if (expectedVersion !== undefined && (await this.findByIdUnscoped(id))) {
+        throw new ConflictError("This order was changed by someone else. Reload and try again.", ERROR_CODES.ORDER_MODIFIED);
+      }
+      throw new NotFoundError("Order not found", ERROR_CODES.ORDER_NOT_FOUND);
     }
 
     const entity = await this.findByIdUnscoped(id);

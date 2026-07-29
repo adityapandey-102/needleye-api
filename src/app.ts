@@ -6,6 +6,7 @@ import { sql } from "drizzle-orm";
 import { env } from "./config/env";
 import { db } from "./common/database/drizzle-client";
 import { requestLogger } from "./common/logger/request-logger.middleware";
+import { requestContextMiddleware } from "./common/context/request-context.middleware";
 import { authRouter } from "./modules/auth/api/auth.routes";
 import { usersRouter } from "./modules/users/api/users.routes";
 import { ordersRouter } from "./modules/orders/api/orders.routes";
@@ -23,7 +24,16 @@ import { openApiDocument } from "./docs/openapi";
 export function createApp() {
   const app = express();
 
+  // Behind a hosting proxy (Railway/Render/Fly/etc.) the real client IP is in
+  // X-Forwarded-For; trust one hop so the rate limiter keys on the actual
+  // client, not the proxy. Only in production -- locally there's no proxy, and
+  // trusting the header there would let anything spoof its IP.
+  if (env.NODE_ENV === "production") app.set("trust proxy", 1);
+
   app.use(requestLogger);
+  // Must come right after the request logger: it reads req.id (set above) so
+  // the request-scoped context's id matches the logged req/res id.
+  app.use(requestContextMiddleware);
 
   // Secure HTTP headers (HSTS, no-sniff, frameguard, hidden X-Powered-By,
   // etc). CSP is off globally -- this is a pure JSON API with no HTML views
@@ -37,7 +47,15 @@ export function createApp() {
   // reads or sets cookies, so cross-origin requests never need to carry them
   // (this is also why CSRF protection doesn't apply here -- CSRF exploits
   // ambient cookie-based auth, which this API never has).
-  app.use(cors({ origin: env.CORS_ALLOWED_ORIGIN }));
+  //
+  // CORS_ALLOWED_ORIGIN may be a single origin or a comma-separated list, so a
+  // dev machine can allow both http://localhost:3000 and its LAN IP (phone
+  // testing), or a prod deploy can allow a primary + preview domain. An exact
+  // allow-list -- never a wildcard.
+  const allowedOrigins = env.CORS_ALLOWED_ORIGIN.split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+  app.use(cors({ origin: allowedOrigins }));
   app.use(express.json());
 
   // Liveness: is the process up and serving? No dependencies checked -- an

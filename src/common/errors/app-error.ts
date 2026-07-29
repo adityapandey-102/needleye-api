@@ -4,6 +4,11 @@
  * single error-handling middleware (common/middleware/error.middleware.ts)
  * is the only place that turns them into HTTP responses, so every error the
  * API returns has the same shape: { error: string, code: string, details?: unknown }.
+ *
+ * Each subclass carries the right HTTP status; the `code` is a **stable
+ * application error code** from the ERROR_CODES registry (see error-codes.ts)
+ * that clients branch on. Each subclass defaults to a generic code for its
+ * status and lets the throw site pass a more specific one.
  */
 export class AppError extends Error {
   readonly statusCode: number;
@@ -20,32 +25,32 @@ export class AppError extends Error {
 }
 
 export class BadRequestError extends AppError {
-  constructor(message = "Invalid request", details?: unknown) {
-    super(400, message, "BAD_REQUEST", details);
+  constructor(message = "Invalid request", code = "BAD_REQUEST", details?: unknown) {
+    super(400, message, code, details);
   }
 }
 
 export class UnauthorizedError extends AppError {
-  constructor(message = "Authentication required") {
-    super(401, message, "UNAUTHORIZED");
+  constructor(message = "Authentication required", code = "UNAUTHORIZED") {
+    super(401, message, code);
   }
 }
 
 export class ForbiddenError extends AppError {
-  constructor(message = "You do not have access to perform this action") {
-    super(403, message, "FORBIDDEN");
+  constructor(message = "You do not have access to perform this action", code = "FORBIDDEN") {
+    super(403, message, code);
   }
 }
 
 export class NotFoundError extends AppError {
-  constructor(message = "Resource not found") {
-    super(404, message, "NOT_FOUND");
+  constructor(message = "Resource not found", code = "NOT_FOUND") {
+    super(404, message, code);
   }
 }
 
 export class ConflictError extends AppError {
-  constructor(message = "Conflicting state") {
-    super(409, message, "CONFLICT");
+  constructor(message = "Conflicting state", code = "CONFLICT") {
+    super(409, message, code);
   }
 }
 

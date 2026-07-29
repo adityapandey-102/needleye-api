@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, boolean, timestamp, numeric, date } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, boolean, timestamp, numeric, date, integer } from "drizzle-orm/pg-core";
 import type { GranularStatus, ProductCategory, PaymentStatus } from "../../../domain";
 
 /**
@@ -33,6 +33,7 @@ export const orders = pgTable("orders", {
   specialNotes: text("special_notes"),
   createdBy: uuid("created_by"),
   updatedBy: uuid("updated_by"),
+  version: integer("version").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

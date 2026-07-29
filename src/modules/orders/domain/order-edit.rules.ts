@@ -1,5 +1,6 @@
 import { getCapabilityScope } from "../../../domain";
 import { ForbiddenError } from "../../../common/errors/app-error";
+import { ERROR_CODES } from "../../../common/errors/error-codes";
 import type { Role } from "../../../domain";
 
 /** Pricing/assignment fields are gated by a separate capability from every other editable field. */
@@ -25,10 +26,10 @@ export function assertFieldsEditable(role: Role, submittedKeys: string[]): Field
   const touchesCustomerProduct = submittedKeys.some((k) => !PRICING_FIELDS.has(k));
 
   if (touchesPricing && pricingScope === false) {
-    throw new ForbiddenError("Your role cannot edit pricing or assignment fields");
+    throw new ForbiddenError("Your role cannot edit pricing or assignment fields", ERROR_CODES.ORDER_EDIT_FORBIDDEN);
   }
   if (touchesCustomerProduct && customerProductScope === false) {
-    throw new ForbiddenError("Your role cannot edit order details");
+    throw new ForbiddenError("Your role cannot edit order details", ERROR_CODES.ORDER_EDIT_FORBIDDEN);
   }
 
   const needsOwnershipCheck =
@@ -40,6 +41,6 @@ export function assertFieldsEditable(role: Role, submittedKeys: string[]): Field
 /** A scoped ("assigned") edit is only allowed on the caller's own order -- shared by updateOrder and the image upload/delete flows. */
 export function assertOwnershipForScopedEdit(designerId: string, callerId: string): void {
   if (designerId !== callerId) {
-    throw new ForbiddenError("You can only edit orders assigned to you");
+    throw new ForbiddenError("You can only edit orders assigned to you", ERROR_CODES.ORDER_NOT_ASSIGNED);
   }
 }

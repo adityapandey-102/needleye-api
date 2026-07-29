@@ -1,15 +1,22 @@
 import { env } from "../../../config/env";
 import { BadRequestError, NotFoundError } from "../../../common/errors/app-error";
+import { ERROR_CODES } from "../../../common/errors/error-codes";
 import { generatePassword, generateQrToken, hashToken } from "../../../common/crypto/credentials";
 import { assertPasswordCanBeRegenerated, assertRoleSupportsQrLogin } from "../domain/account-credential.rules";
 import { toUserResponseDto } from "../api/user.presenter";
+import { AUDIT_ACTIONS, AUDIT_ENTITIES } from "../../../common/audit/audit-actions";
+import { auditLogger as defaultAuditLogger } from "../../../common/audit/drizzle-audit-logger";
+import type { AuditLogger } from "../../../common/audit/audit-logger";
 import type { UsersRepositoryPort, ProfileUpdate } from "./ports/users-repository.port";
 import type { UserResponseDto } from "../api/dto/user.response.dto";
 import type { CreateUserDto } from "../api/dto/create-user.dto";
 import type { UpdateUserDto } from "../api/dto/update-user.dto";
 
 export class UsersService {
-  constructor(private readonly usersRepository: UsersRepositoryPort) {}
+  constructor(
+    private readonly usersRepository: UsersRepositoryPort,
+    private readonly audit: AuditLogger = defaultAuditLogger,
+  ) {}
 
   async listUsers(): Promise<UserResponseDto[]> {
     const entities = await this.usersRepository.findAll();
@@ -24,28 +31,36 @@ export class UsersService {
   async createUser(dto: CreateUserDto): Promise<{ userId: string; password: string }> {
     const password = generatePassword(dto.fullName);
     const userId = await this.usersRepository.createUser(dto.email, dto.fullName, dto.role, password);
+    await this.audit.record({
+      action: AUDIT_ACTIONS.USER_CREATED,
+      entityType: AUDIT_ENTITIES.USER,
+      entityId: userId,
+      metadata: { role: dto.role },
+    });
     return { userId, password };
   }
 
   async generatePassword(targetId: string): Promise<{ password: string }> {
     const target = await this.usersRepository.findById(targetId);
-    if (!target) throw new NotFoundError("User not found");
+    if (!target) throw new NotFoundError("User not found", ERROR_CODES.USER_NOT_FOUND);
 
     assertPasswordCanBeRegenerated(target.role, target.lastLoginAt);
 
     const password = generatePassword(target.fullName);
     await this.usersRepository.setPassword(targetId, password);
+    await this.audit.record({ action: AUDIT_ACTIONS.USER_PASSWORD_REGENERATED, entityType: AUDIT_ENTITIES.USER, entityId: targetId });
     return { password };
   }
 
   async generateQrToken(targetId: string): Promise<{ token: string; loginUrl: string }> {
     const target = await this.usersRepository.findById(targetId);
-    if (!target) throw new NotFoundError("User not found");
+    if (!target) throw new NotFoundError("User not found", ERROR_CODES.USER_NOT_FOUND);
 
     assertRoleSupportsQrLogin(target.role);
 
     const token = generateQrToken();
     await this.usersRepository.setQrToken(targetId, hashToken(token));
+    await this.audit.record({ action: AUDIT_ACTIONS.USER_QR_GENERATED, entityType: AUDIT_ENTITIES.USER, entityId: targetId });
     return { token, loginUrl: `${env.WEB_APP_URL}/qr-login?token=${token}` };
   }
 
@@ -56,20 +71,27 @@ export class UsersService {
     if (dto.active !== undefined) updates.active = dto.active;
 
     if (Object.keys(updates).length === 0) {
-      throw new BadRequestError("No fields to update");
+      throw new BadRequestError("No fields to update", ERROR_CODES.VALIDATION_NO_FIELDS);
     }
 
     await this.usersRepository.updateProfile(targetId, updates);
+    await this.audit.record({
+      action: AUDIT_ACTIONS.USER_UPDATED,
+      entityType: AUDIT_ENTITIES.USER,
+      entityId: targetId,
+      metadata: { fields: Object.keys(updates) },
+    });
   }
 
   async deactivateUser(targetId: string, callerId: string): Promise<void> {
     if (targetId === callerId) {
-      throw new BadRequestError("You cannot deactivate your own account");
+      throw new BadRequestError("You cannot deactivate your own account", ERROR_CODES.USER_CANNOT_DEACTIVATE_SELF);
     }
 
     await this.usersRepository.updateProfile(targetId, { active: false });
     await this.usersRepository.banAuthUser(targetId);
     // A deactivated account's QR (if any) must stop working immediately, not linger.
     await this.usersRepository.clearQrToken(targetId);
+    await this.audit.record({ action: AUDIT_ACTIONS.USER_DEACTIVATED, entityType: AUDIT_ENTITIES.USER, entityId: targetId });
   }
 }

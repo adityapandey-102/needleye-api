@@ -109,7 +109,12 @@ export interface OrdersRepositoryPort {
   getStats(scope: RowScope): Promise<OrderStatsRaw>;
   findBasicById(id: string): Promise<OrderBasicInfo | null>;
   create(data: NewOrderRecord): Promise<OrderEntity>;
-  update(id: string, data: UpdateOrderRecord): Promise<OrderEntity>;
+  /**
+   * Updates the order and bumps its `version`. If `expectedVersion` is given,
+   * the write is guarded on it (optimistic lock) and throws ORDER_MODIFIED
+   * when the stored version has moved on -- i.e. someone else edited it first.
+   */
+  update(id: string, data: UpdateOrderRecord, expectedVersion?: number): Promise<OrderEntity>;
   /** Updates production_status and appends one order_status_history row, atomically (one DB transaction). */
   updateStatus(id: string, status: GranularStatus, changedBy: string): Promise<OrderEntity>;
   listStatusHistory(orderId: string): Promise<OrderStatusHistoryEntity[]>;

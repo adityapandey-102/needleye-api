@@ -1,5 +1,6 @@
 import { DESIGN_STAGE_STATUSES, getCapabilityScope, granularLabel } from "../../../domain";
 import { ForbiddenError } from "../../../common/errors/app-error";
+import { ERROR_CODES } from "../../../common/errors/error-codes";
 import type { GranularStatus, Role } from "../../../domain";
 
 /** Who owns which side of a status transition -- the fields the ownership check needs, nothing more. */
@@ -24,12 +25,12 @@ export function assertCanTransitionStatus(role: Role, newStatus: GranularStatus,
   const scope = getCapabilityScope(role, capability);
 
   if (scope === false) {
-    throw new ForbiddenError(`Your role cannot move an order into the "${granularLabel(newStatus)}" stage`);
+    throw new ForbiddenError(`Your role cannot move an order into the "${granularLabel(newStatus)}" stage`, ERROR_CODES.ORDER_STATUS_TRANSITION_FORBIDDEN);
   }
   if (scope === "assigned") {
     const ownerId = isDesignStage ? order.designerId : order.masterTailorId;
     if (ownerId !== callerId) {
-      throw new ForbiddenError("You can only update the status of orders assigned to you");
+      throw new ForbiddenError("You can only update the status of orders assigned to you", ERROR_CODES.ORDER_NOT_ASSIGNED);
     }
   }
 }

@@ -4,6 +4,7 @@ import { db } from "./drizzle-client";
 // module's schema. See docs/adr/0003-per-module-schema-ownership.md.
 import { profiles } from "../../modules/users/infrastructure/profile.schema";
 import { ForbiddenError, InternalError } from "../errors/app-error";
+import { ERROR_CODES } from "../errors/error-codes";
 import type { Profile } from "../../domain";
 
 /**
@@ -21,8 +22,8 @@ export async function fetchActiveProfile(userId: string): Promise<Profile> {
     throw new InternalError("Failed to load profile");
   }
 
-  if (!row) throw new ForbiddenError("No profile found for this account");
-  if (!row.active) throw new ForbiddenError("This account has been deactivated");
+  if (!row) throw new ForbiddenError("No profile found for this account", ERROR_CODES.AUTH_PROFILE_MISSING);
+  if (!row.active) throw new ForbiddenError("This account has been deactivated", ERROR_CODES.AUTH_ACCOUNT_DEACTIVATED);
 
   return {
     id: row.id,

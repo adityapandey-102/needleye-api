@@ -1,4 +1,5 @@
 import { BadRequestError, ForbiddenError } from "../../../common/errors/app-error";
+import { ERROR_CODES } from "../../../common/errors/error-codes";
 import type { Role } from "../../../domain";
 
 /** Roles that self-manage their own password after their first login. */
@@ -17,6 +18,7 @@ export function assertPasswordCanBeRegenerated(role: Role, lastLoginAt: string |
   if (SELF_MANAGED_AFTER_FIRST_LOGIN.includes(role) && lastLoginAt) {
     throw new ForbiddenError(
       "This account has already logged in and manages its own password now -- use the password-reset flow instead.",
+      ERROR_CODES.USER_PASSWORD_SELF_MANAGED,
     );
   }
 }
@@ -24,6 +26,6 @@ export function assertPasswordCanBeRegenerated(role: Role, lastLoginAt: string |
 /** QR login is Master Tailor-only -- see the README's Flow Map for why. */
 export function assertRoleSupportsQrLogin(role: Role): void {
   if (role !== "master_tailor") {
-    throw new BadRequestError("QR login is only available for Master Tailor accounts");
+    throw new BadRequestError("QR login is only available for Master Tailor accounts", ERROR_CODES.USER_QR_ROLE_UNSUPPORTED);
   }
 }

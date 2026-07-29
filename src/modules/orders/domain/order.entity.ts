@@ -43,6 +43,7 @@ export interface OrderEntity {
   productionStatus: GranularStatus;
   designerInstructions: string | null;
   specialNotes: string | null;
+  version: number;
   images: OrderImageEntity[];
   createdBy: string | null;
   updatedBy: string | null;

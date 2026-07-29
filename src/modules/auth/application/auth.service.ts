@@ -1,6 +1,10 @@
 import { env } from "../../../config/env";
 import { assertNoOwnerManagerExists } from "../domain/bootstrap.rules";
 import { toAuthSessionResponseDto } from "../api/auth-session.presenter";
+import { AUDIT_ACTIONS, AUDIT_ENTITIES } from "../../../common/audit/audit-actions";
+import { auditLogger as defaultAuditLogger } from "../../../common/audit/drizzle-audit-logger";
+import type { AuditLogger } from "../../../common/audit/audit-logger";
+
 import type { AuthRepositoryPort, AuthTokens } from "./ports/auth-repository.port";
 import type { BootstrapDto } from "../api/dto/bootstrap.dto";
 import type { LoginDto } from "../api/dto/login.dto";
@@ -18,7 +22,10 @@ import type { AuthSessionResponseDto } from "../api/dto/auth-session.response.dt
  * always taken as explicit input and handed back in the return value.
  */
 export class AuthService {
-  constructor(private readonly authRepository: AuthRepositoryPort) {}
+  constructor(
+    private readonly authRepository: AuthRepositoryPort,
+    private readonly audit: AuditLogger = defaultAuditLogger,
+  ) {}
 
   async getBootstrapStatus(): Promise<{ ownerExists: boolean }> {
     const count = await this.authRepository.countOwnerManagers();
@@ -39,6 +46,9 @@ export class AuthService {
     // not exchange-code -- since this is what gates whether Owner/Manager
     // can still regenerate an owner_manager/accountant account's password.
     await this.authRepository.recordLogin(tokens.userId);
+    // Actor is passed explicitly: the request context has no user yet (login
+    // is unauthenticated), so the audit logger can't infer it from context.
+    await this.audit.record({ action: AUDIT_ACTIONS.AUTH_LOGIN, entityType: AUDIT_ENTITIES.SESSION, actorId: tokens.userId });
     return session;
   }
 
@@ -54,6 +64,8 @@ export class AuthService {
 
   async logout(accessToken: string): Promise<void> {
     await this.authRepository.signOut(accessToken);
+    // Actor comes from the request context (logout is behind requireAuth).
+    await this.audit.record({ action: AUDIT_ACTIONS.AUTH_LOGOUT, entityType: AUDIT_ENTITIES.SESSION });
   }
 
   async requestPasswordReset(dto: PasswordResetRequestDto): Promise<void> {
@@ -63,6 +75,7 @@ export class AuthService {
 
   async updatePassword(userId: string, dto: PasswordUpdateDto): Promise<void> {
     await this.authRepository.updatePassword(userId, dto.newPassword);
+    await this.audit.record({ action: AUDIT_ACTIONS.AUTH_PASSWORD_CHANGED, entityType: AUDIT_ENTITIES.USER, entityId: userId });
   }
 
   async exchangeCode(dto: ExchangeCodeDto): Promise<AuthSessionResponseDto> {

@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DrizzleOrdersRepository } from "../../src/modules/orders/infrastructure/drizzle-orders.repository";
+import { ConflictError } from "../../src/common/errors/app-error";
+import { ERROR_CODES } from "../../src/common/errors/error-codes";
 import { createFixtureUser, deleteFixtureOrder, deleteFixtureUser, closeDb } from "./helpers";
 import type { FixtureUser } from "./helpers";
 import type { NewOrderRecord } from "../../src/modules/orders/application/ports/orders-repository.port";
@@ -120,6 +122,39 @@ describe("DrizzleOrdersRepository (integration)", () => {
     } finally {
       await deleteFixtureUser(otherDesigner.id);
     }
+  });
+
+  it("optimistic-locks update(): a stale version is rejected with ORDER_MODIFIED, not silently applied", async () => {
+    const entity = await repo.create(baseOrder());
+    createdOrderIds.push(entity.id);
+    expect(entity.version).toBe(0);
+
+    // First edit with the version we loaded (0) succeeds and bumps version to 1.
+    const updated = await repo.update(entity.id, { customerName: "First Edit", updatedBy: designer.id }, 0);
+    expect(updated.version).toBe(1);
+    expect(updated.customerName).toBe("First Edit");
+
+    // A second edit still holding the old version (0) -- as a concurrent user would --
+    // must be rejected, not clobber the first edit.
+    await expect(repo.update(entity.id, { customerName: "Stale Edit", updatedBy: designer.id }, 0)).rejects.toMatchObject({
+      code: ERROR_CODES.ORDER_MODIFIED,
+    });
+    await expect(repo.update(entity.id, { customerName: "Stale Edit", updatedBy: designer.id }, 0)).rejects.toBeInstanceOf(
+      ConflictError,
+    );
+
+    // The first edit still stands; the stale edit never applied.
+    const current = await repo.findById({ role: "owner_manager", userId: "" }, entity.id);
+    expect(current?.customerName).toBe("First Edit");
+  });
+
+  it("update() without a version bumps version and applies unconditionally (no lock)", async () => {
+    const entity = await repo.create(baseOrder());
+    createdOrderIds.push(entity.id);
+
+    const updated = await repo.update(entity.id, { customerName: "Unlocked Edit", updatedBy: designer.id });
+    expect(updated.version).toBe(1);
+    expect(updated.customerName).toBe("Unlocked Edit");
   });
 
   it("paginates findMany by limit/offset while countMany reports the unpaginated total", async () => {

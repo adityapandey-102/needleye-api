@@ -360,10 +360,23 @@ Every layer throws a typed `AppError` subclass (from
 `res.status().json()`. `common/middleware/error.middleware.ts` is the single
 place that turns any thrown error -- an `AppError`, a zod `ValidationError`,
 a Postgrest/Supabase error, or anything unexpected -- into a consistent
-`{ error, code, details? }` JSON response, logging only real 5xx failures
-server-side. `asyncHandler` wraps every async controller/middleware so a
-rejected promise reaches that middleware instead of crashing the process
-(Express 4 doesn't catch async errors on its own).
+`{ error, code, details?, requestId }` JSON response, and is the **only**
+place errors are logged (controllers/services never log-and-rethrow, so an
+error is logged exactly once, with method/route/request-id context).
+`asyncHandler` wraps every async controller/middleware so a rejected promise
+reaches that middleware instead of crashing the process (Express 4 doesn't
+catch async errors on its own). Stack traces and the raw `cause` go to the
+logs only, never the client (the stack is additionally echoed in the
+response body in development, to speed up local debugging).
+
+**Stable error codes.** Every error response carries a `code` from the single
+registry in `common/errors/error-codes.ts` (`ORDER_NOT_FOUND`,
+`AUTH_INVALID_CREDENTIALS`, `PAYMENT_LEDGER_MISMATCH`, `ORDER_MODIFIED`, ...).
+**Clients branch on the code, never on the message** -- messages are free to
+change for humans; codes are the contract. Each `AppError` subclass carries
+the right HTTP status and a generic default code; throw sites pass a specific
+one. Adding an error means adding its code to the registry first, then
+referencing it -- never inline a string literal.
 
 Every repository catches persistence failures and re-throws `InternalError`
 with the original error passed as `cause` (native ES2022 `Error.cause` --
@@ -386,9 +399,11 @@ downstream. It also attaches `req.log`, a child logger already carrying that
 request's id, so any handler/middleware logs with context for free instead
 of needing a logger threaded through every function signature.
 
-- **Levels**: 2xx/3xx → `info`, 4xx → `warn`, 5xx or a thrown non-HTTP error → `error`. `common/middleware/error.middleware.ts` uses `req.log.error`/`req.log.warn` (never raw `console.*`) so every error that reaches it is structured and carries the request id.
-- **Redaction**: `req.headers.authorization` (and the equivalent on the response) is redacted to `[redacted]` -- a bearer token must never end up in a log line, in dev or prod. Never add a field containing a raw token/password to a log call without redacting it the same way.
-- **Format**: pretty-printed + colorized in development (`pino-pretty`, easy to read in a terminal); plain JSON on stdout in production (`NODE_ENV=production`), so it's pipeable into any log aggregator (Datadog, CloudWatch, etc.) without extra parsing config.
+- **Levels**: 2xx/3xx → `info`, 4xx → `warn`, 5xx or a thrown non-HTTP error → `error`. `common/middleware/error.middleware.ts` uses `req.log.error`/`req.log.warn` (never raw `console.*`) so every error that reaches it is structured and carries the request id. `pino` also supports `trace`/`debug` (developer diagnostics) and `fatal` (unrecoverable/startup) -- selected via `LOG_LEVEL`.
+- **Cloud-native, stdout only**: plain JSON on stdout in production (`NODE_ENV=production`); pretty-printed + colorized in development (`pino-pretty`). **No file logging, no rotation, no local log storage** -- the platform (Railway/Render/Fly/etc.) collects stdout. Nothing in the app ever opens a log file.
+- **Request context on every line**: a generated (or client-propagated) `x-request-id` is stamped on the response header and on the request/response log, and every authenticated request log also carries `userId`/`role`. An AsyncLocalStorage request context (`common/context/request-context.ts`, populated once by `request-context.middleware.ts` right after the logger, and by `requireAuth`) carries the same request id + user into code that has no `req` -- the audit logger and the slow-query logger -- so **one request id ties together the request log, every app log during that request, slow-query logs, audit records, and the error response**.
+- **Slow-query observability**: `common/database/query-timing.ts` wraps the pg pool so any statement over `SLOW_QUERY_MS` (default 250) is logged at `warn` with its duration, the (parameter-free) SQL text, and the correlating request id/user. It only provides visibility -- it never changes or optimizes a query. Parameter *values* are never logged (they can carry customer data).
+- **Redaction**: `authorization` and `cookie` headers (request and response) are redacted to `[redacted]` -- tokens/cookies must never reach a log line, in dev or prod. Never add a field containing a raw token/password to a log call without redacting it the same way.
 - **Startup logging** (`src/index.ts`) uses the same `logger` instance directly, not `req.log` (there's no request yet).
 
 ### Operational concerns (health, pool, shutdown)
@@ -405,6 +420,16 @@ of needing a logger threaded through every function signature.
 - **File uploads**: `orders.validation.ts`'s `validateImageUpload` enforces a `1-4` slot range and an `image/*` MIME type (client-supplied `Content-Type`, not magic-byte sniffed -- a deliberate, proportionate check at this app's scale, not a defense against a determined attacker) plus a 10MB `multer` size limit.
 - **Auth/authz**: see "Authentication" and "RBAC" below -- every route is bearer-token-verified (`requireAuth`) and capability-gated (`requireCapability`/field-level checks in the service layer); `profiles.role` is server-side truth, never trusted from the JWT/client.
 - **Input validation**: every request body is parsed against a zod schema (`validateBody`) before a controller calls a service; a service can assume its input already matches the DTO shape.
+- **Auth rate limiting**: `common/middleware/rate-limit.middleware.ts` (`express-rate-limit`, in-memory) throttles brute-force against the credential/token endpoints -- applied only to `/auth/*` (login, refresh, password reset/update, exchange-code, qr-login), `AUTH_RATE_LIMIT_MAX` attempts per `AUTH_RATE_LIMIT_WINDOW_MS` per IP, returning `429` + `RATE_LIMITED`. In-memory is the right fit for this single-process monolith; the limiter is isolated in that one module so swapping to a shared store later is a one-line `store:` change with nothing else touched (no Redis introduced). `app.set("trust proxy", 1)` in production so it keys on the real client IP behind the hosting proxy.
+- **Least-privilege database role**: in production the app should connect as a dedicated, non-superuser DB role rather than `postgres`. See "Operational hardening" below and `docs/least-privilege-db-role.sql`.
+
+### Operational hardening (request IDs, audit, optimistic locking, DB role)
+
+- **Request IDs** -- see "Logging" above: one id per request, on the response header, every log line, and the error response body.
+- **Audit logging** (`common/audit/`): a business audit trail, separate from the developer-facing application logs. `AuditLogger` is an interface (`audit-logger.ts`); `DrizzleAuditLogger` writes to the `audit_log` table (`supabase/migrations/20260726000001_audit_log.sql`), filling in the actor and request id from the request context. Business services record important actions through it -- login/logout, password change, user create/update/deactivate/password-regen/QR, order create/update/status-change/image-delete, payment create/update/delete (action strings in `audit-actions.ts`). Best-effort by contract: a failed audit write is logged and swallowed, never breaking the business action. To send audit events somewhere else later (an external audit sink), write one new class implementing `AuditLogger` -- no service changes. There's no audit-read endpoint in scope; `audit_log` has no anon/authenticated grant.
+- **Optimistic locking on order edits**: `orders.version` (integer, `supabase/migrations/20260726000002_orders_version.sql`) is returned on every order and echoed back by the edit form as `version` in `PATCH /orders/:id`. The repository bumps `version` on every update and, when a version is supplied, guards the write on it (`WHERE id = ? AND version = ?`); a second concurrent edit still holding the old version affects 0 rows and is rejected with `409 ORDER_MODIFIED` -- "someone changed this, reload" -- rather than silently clobbering the first edit. A dedicated integer column (not `updated_at`) avoids timestamp-precision round-tripping between Postgres and JS.
+- **Orphaned-file prevention** (`OrdersService`): replacing an image deletes the previous storage object once the DB points at the new one; deleting an image removes the DB row **first**, then the storage object -- so a storage failure can only leave an invisible orphaned object, never a dangling DB row that renders as a broken image. Storage-delete failures are logged, not surfaced, so cleanup never fails an otherwise-successful operation.
+- **Least-privilege DB role** (`docs/least-privilege-db-role.sql`): a template (run once by an admin at cutover, not an auto-applied migration -- it holds a password and creates a role) that provisions `needleye_app`: `LOGIN`, **not** superuser/createdb/createrole, with `SELECT/INSERT/UPDATE/DELETE` on exactly the business tables (plus sequence/function grants and default privileges for future tables). It keeps `BYPASSRLS` on purpose -- the app connects directly to Postgres (not via PostgREST), so the `auth.uid()`-based RLS meant for the Data-API path would evaluate to NULL and deny everything; the app is the trusted server enforcing authz at the application layer, exactly as Supabase's own `service_role` does. This separates **runtime** credentials (the app's `DATABASE_URL` → `needleye_app`, data access only, cannot run DDL) from **migration** credentials (the Supabase CLI / an owner role). No application code changes -- the app only ever knew a connection string.
 
 ### RBAC
 

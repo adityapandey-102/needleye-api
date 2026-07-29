@@ -885,11 +885,19 @@ components:
   schemas:
     Error:
       type: object
-      description: The one shape every error response takes, produced by common/middleware/error.middleware.ts regardless of which layer threw.
+      description: >
+        The one shape every error response takes, produced by
+        common/middleware/error.middleware.ts regardless of which layer threw.
+        `code` is a stable application error code from the ERROR_CODES registry
+        (common/errors/error-codes.ts) -- clients should branch on `code`, not
+        on `error` (the human message, which may change). `requestId` correlates
+        the response with the server logs. Auth endpoints additionally return
+        `429` with code `RATE_LIMITED` when the brute-force limit is exceeded.
       properties:
         error: { type: string }
-        code: { type: string, example: FORBIDDEN }
+        code: { type: string, example: ORDER_NOT_FOUND }
         details: {}
+        requestId: { type: string, description: Correlates this response with the server logs. }
 
     Role:
       type: string
@@ -1053,6 +1061,7 @@ components:
         images:
           type: array
           items: { $ref: "#/components/schemas/OrderImage" }
+        version: { type: integer, description: "Optimistic-lock version. Echo it back in PATCH /orders/:id to be told (409 ORDER_MODIFIED) if someone else edited the order first." }
         createdBy: { type: string, format: uuid, nullable: true }
         updatedBy: { type: string, format: uuid, nullable: true }
         createdAt: { type: string, format: date-time }
@@ -1127,3 +1136,4 @@ components:
         productionStatus: { $ref: "#/components/schemas/GranularStatus" }
         designerInstructions: { type: string }
         specialNotes: { type: string }
+        version: { type: integer, minimum: 0, description: "Optimistic-lock token: the `version` the order was loaded with. If it no longer matches (someone else edited first), the update is rejected with 409 ORDER_MODIFIED. Optional; omit to update unconditionally." }

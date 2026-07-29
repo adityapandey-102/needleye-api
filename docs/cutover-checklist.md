@@ -31,12 +31,18 @@ replay of history. So for the initial cutover:
 - [ ] In the Supabase dashboard, confirm the `order-images` bucket exists under Storage, and that `profiles`/`orders`/`payments`/`order_status_history`/etc. all exist under Table Editor.
 - [ ] From this point forward, schema changes go through Drizzle (`npm run db:generate` then `npm run db:migrate`, both already pointed at `DATABASE_URL`) for the portable tables, and a new `supabase/migrations/*.sql` file (via `npx supabase migration new <name>`) for anything genuinely Supabase-specific (a new RLS policy, another trigger). The split from ADR 0003 continues to apply.
 
+### 1a. Least-privilege runtime database role (recommended)
+
+- [ ] Run `docs/least-privilege-db-role.sql` once against the hosted DB **as an admin/owner connection** (set a real password first -- don't commit it). It creates `needleye_app`: `LOGIN`, not superuser, data access on exactly the business tables, `BYPASSRLS` (required -- the app connects directly to Postgres, see the script's header and the README's "Operational hardening").
+- [ ] This is the **runtime** credential; keep it separate from the **migration** credential. Migrations (step 1, and future `supabase migration`/`drizzle-kit migrate` runs) use the Supabase CLI / an owner connection; the running app uses `needleye_app`. `needleye_app` deliberately cannot run DDL.
+- [ ] Point the app's `DATABASE_URL` (step 2) at `needleye_app`, not `postgres`. No application code changes -- it only ever knew a connection string.
+
 ## 2. `needleye-api` environment variables
 
 Set these on the hosting platform (never commit them) -- see `.env.example`
 for the authoritative list and what each one is for:
 
-- [ ] `DATABASE_URL` -- the hosted project's Postgres connection string (Supabase dashboard → Project Settings → Database → Connection string; use the pooler connection if the host supports it).
+- [ ] `DATABASE_URL` -- the hosted project's Postgres connection string, pointed at the least-privilege `needleye_app` role from step 1a (Supabase dashboard → Project Settings → Database → Connection string, then swap the role/password; use the pooler connection if the host supports it).
 - [ ] `SUPABASE_URL` -- the hosted project's API URL (`https://<ref>.supabase.co`).
 - [ ] `SUPABASE_SERVICE_ROLE_KEY` -- from Project Settings → API. Server-only, never exposed to `needleye-web`.
 - [ ] `SUPABASE_ANON_KEY` -- from the same page. Also server-only here (only `SupabaseAuthProvider` uses it, for sign-in/refresh/reset/exchange).
@@ -45,6 +51,8 @@ for the authoritative list and what each one is for:
 - [ ] `WEB_APP_URL` -- same origin as above; only used to build the link inside password-reset emails.
 - [ ] `API_PORT` -- whatever the hosting platform expects (many inject `PORT` themselves; confirm this one still gets read correctly, or set it to match).
 - [ ] `LOG_LEVEL` -- `info` is a reasonable prod default.
+- [ ] `SLOW_QUERY_MS` -- optional; queries slower than this (default 250ms) are logged at WARN.
+- [ ] `AUTH_RATE_LIMIT_WINDOW_MS` / `AUTH_RATE_LIMIT_MAX` -- optional; auth brute-force limits (default 15min / 30 attempts per IP). `app.set("trust proxy", 1)` is enabled in production so the limiter keys on the real client IP -- confirm your platform sets `X-Forwarded-For` (Railway/Render/Fly do).
 - [ ] `NODE_ENV=production`.
 
 Deploy `needleye-api`. Confirm `GET /health` responds before continuing.

@@ -1,7 +1,11 @@
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import request from "supertest";
+import { and, eq } from "drizzle-orm";
 import { createApp } from "../../src/app";
 import { authProvider } from "../../src/common/auth/supabase-auth-provider";
+import { db } from "../../src/common/database/drizzle-client";
+import { auditLog } from "../../src/common/audit/audit-log.schema";
+import { AUDIT_ACTIONS } from "../../src/common/audit/audit-actions";
 import { createFixtureUser, deleteFixtureUser, deleteFixtureOrder, closeDb } from "./helpers";
 
 /**
@@ -98,6 +102,17 @@ describe("API endpoints (integration)", () => {
     expect(list.offset).toBe(0);
     expect(list.total).toBeGreaterThanOrEqual(1);
     expect(list.orders.some((o) => o.id === orderId)).toBe(true);
+
+    // Creating the order wrote a business audit record, attributed to the
+    // acting designer and correlated with a request id.
+    const auditRows = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.entityId, orderId), eq(auditLog.action, AUDIT_ACTIONS.ORDER_CREATED)));
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0]?.actorId).toBe(designer.id);
+    expect(auditRows[0]?.entityType).toBe("order");
+    expect(auditRows[0]?.requestId).toBeTruthy();
   });
 
   it("clamps an over-large limit to the max page size", async () => {

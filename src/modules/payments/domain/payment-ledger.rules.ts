@@ -1,4 +1,5 @@
 import { ConflictError } from "../../../common/errors/app-error";
+import { ERROR_CODES } from "../../../common/errors/error-codes";
 
 /** Avoids JS floating-point noise (0.1 + 0.2 !== 0.3) when comparing currency sums. */
 export function roundCurrency(amount: number): number {
@@ -33,5 +34,6 @@ export function assertLedgerReconciles(
     `Cannot ${action}: the order is marked fully paid, but this would leave the recorded total ` +
       `(₹${roundCurrency(wouldBeSum)}) not matching the order total (₹${roundCurrency(totalAmount)}). ` +
       `Change the order's payment status first if that's intentional.`,
+    ERROR_CODES.PAYMENT_LEDGER_MISMATCH,
   );
 }

@@ -44,6 +44,7 @@ export interface OrderResponseDto {
   productionStatus: GranularStatus;
   designerInstructions: string | null;
   specialNotes: string | null;
+  version: number;
   images: OrderImageResponseDto[];
   createdBy: string | null;
   updatedBy: string | null;

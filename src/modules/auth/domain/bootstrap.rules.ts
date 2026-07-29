@@ -1,4 +1,5 @@
 import { ForbiddenError } from "../../../common/errors/app-error";
+import { ERROR_CODES } from "../../../common/errors/error-codes";
 
 /**
  * Registration is invite-only in normal operation (Owner/Manager creates
@@ -9,6 +10,6 @@ import { ForbiddenError } from "../../../common/errors/app-error";
  */
 export function assertNoOwnerManagerExists(existingOwnerManagerCount: number): void {
   if (existingOwnerManagerCount > 0) {
-    throw new ForbiddenError("An Owner/Manager account already exists. Ask them for an invite.");
+    throw new ForbiddenError("An Owner/Manager account already exists. Ask them for an invite.", ERROR_CODES.AUTH_BOOTSTRAP_ALREADY_DONE);
   }
 }
