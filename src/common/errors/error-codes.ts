@@ -49,6 +49,8 @@ export const ERROR_CODES = {
   PAYMENT_NOT_FOUND: "PAYMENT_NOT_FOUND",
   PAYMENT_NOT_ASSIGNED: "PAYMENT_NOT_ASSIGNED",
   PAYMENT_LEDGER_MISMATCH: "PAYMENT_LEDGER_MISMATCH",
+  /** A payment would push the ledger sum above the order total (overpayment). */
+  PAYMENT_EXCEEDS_TOTAL: "PAYMENT_EXCEEDS_TOTAL",
 
   // -- Users ------------------------------------------------------------------
   USER_NOT_FOUND: "USER_NOT_FOUND",

@@ -11,7 +11,13 @@ import { payments } from "../../payments/infrastructure/payments.schema";
 import { profiles } from "../../users/infrastructure/profile.schema";
 import { ConflictError, InternalError, NotFoundError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
-import { CANONICAL_TO_GRANULAR, COMPLETED_CANONICAL_STAGES, granularLabel, type GranularStatus } from "../../../domain";
+import {
+  CANONICAL_TO_GRANULAR,
+  COMPLETED_CANONICAL_STAGES,
+  PRODUCTION_STAGE_STATUSES,
+  granularLabel,
+  type GranularStatus,
+} from "../../../domain";
 import { OrderMapper, type OrderQueryResult } from "./order.mapper";
 import { OrderStatusHistoryMapper, type OrderStatusHistoryRow } from "./order-status-history.mapper";
 import type { OrderEntity } from "../domain/order.entity";
@@ -27,10 +33,14 @@ import type {
   OrderBasicInfo,
   OrderImageInfo,
   OrderStatsRaw,
+  RevenuePeriod,
 } from "../application/ports/orders-repository.port";
 
 /** The granular values a Kanban card sits on once it reaches the "ready"/"delivered" canonical columns -- see domain/order-status.ts. */
 const COMPLETED_STATUSES = COMPLETED_CANONICAL_STAGES.map((stage) => CANONICAL_TO_GRANULAR[stage]);
+
+/** Production stages still actively being worked (excludes ready/delivered) -- the "In Production" dashboard bucket. */
+const IN_PRODUCTION_STATUSES = PRODUCTION_STAGE_STATUSES.filter((s) => !COMPLETED_STATUSES.includes(s));
 
 export class DrizzleOrdersRepository implements OrdersRepositoryPort {
   /** Applies row-level visibility for the caller's role -- owner_manager/accountant unscoped, designer/master_tailor limited to their own orders. */
@@ -51,8 +61,44 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     if (filters.status) conditions.push(eq(orders.productionStatus, filters.status as OrderEntity["productionStatus"]));
     if (filters.designerId) conditions.push(eq(orders.designerId, filters.designerId));
     if (filters.masterTailorId) conditions.push(eq(orders.masterTailorId, filters.masterTailorId));
+    conditions.push(this.bucketCondition(filters.bucket));
 
     return and(...conditions);
+  }
+
+  /** Translates a dashboard "bucket" (the filter a summary card links to) into a WHERE condition. */
+  private bucketCondition(bucket: string | undefined) {
+    switch (bucket) {
+      case "active":
+        return notInArray(orders.productionStatus, COMPLETED_STATUSES);
+      case "production":
+        return inArray(orders.productionStatus, IN_PRODUCTION_STATUSES);
+      case "completed":
+        return inArray(orders.productionStatus, COMPLETED_STATUSES);
+      case "ready":
+        return eq(orders.productionStatus, "ready_for_delivery");
+      case "delivered":
+        return eq(orders.productionStatus, "delivered");
+      case "pending_payment":
+        return ne(orders.paymentStatus, "fully_paid");
+      case "payment_overdue":
+        // Outstanding balance whose scheduled next-payment date has passed.
+        return and(ne(orders.paymentStatus, "fully_paid"), sql`${orders.nextPaymentDate} < current_date`);
+      case "payment_upcoming":
+        // Outstanding balance with a next-payment date still ahead (or today).
+        return and(ne(orders.paymentStatus, "fully_paid"), sql`${orders.nextPaymentDate} >= current_date`);
+      case "overdue":
+        return and(notInArray(orders.productionStatus, COMPLETED_STATUSES), sql`${orders.dueDate} < current_date`);
+      case "urgent":
+        return and(
+          notInArray(orders.productionStatus, COMPLETED_STATUSES),
+          sql`${orders.dueDate} >= current_date and ${orders.dueDate} < current_date + 3`,
+        );
+      case "this_month":
+        return sql`${orders.createdAt} >= date_trunc('month', current_date)`;
+      default:
+        return undefined;
+    }
   }
 
   async findMany(scope: RowScope, filters: OrderListFilters, page: OrderListPage): Promise<OrderEntity[]> {
@@ -108,6 +154,13 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
           total: sql<string>`count(*)`,
           active: sql<string>`count(*) filter (where ${notInArray(orders.productionStatus, COMPLETED_STATUSES)})`,
           completed: sql<string>`count(*) filter (where ${inArray(orders.productionStatus, COMPLETED_STATUSES)})`,
+          thisMonth: sql<string>`count(*) filter (where ${orders.createdAt} >= date_trunc('month', current_date))`,
+          inProduction: sql<string>`count(*) filter (where ${inArray(orders.productionStatus, IN_PRODUCTION_STATUSES)})`,
+          // Delivery-timeline urgency, on active (not-yet-completed) orders only --
+          // mirrors the frontend's getTimelineSummary thresholds (overdue: past due;
+          // urgent: due within 3 days).
+          overdue: sql<string>`count(*) filter (where ${notInArray(orders.productionStatus, COMPLETED_STATUSES)} and ${orders.dueDate} < current_date)`,
+          urgent: sql<string>`count(*) filter (where ${notInArray(orders.productionStatus, COMPLETED_STATUSES)} and ${orders.dueDate} >= current_date and ${orders.dueDate} < current_date + 3)`,
           pendingPayments: sql<string>`count(*) filter (where ${ne(orders.paymentStatus, "fully_paid")})`,
           totalValue: sql<string>`coalesce(sum(${orders.totalAmount}), 0)`,
         })
@@ -136,10 +189,54 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
       total: row ? Number(row.total) : 0,
       active: row ? Number(row.active) : 0,
       completed: row ? Number(row.completed) : 0,
+      thisMonth: row ? Number(row.thisMonth) : 0,
+      inProduction: row ? Number(row.inProduction) : 0,
+      overdue: row ? Number(row.overdue) : 0,
+      urgent: row ? Number(row.urgent) : 0,
       pendingPayments: row ? Number(row.pendingPayments) : 0,
       collectedRevenue,
       outstandingRevenue: Math.max(totalValue - collectedRevenue, 0),
     };
+  }
+
+  async getMonthlyRevenue(scope: RowScope, cycleStartDay: number, range: { from: string; to: string }): Promise<RevenuePeriod[]> {
+    // Accounting period of a payment: shift paid_at back by (startDay-1) days,
+    // truncate to the month, then shift forward again -- so startDay=1 is the
+    // calendar month and startDay=7 runs 7th -> next 7th. Grouped + ordered by
+    // that computed period start (select position 1), oldest first.
+    const shift = sql`make_interval(days => ${cycleStartDay - 1})`;
+    const periodStart = sql<string>`(date_trunc('month', ${payments.paidAt} - ${shift}) + ${shift})::date`;
+
+    // Row scope (unscoped for the financial roles this endpoint is gated to) +
+    // the requested inclusive date window on paid_at.
+    const condition = and(
+      this.rowScopeCondition(scope),
+      sql`${payments.paidAt} >= ${range.from}`,
+      sql`${payments.paidAt} <= ${range.to}`,
+    );
+
+    let rows;
+    try {
+      rows = await db
+        .select({
+          periodStart,
+          collected: sql<string>`coalesce(sum(${payments.amount}), 0)`,
+          paymentCount: sql<string>`count(*)`,
+        })
+        .from(payments)
+        .innerJoin(orders, eq(orders.id, payments.orderId))
+        .where(condition)
+        .groupBy(sql`1`)
+        .orderBy(sql`1 asc`);
+    } catch (error) {
+      throw new InternalError("Failed to load revenue report", error);
+    }
+
+    return rows.map((r) => ({
+      periodStart: r.periodStart,
+      collected: Number(r.collected),
+      paymentCount: Number(r.paymentCount),
+    }));
   }
 
   private async findByIdUnscoped(id: string): Promise<OrderEntity | null> {
@@ -188,6 +285,7 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
             billNumber: data.billNumber,
             bookingDate: data.bookingDate,
             dueDate: data.dueDate,
+            nextPaymentDate: data.nextPaymentDate,
             designerId: data.designerId,
             masterTailorId: data.masterTailorId,
             productCategory: data.productCategory,

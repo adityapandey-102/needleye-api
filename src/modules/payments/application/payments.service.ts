@@ -1,6 +1,6 @@
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
-import { assertLedgerReconciles } from "../domain/payment-ledger.rules";
+import { assertDoesNotExceedTotal, derivePaymentStatus } from "../domain/payment-ledger.rules";
 import { toPaymentResponseDto } from "../api/payment.presenter";
 import { AUDIT_ACTIONS, AUDIT_ENTITIES } from "../../../common/audit/audit-actions";
 import { auditLogger as defaultAuditLogger } from "../../../common/audit/drizzle-audit-logger";
@@ -40,10 +40,10 @@ export class PaymentsService {
   async addPayment(ctx: AuthContext, orderId: string, dto: CreatePaymentDto): Promise<PaymentResponseDto> {
     const order = await this.loadOrderForAccess(ctx, orderId);
 
-    if (order.paymentStatus === "fully_paid") {
-      const currentSum = await this.paymentsRepository.sumByOrderId(orderId);
-      assertLedgerReconciles(currentSum + dto.amount, order.totalAmount, "save this payment");
-    }
+    const currentSum = await this.paymentsRepository.sumByOrderId(orderId);
+    const newSum = currentSum + dto.amount;
+    // Never let the ledger exceed the order total (overpayment) -- always.
+    assertDoesNotExceedTotal(newSum, order.totalAmount);
 
     const entity = await this.paymentsRepository.create({
       orderId,
@@ -53,6 +53,10 @@ export class PaymentsService {
       recordedBy: ctx.authUserId,
       notes: dto.notes || null,
     });
+    // Recompute the order's derived payment state from the new ledger total,
+    // and reschedule the next-payment date (cleared once fully paid; set to
+    // the supplied date while a balance remains; left as-is if none supplied).
+    await this.syncOrderLedgerState(orderId, newSum, order.totalAmount, dto.nextPaymentDate);
     await this.audit.record({
       action: AUDIT_ACTIONS.PAYMENT_CREATED,
       entityType: AUDIT_ENTITIES.PAYMENT,
@@ -69,9 +73,11 @@ export class PaymentsService {
     const existing = await this.paymentsRepository.findById(orderId, paymentId);
     if (!existing) throw new NotFoundError("Payment not found", ERROR_CODES.PAYMENT_NOT_FOUND);
 
-    if (order.paymentStatus === "fully_paid" && dto.amount !== undefined) {
+    let newSum: number | null = null;
+    if (dto.amount !== undefined) {
       const currentSum = await this.paymentsRepository.sumByOrderId(orderId);
-      assertLedgerReconciles(currentSum - existing.amount + dto.amount, order.totalAmount, "save this payment");
+      newSum = currentSum - existing.amount + dto.amount;
+      assertDoesNotExceedTotal(newSum, order.totalAmount, "update");
     }
 
     const updates: UpdatePaymentRecord = {};
@@ -81,6 +87,9 @@ export class PaymentsService {
     if (dto.notes !== undefined) updates.notes = dto.notes || null;
 
     const entity = await this.paymentsRepository.update(paymentId, updates);
+    // Editing an amount changes the derived status -- resync it (the next
+    // date isn't touched here; that's rescheduled when recording a payment).
+    if (newSum !== null) await this.syncOrderLedgerState(orderId, newSum, order.totalAmount);
     await this.audit.record({
       action: AUDIT_ACTIONS.PAYMENT_UPDATED,
       entityType: AUDIT_ENTITIES.PAYMENT,
@@ -95,18 +104,34 @@ export class PaymentsService {
     const existing = await this.paymentsRepository.findById(orderId, paymentId);
     if (!existing) throw new NotFoundError("Payment not found", ERROR_CODES.PAYMENT_NOT_FOUND);
 
-    if (order.paymentStatus === "fully_paid") {
-      const currentSum = await this.paymentsRepository.sumByOrderId(orderId);
-      assertLedgerReconciles(currentSum - existing.amount, order.totalAmount, "remove this payment");
-    }
-
+    const currentSum = await this.paymentsRepository.sumByOrderId(orderId);
     await this.paymentsRepository.delete(paymentId);
+    // Removing a payment lowers the ledger total -- resync the derived status.
+    await this.syncOrderLedgerState(orderId, currentSum - existing.amount, order.totalAmount);
     await this.audit.record({
       action: AUDIT_ACTIONS.PAYMENT_DELETED,
       entityType: AUDIT_ENTITIES.PAYMENT,
       entityId: paymentId,
       metadata: { orderId },
     });
+  }
+
+  /**
+   * Recomputes the order's derived payment status from its new ledger total and
+   * writes it back, along with the rescheduled next-payment date: cleared once
+   * fully paid, set to `nextPaymentDate` when a balance remains and a date was
+   * supplied, otherwise left unchanged (undefined). The single place a ledger
+   * change touches order-level state.
+   */
+  private async syncOrderLedgerState(
+    orderId: string,
+    newSum: number,
+    totalAmount: number,
+    nextPaymentDate?: string | null,
+  ): Promise<void> {
+    const paymentStatus = derivePaymentStatus(newSum, totalAmount);
+    const nextDate = paymentStatus === "fully_paid" ? null : nextPaymentDate;
+    await this.paymentsRepository.updateOrderLedgerState(orderId, { paymentStatus, nextPaymentDate: nextDate });
   }
 
   /**

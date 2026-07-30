@@ -60,7 +60,7 @@ unit tests, and a Docker image build all run in CI on every push/PR (see
 Once an Owner/Manager account exists (`POST /auth/bootstrap`, once), a few
 more scripts are useful for local development:
 
-- **`npm run seed`** (`src/db/seed.ts`) -- populates ~40 orders spanning every production status, payment state, and due-date bucket, with real multi-step status history, a reconciling payment ledger, and a handful of reference images, plus the 5 designer / 5 master-tailor / 1 accountant staff accounts (the designer/master names are the prototype's own, for continuity). Safe to re-run -- staff are looked up by email first, so a second run reuses the same accounts instead of duplicating them; it never deletes anything.
+- **`npm run seed`** (`src/db/seed.ts`) -- populates ~40 orders spanning every production status, payment state (unpaid/advance/fully, with the status **derived** from the ledger it records), and due-date bucket, with real multi-step status history and a handful of reference images, plus the 5 designer / 5 master-tailor / 1 accountant staff accounts (the designer/master names are the prototype's own, for continuity). Safe to re-run -- staff are looked up by email first, so a second run reuses the same accounts instead of duplicating them; it never deletes anything.
 - **`npm run test:integration`** (`tests/integration/`, Vitest) -- repository↔database, service↔repository, authentication, and API-endpoint coverage against the real local Supabase stack (no mocking). Creates and tears down its own fixtures every run. See `tests/integration/README.md`.
 - **`npm run test:rbac`** (`tests/rbac-matrix.mjs`) -- a small, self-contained per-role 200/403 check against the running API: `orders:create`, `orders:edit:pricing_assignment`, `payments:read`/`payments:manage`, `orders:status:design_stages`/`production_stages`, `users:manage`, row-scoping, and the unauthenticated case. Needs `SEED_OWNER_PASSWORD` set to an existing Owner/Manager's password; creates its own throwaway fixtures, so it never depends on `npm run seed` having been run first.
 
@@ -213,7 +213,7 @@ src/
         order.entity.ts                      # OrderEntity, OrderImageEntity -- pure, no persistence/HTTP shape
         order-status-history.entity.ts         # OrderStatusHistoryEntity -- one row in the status audit trail
         order-edit.rules.ts                    # assertFieldsEditable/assertOwnershipForScopedEdit -- the RBAC field-splitting + ownership invariants, framework-free
-        order-ledger.rules.ts                    # assertOrderCanBeMarkedFullyPaid -- the fully_paid <-> ledger-sum invariant seen from the Orders side (a small, deliberate duplicate of Payments' own rule -- Domain layers don't import across modules, see ADR 0003)
+        order-ledger.rules.ts                    # derivePaymentStatus -- unpaid/advance_paid/fully_paid from the ledger sum, seen from the Orders side (a small, deliberate duplicate of Payments' own copy -- Domain layers don't import across modules, see ADR 0003)
         order-status.rules.ts                      # assertCanTransitionStatus -- design-stage vs production-stage RBAC for PATCH /orders/:id/status, see "Order status history & Kanban" below
         order-visibility.rules.ts                    # canViewPaymentFields -- master_tailor's zero payment-visibility rule
       infrastructure/
@@ -236,7 +236,7 @@ src/
         ports/payments-repository.port.ts   # the interface -- Application depends on this, never on the Drizzle adapter
       domain/
         payment.entity.ts                   # PaymentEntity, OrderLedgerContext -- pure, no persistence/HTTP shape
-        payment-ledger.rules.ts               # assertLedgerReconciles/roundCurrency -- the fully_paid <-> ledger-sum invariant, framework-free
+        payment-ledger.rules.ts               # assertDoesNotExceedTotal (overpayment guard) + derivePaymentStatus + roundCurrency -- framework-free
       infrastructure/
         drizzle-payments.repository.ts        # implements the port; reads `orders` from Orders' schema and `profiles` from Users' schema (see ADR 0003)
         payments.schema.ts                      # this module's own Drizzle table def for `payments`
@@ -455,13 +455,36 @@ the data in the first place.
 
 ### Payment ledger
 
-`orders.payment_status`/`total_amount` are a manual marker and target set on
-the order itself (unchanged from earlier phases); the `payments` table
-(`modules/payments/`) is the actual multiple-dated-entries ledger.
-`amountPaid`/`outstanding` on every `Order` response are always the real
-`SUM(payments.amount)` for that order (`DrizzleOrdersRepository.sumPaymentsForOrder`/
-`sumPaymentsForOrders`) -- never stored, always derived at read time, exactly
-like the original design called for.
+The `payments` table (`modules/payments/`) is the multiple-dated-entries
+ledger; `amountPaid`/`outstanding` on every `Order` response are always the
+real `SUM(payments.amount)` (`DrizzleOrdersRepository.sumPaymentsForOrder`/
+`sumPaymentsForOrders`) -- never stored, always derived at read time.
+
+**`payment_status` is DERIVED from the ledger, never chosen by hand**
+(`derivePaymentStatus`, a small deliberate duplicate in both the Orders and
+Payments domains -- Domain layers don't import across modules, see ADR 0003):
+`unpaid` (nothing recorded) -> `advance_paid` (some, below the total) ->
+`fully_paid` (recorded sum reaches the total). Because it's derived, the old
+manual-status class of bugs (status disagreeing with the ledger) is gone:
+- `CreateOrderRequest` no longer accepts `paymentStatus`; a new order starts
+  `unpaid`, and an advance collected at booking is recorded as the first
+  ledger entry (`POST /orders/:id/payments` right after creation), which
+  syncs the status.
+- Every ledger write (`POST`/`PATCH`/`DELETE` on a payment) recomputes the
+  order's status from the new sum and writes it back via
+  `PaymentsRepository.updateOrderLedgerState` (a cross-module
+  Infrastructure-to-Infrastructure write into the Orders-owned `orders`
+  table, the same table the payments repo already reads). The same write
+  reschedules `next_payment_date`: cleared once fully paid, or set to the
+  request's `nextPaymentDate` while a balance remains (fixing a stale
+  "due today" after a same-day payment).
+- `PATCH /orders/:id` doesn't accept `paymentStatus` either; changing
+  `total_amount` re-derives it server-side.
+
+The only ledger guard left is the overpayment rule
+(`assertDoesNotExceedTotal`, `PAYMENT_EXCEEDS_TOTAL`, 400): the recorded sum
+can never exceed `total_amount`. Currency comparisons round to the cent
+(`Math.round(amount * 100)`) to avoid float noise.
 
 **Access**: `payments:read`/`payments:manage` gate `GET`/`POST`/`PATCH`/`DELETE`
 on `/orders/:orderId/payments[/:paymentId]` at the router level (`requireCapability`);
@@ -471,25 +494,6 @@ a `designer`'s "assigned" scope is additionally checked in
 immediately), not the RLS policy on `payments` (no `master_tailor` branch,
 unlike `orders`/`order_images`), and not the `Order` response's payment
 fields (stripped, see above).
-
-**The fully_paid consistency rule** (`PaymentsService.assertReconciles` /
-the check in `OrdersService.updateOrder`): the ledger's sum must exactly
-equal `total_amount` whenever `payment_status` is `fully_paid` -- enforced
-in both directions:
-- `PATCH /orders/:id` rejects (409) *setting* `paymentStatus` to `fully_paid`
-  if the current ledger sum doesn't match (the final `total_amount`, if
-  that's also being changed in the same request).
-- Every ledger write (`POST`/`PATCH`/`DELETE` on a payment) rejects (409) if
-  the order is *currently* `fully_paid` and the write would leave the sum
-  not matching. In practice this means: to correct a ledger entry on an
-  order already marked fully paid, change `paymentStatus` away from
-  `fully_paid` first, make the correction, then mark it fully paid again
-  (which re-validates the sum) -- a deliberate, slightly stricter workflow
-  in exchange for the invariant never silently drifting.
-
-Currency comparisons round to the cent (`Math.round(amount * 100)`) before
-comparing, to avoid JS floating-point noise (`0.1 + 0.2 !== 0.3`) producing
-false-positive rejections.
 
 ### Order status history & Kanban
 
@@ -527,22 +531,41 @@ design-stage status also gets one. Both roles' capabilities are `"assigned"`
 scoped, so an unassigned Designer/Master Tailor gets a 403 even for a status
 change within their own capability's stage.
 
-### Dashboard stats
+### Dashboard stats & revenue report
 
-`GET /orders/stats` (`DrizzleOrdersRepository.getStats`) computes `total`/`active`/`completed`/`pendingPayments`/`collectedRevenue`/`outstandingRevenue`
+`GET /orders/stats` (`DrizzleOrdersRepository.getStats`) computes
+`total`/`active`/`completed`/`thisMonth`/`inProduction`/`overdue`/`urgent`
+plus the payment aggregates `pendingPayments`/`collectedRevenue`/`outstandingRevenue`
 entirely in Postgres -- one query with `COUNT(*) FILTER (WHERE ...)` for the
-order-level counts (`active`/`completed` derived from the same
-`COMPLETED_CANONICAL_STAGES`/`CANONICAL_TO_GRANULAR` vocabulary the Kanban
-board groups by, not a separate definition), one more joining `payments` for
-`collectedRevenue`. Never fetches every order into Node and reduces --
-same "aggregate in the database" principle as `sumPaymentsForOrder(s)`.
-Row-scoped the same way `GET /orders` is (`rowScopeCondition`), and
-payment-related fields are stripped by `order-stats.presenter.ts` for
-callers without `payments:read` (master_tailor) -- verified live that a
-Master Tailor's response has only `total`/`active`/`completed`, no payment
-keys at all, while an Owner/Manager's has all six. Registered before
+order-level counts (`active`/`completed`/`inProduction` derived from the same
+`COMPLETED_CANONICAL_STAGES`/`CANONICAL_TO_GRANULAR`/`PRODUCTION_STAGE_STATUSES`
+vocabulary the Kanban board groups by, not a separate definition;
+`overdue`/`urgent` from `due_date` vs `current_date`), one more joining
+`payments` for `collectedRevenue`. Never fetches every order into Node and
+reduces -- same "aggregate in the database" principle as `sumPaymentsForOrder(s)`.
+Row-scoped the same way `GET /orders` is (`rowScopeCondition`), and the three
+payment-related fields are stripped by `order-stats.presenter.ts` for callers
+without `payments:read` (master_tailor) -- a Master Tailor's response has only
+the seven non-payment counts, no payment keys at all. Registered before
 `GET /orders/:id` in `orders.routes.ts` so Express doesn't match `stats` as
 the `:id` param.
+
+Each dashboard card deep-links into a matching filtered list via the
+`?bucket=` query param on `GET /orders` (`active`, `production`, `completed`,
+`ready`, `delivered`, `pending_payment`, `payment_overdue`, `payment_upcoming`,
+`overdue`, `urgent`, `this_month`); `DrizzleOrdersRepository.bucketCondition`
+translates the bucket into the same WHERE clause the stat count used, so a card
+and the list it opens always agree. The `payment_overdue`/`payment_upcoming`
+buckets (outstanding balance with a next-payment date past / still ahead) back
+the dedicated pending-payments page's Overdue / Upcoming filter.
+
+`GET /orders/revenue?from=YYYY-MM-DD&to=YYYY-MM-DD` (`getMonthlyRevenue`,
+`reports:financial` only) returns collected revenue grouped into accounting
+periods over an inclusive date window (the UI sends a whole-year span so an
+accountant can export any year range; defaults to the last 12 months). Period
+boundaries follow `ACCOUNTING_CYCLE_START_DAY` (1 = calendar months by default;
+e.g. 7 gives 7th-to-6th billing cycles), computed in SQL with `date_trunc` +
+`make_interval` over the `payments` ledger.
 
 ### Authentication
 
@@ -593,6 +616,7 @@ server-side on the spot, returned once in the response. See the Flow Map's
 - **Password scheme** (`common/crypto/credentials.ts`'s `generatePassword`): first name + `-` + an 8-character random suffix from a 57-symbol alphabet (visually-ambiguous characters like `0`/`O` and `1`/`l`/`I` excluded), e.g. `Aditya-9kQ2Xf7q`. Readable enough to write down or read aloud, with real entropy (~47 bits) so knowing the person's name gives no head start guessing it.
 - **Who can regenerate whose password** (`UsersService.generatePassword`): Owner/Manager can always regenerate a `designer` or `master_tailor` account's password. For `owner_manager`/`accountant` accounts, it's only available until `profiles.last_login_at` is set (i.e. before their first real login) -- `AuthService.login` records that timestamp, and only a password-based login counts, not a silent token refresh. After that, they're expected to use `POST /auth/password-reset-request` like everyone self-managing their own account.
 - **QR login** (`master_tailor` only): `POST /users/:id/qr-token` generates a high-entropy opaque token, stores only its SHA-256 hash (`qr_login_tokens` -- a table with no `anon`/`authenticated` grant at all, reachable only through this API's service-role client; see the migration comment for why it isn't just a column on `profiles`), and returns the raw token/URL once. Regenerating -- or deactivating the account -- immediately invalidates the previous one. `POST /auth/qr-login` verifies the hash, then mints a real session via Supabase's admin `generateLink` (magic-link type) immediately redeemed server-side via `verifyOtp` -- the link is never emailed, `generateLink` is used purely as an internal "issue a session for this user" primitive. See the Flow Map's QR diagrams.
+- **Listing & lifecycle**: `GET /users` is server-side searchable (name/email, case-insensitive) and offset-paginated (`{ users, total, limit, offset }`, `limit` clamped 1-100) -- the admin screen never loads every account at once. `GET /users/:id` backs the per-user detail page. Deactivation is reversible: `POST /users/:id/reactivate` flips `profiles.active` back on and lifts the Supabase Auth ban (`unbanUser`); a fresh QR must be re-issued since deactivation cleared the old one.
 - **Order QR**: unrelated to login -- needleye-web renders a QR (via `qrcode.react`) on each order's detail page that just links to that order's own (already auth-gated, already role-scoped) URL. Nothing new on this API's side beyond the read-side payment-field stripping below.
 
 ### Dependency injection
@@ -831,7 +855,7 @@ sequenceDiagram
     API-->>FE: 204
 ```
 
-### Record a payment, then mark an order fully paid
+### Record a payment (status derived + synced from the ledger)
 
 ```mermaid
 sequenceDiagram
@@ -839,32 +863,23 @@ sequenceDiagram
     participant PayAPI as api/payments.routes.ts
     participant PaySvc as PaymentsService
     participant PayRepo as DrizzlePaymentsRepository
-    participant OrdAPI as api/orders.routes.ts
-    participant OrdSvc as OrdersService
-    participant OrdRepo as DrizzleOrdersRepository
 
-    User->>PayAPI: POST /orders/:orderId/payments { amount, method }
+    User->>PayAPI: POST /orders/:orderId/payments { amount, method, nextPaymentDate? }
     PayAPI->>PaySvc: addPayment(ctx, orderId, dto)
     PaySvc->>PayRepo: findOrderContext(orderId)
-    PayRepo-->>PaySvc: { designerId, totalAmount, paymentStatus }
+    PayRepo-->>PaySvc: { designerId, totalAmount }
     alt scope is "assigned" and caller isn't the order's designer
         PaySvc-->>PayAPI: throws ForbiddenError
     else access ok
-        alt order.paymentStatus === "fully_paid"
-            PaySvc->>PayRepo: sumByOrderId(orderId)
-            PaySvc->>PaySvc: assertLedgerReconciles(sum + amount, totalAmount)
-            Note over PaySvc: 409 if the new sum wouldn't still equal totalAmount
-        end
+        PaySvc->>PayRepo: sumByOrderId(orderId)
+        PaySvc->>PaySvc: assertDoesNotExceedTotal(sum + amount, totalAmount)
+        Note over PaySvc: 400 PAYMENT_EXCEEDS_TOTAL if the new sum would overpay
         PaySvc->>PayRepo: create(record)
+        PaySvc->>PaySvc: derivePaymentStatus(sum + amount, totalAmount)
+        PaySvc->>PayRepo: updateOrderLedgerState(orderId, { paymentStatus, nextPaymentDate })
+        Note over PayRepo: cross-module Infra->Infra write into the Orders-owned<br/>orders table (ADR 0003). Status: unpaid -> advance_paid -> fully_paid;<br/>next date cleared once fully paid, else set to the supplied date
         PayAPI-->>User: 201 { payment }
     end
-
-    Note over User,OrdSvc: Marking fully_paid runs the same check in reverse
-    User->>OrdAPI: PATCH /orders/:id { paymentStatus: "fully_paid" }
-    OrdAPI->>OrdSvc: updateOrder(ctx, id, dto)
-    OrdSvc->>OrdRepo: sumPaymentsForOrder(orderId)
-    Note over OrdRepo: its own independent query against the payments table --<br/>not a call into DrizzlePaymentsRepository. Orders' own<br/>assertOrderCanBeMarkedFullyPaid is a small, deliberate duplicate<br/>of Payments' assertLedgerReconciles (see ADR 0003: Domain layers<br/>don't import across modules, only Infrastructure does)
-    OrdSvc->>OrdSvc: reject (409) unless sum === totalAmount
 ```
 
 ### Change an order's status (Kanban drag or detail-page action)
@@ -915,15 +930,18 @@ sequenceDiagram
 | POST `/auth/password-update` | bearer | -- | auth.routes.ts | `updatePassword` | `updatePassword` |
 | POST `/auth/exchange-code` | none | -- | auth.routes.ts | `exchangeCode` | `exchangeCodeForSession`, `getProfile` |
 | POST `/auth/qr-login` | none | -- | auth.routes.ts | `qrLogin` | `signInWithQrToken` |
-| GET `/users` | bearer | `users:manage` | users.routes.ts | `listUsers` | `findAll` |
+| GET `/users` | bearer | `users:manage` | users.routes.ts | `listUsers` | `findMany`, `countMany` (searchable, paginated) |
+| GET `/users/:id` | bearer | `users:manage` | users.routes.ts | `getUser` | `findById` |
 | POST `/users` | bearer | `users:manage` | users.routes.ts | `createUser` | `createUser` |
 | POST `/users/:id/generate-password` | bearer | `users:manage` | users.routes.ts | `generatePassword` | `findById`, `setPassword` |
 | POST `/users/:id/qr-token` | bearer | `users:manage` | users.routes.ts | `generateQrToken` | `findById`, `setQrToken` |
 | PATCH `/users/:id` | bearer | `users:manage` | users.routes.ts | `updateUser` | `updateProfile` |
 | POST `/users/:id/deactivate` | bearer | `users:manage` | users.routes.ts | `deactivateUser` | `updateProfile`, `banAuthUser`, `clearQrToken` |
-| GET `/orders` | bearer | `orders:read` | orders.routes.ts | `listOrders` | `findMany` (row-scoped) |
+| POST `/users/:id/reactivate` | bearer | `users:manage` | users.routes.ts | `reactivateUser` | `findById`, `updateProfile`, `unbanAuthUser` |
+| GET `/orders` | bearer | `orders:read` | orders.routes.ts | `listOrders` | `findMany` (row-scoped; `?bucket=` dashboard filters) |
 | POST `/orders` | bearer | `orders:create` | orders.routes.ts | `createOrder` | `create` |
 | GET `/orders/stats` | bearer | `orders:read` | orders.routes.ts | `getStats` | `getStats` (row-scoped; registered before `/:id`) |
+| GET `/orders/revenue` | bearer | `reports:financial` | orders.routes.ts | `getMonthlyRevenue` | `getMonthlyRevenue` (registered before `/:id`) |
 | GET `/orders/:id` | bearer | `orders:read` | orders.routes.ts | `getOrder` | `findById` (row-scoped) |
 | PATCH `/orders/:id` | bearer | field-split, see below | orders.routes.ts | `updateOrder` | `findBasicById`, `update` |
 | PATCH `/orders/:id/status` | bearer | stage-split, see "Order status history & Kanban" below | orders.routes.ts | `updateStatus` | `findBasicById`, `updateStatus` |
@@ -967,7 +985,9 @@ these three are only read by `SupabaseAuthProvider`/`SupabaseStorageProvider`),
 `STORAGE_BUCKET_NAME`, `API_PORT`, `CORS_ALLOWED_ORIGIN` (must match
 wherever needleye-web is running/deployed), `WEB_APP_URL` (used only to
 build the link inside password-reset emails), `LOG_LEVEL` (`fatal` `error`
-`warn` `info` `debug` `trace`, default `info`).
+`warn` `info` `debug` `trace`, default `info`), `ACCOUNTING_CYCLE_START_DAY`
+(day of month the monthly-revenue accounting period begins, 1-28, default 1 =
+calendar months -- backs `GET /orders/revenue`).
 
 ## Deployment
 

@@ -36,7 +36,7 @@ ordersRouter.get(
   "/",
   requireCapability("orders:read"),
   asyncHandler(async (req, res) => {
-    const { search, status, designerId, masterTailorId } = req.query;
+    const { search, status, designerId, masterTailorId, bucket } = req.query;
     const result = await ordersService.listOrders(
       { profile: req.profile!, authUserId: req.authUserId! },
       {
@@ -44,6 +44,7 @@ ordersRouter.get(
         status: typeof status === "string" ? status : undefined,
         designerId: typeof designerId === "string" ? designerId : undefined,
         masterTailorId: typeof masterTailorId === "string" ? masterTailorId : undefined,
+        bucket: typeof bucket === "string" ? bucket : undefined,
       },
       parseOrdersPage(req.query),
     );
@@ -51,13 +52,34 @@ ordersRouter.get(
   }),
 );
 
-// Registered before "/:id" -- Express would otherwise match "stats" as :id.
+// Registered before "/:id" -- Express would otherwise match "stats"/"revenue" as :id.
 ordersRouter.get(
   "/stats",
   requireCapability("orders:read"),
   asyncHandler(async (req, res) => {
     const stats = await ordersService.getStats({ profile: req.profile!, authUserId: req.authUserId! });
     res.json(stats);
+  }),
+);
+
+// Financial revenue report over an inclusive [from, to] date window --
+// Owner/Manager + Accountant only. Defaults to the last 12 months when the
+// range is missing/invalid; the accountant can pick any year span from the UI.
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+ordersRouter.get(
+  "/revenue",
+  requireCapability("reports:financial"),
+  asyncHandler(async (req, res) => {
+    const today = new Date();
+    const toRaw = req.query.to;
+    const fromRaw = req.query.from;
+    const to = typeof toRaw === "string" && ISO_DATE.test(toRaw) ? toRaw : today.toISOString().slice(0, 10);
+    const defaultFrom = new Date(today.getFullYear(), today.getMonth() - 11, 1).toISOString().slice(0, 10);
+    let from = typeof fromRaw === "string" && ISO_DATE.test(fromRaw) ? fromRaw : defaultFrom;
+    // Guard against an inverted range (from after to).
+    if (from > to) from = defaultFrom <= to ? defaultFrom : to;
+    const revenue = await ordersService.getRevenue({ profile: req.profile!, authUserId: req.authUserId! }, { from, to });
+    res.json(revenue);
   }),
 );
 

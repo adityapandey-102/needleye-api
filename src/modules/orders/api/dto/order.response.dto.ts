@@ -22,6 +22,7 @@ export interface OrderResponseDto {
   billNumber: string;
   bookingDate: string;
   dueDate: string;
+  nextPaymentDate: string | null;
   designerId: string;
   designerName?: string;
   masterTailorId: string;

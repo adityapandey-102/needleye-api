@@ -1,21 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { assertOrderCanBeMarkedFullyPaid } from "./order-ledger.rules";
-import { ConflictError } from "../../../common/errors/app-error";
+import { derivePaymentStatus } from "./order-ledger.rules";
 
-describe("assertOrderCanBeMarkedFullyPaid", () => {
-  it("allows marking fully paid when the ledger sum exactly matches the total", () => {
-    expect(() => assertOrderCanBeMarkedFullyPaid(5000, 5000)).not.toThrow();
+describe("derivePaymentStatus", () => {
+  it("is unpaid when nothing has been recorded", () => {
+    expect(derivePaymentStatus(0, 5000)).toBe("unpaid");
   });
 
-  it("rejects marking fully paid when the ledger sum falls short of the total", () => {
-    expect(() => assertOrderCanBeMarkedFullyPaid(4000, 5000)).toThrow(ConflictError);
+  it("is advance_paid when some, but less than the total, is recorded", () => {
+    expect(derivePaymentStatus(2000, 5000)).toBe("advance_paid");
   });
 
-  it("rejects marking fully paid when the ledger sum exceeds the total", () => {
-    expect(() => assertOrderCanBeMarkedFullyPaid(5500, 5000)).toThrow(ConflictError);
+  it("is fully_paid when the recorded sum reaches the total", () => {
+    expect(derivePaymentStatus(5000, 5000)).toBe("fully_paid");
   });
 
-  it("tolerates floating-point rounding noise at the paise/cent level", () => {
-    expect(() => assertOrderCanBeMarkedFullyPaid(0.1 + 0.2, 0.3)).not.toThrow();
+  it("is fully_paid when the recorded sum meets the total across cent rounding", () => {
+    expect(derivePaymentStatus(0.1 + 0.2, 0.3)).toBe("fully_paid");
+  });
+
+  it("treats a zero-total order as unpaid", () => {
+    expect(derivePaymentStatus(0, 0)).toBe("unpaid");
   });
 });

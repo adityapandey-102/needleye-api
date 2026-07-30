@@ -18,6 +18,8 @@ const envSchema = z.object({
   /** Auth rate-limit window (ms) and max requests per window per IP. Defaults: 15 min / 30 attempts. */
   AUTH_RATE_LIMIT_WINDOW_MS: z.coerce.number().default(15 * 60 * 1000),
   AUTH_RATE_LIMIT_MAX: z.coerce.number().default(30),
+  /** Day-of-month the monthly accounting/revenue cycle starts (1 = calendar month; e.g. 7 = 7th → next 7th). */
+  ACCOUNTING_CYCLE_START_DAY: z.coerce.number().int().min(1).max(28).default(1),
 });
 
 const parsed = envSchema.safeParse(process.env);

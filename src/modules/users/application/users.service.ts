@@ -7,10 +7,23 @@ import { toUserResponseDto } from "../api/user.presenter";
 import { AUDIT_ACTIONS, AUDIT_ENTITIES } from "../../../common/audit/audit-actions";
 import { auditLogger as defaultAuditLogger } from "../../../common/audit/drizzle-audit-logger";
 import type { AuditLogger } from "../../../common/audit/audit-logger";
-import type { UsersRepositoryPort, ProfileUpdate } from "./ports/users-repository.port";
+import type {
+  UsersRepositoryPort,
+  ProfileUpdate,
+  UserListFilters,
+  UserListPage,
+} from "./ports/users-repository.port";
 import type { UserResponseDto } from "../api/dto/user.response.dto";
 import type { CreateUserDto } from "../api/dto/create-user.dto";
 import type { UpdateUserDto } from "../api/dto/update-user.dto";
+
+/** Paginated user list -- `total` is the full count matching the filters, for the pager. */
+export interface UserListResult {
+  users: UserResponseDto[];
+  total: number;
+  limit: number;
+  offset: number;
+}
 
 export class UsersService {
   constructor(
@@ -18,9 +31,19 @@ export class UsersService {
     private readonly audit: AuditLogger = defaultAuditLogger,
   ) {}
 
-  async listUsers(): Promise<UserResponseDto[]> {
-    const entities = await this.usersRepository.findAll();
-    return entities.map(toUserResponseDto);
+  async listUsers(filters: UserListFilters, page: UserListPage): Promise<UserListResult> {
+    // Count + page in parallel -- same shape as OrdersService.listOrders.
+    const [entities, total] = await Promise.all([
+      this.usersRepository.findMany(filters, page),
+      this.usersRepository.countMany(filters),
+    ]);
+    return { users: entities.map(toUserResponseDto), total, limit: page.limit, offset: page.offset };
+  }
+
+  async getUser(id: string): Promise<UserResponseDto> {
+    const entity = await this.usersRepository.findById(id);
+    if (!entity) throw new NotFoundError("User not found", ERROR_CODES.USER_NOT_FOUND);
+    return toUserResponseDto(entity);
   }
 
   /**
@@ -93,5 +116,16 @@ export class UsersService {
     // A deactivated account's QR (if any) must stop working immediately, not linger.
     await this.usersRepository.clearQrToken(targetId);
     await this.audit.record({ action: AUDIT_ACTIONS.USER_DEACTIVATED, entityType: AUDIT_ENTITIES.USER, entityId: targetId });
+  }
+
+  async reactivateUser(targetId: string): Promise<void> {
+    const target = await this.usersRepository.findById(targetId);
+    if (!target) throw new NotFoundError("User not found", ERROR_CODES.USER_NOT_FOUND);
+
+    await this.usersRepository.updateProfile(targetId, { active: true });
+    // Lift the Auth-layer ban so the account can sign in again. A fresh QR
+    // must be issued separately -- deactivation cleared the old one.
+    await this.usersRepository.unbanAuthUser(targetId);
+    await this.audit.record({ action: AUDIT_ACTIONS.USER_REACTIVATED, entityType: AUDIT_ENTITIES.USER, entityId: targetId });
   }
 }

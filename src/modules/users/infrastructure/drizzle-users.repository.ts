@@ -1,4 +1,4 @@
-import { eq, sql } from "drizzle-orm";
+import { and, eq, ilike, or, sql, type SQL } from "drizzle-orm";
 import { db } from "../../../common/database/drizzle-client";
 import { profiles } from "./profile.schema";
 // Cross-module Infrastructure-only read/write: `qr_login_tokens` is owned by
@@ -9,7 +9,12 @@ import { UserAccountMapper } from "./user-account.mapper";
 import type { AuthProvider } from "../../../common/auth/auth-provider";
 import type { Role } from "../../../domain";
 import type { UserAccountEntity } from "../domain/user-account.entity";
-import type { UsersRepositoryPort, ProfileUpdate } from "../application/ports/users-repository.port";
+import type {
+  UsersRepositoryPort,
+  ProfileUpdate,
+  UserListFilters,
+  UserListPage,
+} from "../application/ports/users-repository.port";
 import type { UserAccountRow } from "./user-account.mapper";
 
 const USER_ROW_SELECT = {
@@ -28,18 +33,40 @@ const USER_ROW_SELECT = {
 export class DrizzleUsersRepository implements UsersRepositoryPort {
   constructor(private readonly authProvider: AuthProvider) {}
 
-  async findAll(): Promise<UserAccountEntity[]> {
+  /** Name-or-email case-insensitive search, shared by findMany and countMany so page and total agree. */
+  private searchCondition(filters: UserListFilters): SQL | undefined {
+    if (!filters.search?.trim()) return undefined;
+    const term = `%${filters.search.trim()}%`;
+    return or(ilike(profiles.fullName, term), ilike(profiles.email, term));
+  }
+
+  async findMany(filters: UserListFilters, page: UserListPage): Promise<UserAccountEntity[]> {
     let rows: UserAccountRow[];
     try {
       rows = await db
         .select(USER_ROW_SELECT)
         .from(profiles)
         .leftJoin(qrLoginTokens, eq(qrLoginTokens.profileId, profiles.id))
-        .orderBy(profiles.createdAt);
+        .where(this.searchCondition(filters))
+        .orderBy(profiles.createdAt)
+        .limit(page.limit)
+        .offset(page.offset);
     } catch (error) {
       throw new InternalError("Failed to load users", error);
     }
     return rows.map((row) => UserAccountMapper.toEntity(row));
+  }
+
+  async countMany(filters: UserListFilters): Promise<number> {
+    try {
+      const [row] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(profiles)
+        .where(and(this.searchCondition(filters)));
+      return row?.count ?? 0;
+    } catch (error) {
+      throw new InternalError("Failed to count users", error);
+    }
   }
 
   async findById(id: string): Promise<UserAccountEntity | null> {
@@ -108,5 +135,9 @@ export class DrizzleUsersRepository implements UsersRepositoryPort {
 
   async banAuthUser(id: string): Promise<void> {
     await this.authProvider.banUser(id);
+  }
+
+  async unbanAuthUser(id: string): Promise<void> {
+    await this.authProvider.unbanUser(id);
   }
 }

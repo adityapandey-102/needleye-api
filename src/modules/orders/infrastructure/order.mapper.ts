@@ -9,6 +9,7 @@ export type OrderQueryResult = {
   billNumber: string;
   bookingDate: string;
   dueDate: string;
+  nextPaymentDate: string | null;
   designerId: string;
   masterTailorId: string;
   productCategory: OrderEntity["productCategory"];
@@ -50,6 +51,7 @@ export const OrderMapper = {
       billNumber: row.billNumber,
       bookingDate: row.bookingDate,
       dueDate: row.dueDate,
+      nextPaymentDate: row.nextPaymentDate,
       designerId: row.designerId,
       designerName: row.designer?.fullName,
       masterTailorId: row.masterTailorId,

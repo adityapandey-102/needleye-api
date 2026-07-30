@@ -110,6 +110,12 @@ export class SupabaseAuthProvider implements AuthProvider {
     const { error } = await supabaseClient.auth.admin.updateUserById(userId, { ban_duration: "876000h" });
     if (error) throw new InternalError("Failed to revoke account access");
   }
+
+  async unbanUser(userId: string): Promise<void> {
+    // "none" lifts the ban banUser() set, restoring sign-in for a reactivated account.
+    const { error } = await supabaseClient.auth.admin.updateUserById(userId, { ban_duration: "none" });
+    if (error) throw new InternalError("Failed to restore account access");
+  }
 }
 
 /** Module-level singleton -- manual composition root, no DI container needed at this size. Mirrors storageProvider's pattern. */

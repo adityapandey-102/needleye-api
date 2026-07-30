@@ -17,6 +17,17 @@ export interface UpdatePaymentRecord {
 }
 
 /**
+ * The derived order-level state a ledger change writes back to the order:
+ * the recomputed payment status, and (optionally) the rescheduled next-payment
+ * date. `nextPaymentDate` is only applied when present -- `undefined` leaves
+ * the existing schedule untouched; `null` clears it (e.g. once fully paid).
+ */
+export interface OrderLedgerStateUpdate {
+  paymentStatus: string;
+  nextPaymentDate?: string | null;
+}
+
+/**
  * What the Application layer needs from persistence, expressed in domain
  * terms -- PaymentsService depends on this port only, never on the
  * concrete Drizzle adapter that satisfies it
@@ -33,4 +44,12 @@ export interface PaymentsRepositoryPort {
   create(record: NewPaymentRecord): Promise<PaymentEntity>;
   update(paymentId: string, data: UpdatePaymentRecord): Promise<PaymentEntity>;
   delete(paymentId: string): Promise<void>;
+  /**
+   * Writes the derived payment status (and optional rescheduled next-payment
+   * date) back onto the order after a ledger change. A cross-module
+   * Infrastructure-to-Infrastructure write into the Orders-owned `orders`
+   * table -- the same table this repo already reads via findOrderContext (see
+   * docs/adr/0003-per-module-schema-ownership.md).
+   */
+  updateOrderLedgerState(orderId: string, update: OrderLedgerStateUpdate): Promise<void>;
 }

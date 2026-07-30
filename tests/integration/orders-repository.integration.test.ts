@@ -38,6 +38,7 @@ describe("DrizzleOrdersRepository (integration)", () => {
       billNumber: `IT-${Date.now()}`,
       bookingDate: "2026-01-01",
       dueDate: "2026-02-01",
+      nextPaymentDate: null,
       designerId: designer.id,
       masterTailorId: masterTailor.id,
       productCategory: "saree",

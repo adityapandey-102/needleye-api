@@ -30,6 +30,7 @@ import { storageProvider } from "../common/storage/supabase-storage-provider";
 import { generatePassword } from "../common/crypto/credentials";
 import { GRANULAR_STATUSES, DESIGN_STAGE_STATUSES, type GranularStatus } from "../domain/order-status";
 import { PRODUCT_CATEGORIES, PAYMENT_METHODS, type ProductCategory, type PaymentStatus } from "../domain/product-categories";
+import { derivePaymentStatus } from "../modules/orders/domain/order-ledger.rules";
 import type { Role } from "../domain/roles";
 
 const usersRepository = new DrizzleUsersRepository(authProvider);
@@ -133,10 +134,9 @@ async function advanceStatus(orderId: string, targetStatus: GranularStatus, desi
   }
 }
 
-async function addLedgerEntries(orderId: string, totalAmount: number, paymentStatus: PaymentStatus, recordedBy: string, bookingDate: string): Promise<void> {
-  const fraction = paymentStatus === "advance_paid" ? 0.2 + Math.random() * 0.15 : paymentStatus === "partially_paid" ? 0.4 + Math.random() * 0.35 : 1;
-  const amount = paymentStatus === "fully_paid" ? totalAmount : Math.round(totalAmount * fraction);
-
+/** Records one ledger entry of `amount` (skips zero) -- payment status is derived from the ledger, so the caller just controls how much is paid. */
+async function addLedgerEntry(orderId: string, amount: number, recordedBy: string, bookingDate: string): Promise<void> {
+  if (amount <= 0) return;
   await paymentsRepository.create({
     orderId,
     amount,
@@ -216,12 +216,27 @@ async function main() {
     const master = pick(masters, i + 2);
     const category = pick(PRODUCT_CATEGORIES, i).value;
     const targetStatus = pick(GRANULAR_STATUSES, i).value;
-    const paymentStatus: PaymentStatus = pick(["advance_paid", "partially_paid", "fully_paid"] as const, i);
     const bucket = i % 4;
     const dueDate = dueDateForBucket(bucket, i);
     const bookingDate = daysFromToday(-(5 + (i % 25)));
     const [minAmount, maxAmount] = categoryAmountRange(category);
     const totalAmount = Math.round((minAmount + Math.random() * (maxAmount - minAmount)) / 50) * 50;
+    // Choose a payment plan (unpaid / advance / fully), then derive the status
+    // from the amount actually recorded -- status is never set by hand.
+    const plan = pick(["unpaid", "advance_paid", "fully_paid"] as const, i);
+    const paidAmount =
+      plan === "fully_paid" ? totalAmount : plan === "advance_paid" ? Math.round(totalAmount * (0.2 + (i % 4) * 0.15)) : 0;
+    const paymentStatus: PaymentStatus = derivePaymentStatus(paidAmount, totalAmount);
+    // Vary next-payment dates so due-tracking has realistic demo data:
+    // fully-paid orders have none; others are spread across overdue/today/upcoming.
+    const nextPaymentDate =
+      paymentStatus === "fully_paid"
+        ? null
+        : bucket === 0
+          ? daysFromToday(-(2 + (i % 10))) // overdue
+          : bucket === 1
+            ? daysFromToday(i % 2) // due today / tomorrow
+            : daysFromToday(5 + (i % 20)); // upcoming
 
     const order = await ordersRepository.create({
       customerName: pick(CUSTOMERS, i),
@@ -229,6 +244,7 @@ async function main() {
       billNumber: `BILL-2026-${String(i + 1).padStart(3, "0")}`,
       bookingDate,
       dueDate,
+      nextPaymentDate,
       designerId: designer.id,
       masterTailorId: master.id,
       productCategory: category,
@@ -246,7 +262,7 @@ async function main() {
     });
 
     await advanceStatus(order.id, targetStatus, designer.id, master.id);
-    await addLedgerEntries(order.id, totalAmount, paymentStatus, designer.id, bookingDate);
+    await addLedgerEntry(order.id, paidAmount, designer.id, bookingDate);
 
     if (i % 3 === 0) {
       await uploadPlaceholderImages(order.id, 1 + (i % 3), designer.id);

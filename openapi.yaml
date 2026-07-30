@@ -294,19 +294,32 @@ paths:
   /users:
     get:
       tags: [Users]
-      summary: List every staff account
-      description: Owner/Manager only (`users:manage`).
+      summary: List staff accounts (searchable, paginated)
+      description: |
+        Owner/Manager only (`users:manage`). Server-side offset pagination and
+        search (never loads every account into the client), mirroring the
+        Orders list: the response is a bounded envelope
+        (`{ users, total, limit, offset }`). `search` matches full name OR
+        email, case-insensitively.
+      parameters:
+        - { in: query, name: search, schema: { type: string }, description: "Case-insensitive match on name or email" }
+        - { in: query, name: limit, schema: { type: integer, default: 20, minimum: 1, maximum: 100 }, description: "Clamped to 1-100" }
+        - { in: query, name: offset, schema: { type: integer, default: 0, minimum: 0 } }
       responses:
         "200":
-          description: All users
+          description: A page of users
           content:
             application/json:
               schema:
                 type: object
+                required: [users, total, limit, offset]
                 properties:
                   users:
                     type: array
                     items: { $ref: "#/components/schemas/User" }
+                  total: { type: integer, description: "Full count matching the search, for the pager." }
+                  limit: { type: integer }
+                  offset: { type: integer }
         "403":
           $ref: "#/components/responses/Forbidden"
 
@@ -406,6 +419,26 @@ paths:
           $ref: "#/components/responses/NotFound"
 
   /users/{id}:
+    get:
+      tags: [Users]
+      summary: Fetch a single staff account
+      description: Owner/Manager only. Backs the user detail / management page.
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: The user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
     patch:
       tags: [Users]
       summary: Update a staff member's name, role, or active flag
@@ -454,6 +487,23 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /users/{id}/reactivate:
+    post:
+      tags: [Users]
+      summary: Reactivate a deactivated staff member
+      description: |
+        Owner/Manager only. Sets `profiles.active = true` AND lifts the
+        Supabase Auth ban applied by deactivation, restoring sign-in. Any QR
+        login must be re-issued separately (deactivation cleared the old one).
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "204": { description: Reactivated }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /orders:
     get:
       tags: [Orders]
@@ -481,6 +531,16 @@ paths:
         - name: masterTailorId
           in: query
           schema: { type: string, format: uuid }
+        - name: bucket
+          in: query
+          description: |
+            Dashboard filter a summary card deep-links into. One of:
+            `active`, `production`, `completed`, `ready`, `delivered`,
+            `pending_payment`, `overdue`, `urgent`, `this_month`.
+            Unknown values are ignored (no filtering).
+          schema:
+            type: string
+            enum: [active, production, completed, ready, delivered, pending_payment, payment_overdue, payment_upcoming, overdue, urgent, this_month]
         - name: limit
           in: query
           description: Page size. Defaults to 20, clamped to a maximum of 100.
@@ -546,6 +606,37 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/OrderStats" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /orders/revenue:
+    get:
+      tags: [Orders]
+      summary: Monthly collected-revenue report over a date range
+      description: |
+        Owner/Manager and Accountant only (`reports:financial`). Collected
+        revenue grouped into accounting periods over an inclusive `[from, to]`
+        window (the UI sends a whole-year span), oldest period first. Period
+        boundaries follow `ACCOUNTING_CYCLE_START_DAY` (1 = calendar months by
+        default; e.g. 7 gives 7th-to-6th cycles). Computed in Postgres from the
+        `payments` ledger. Registered before `/orders/{id}` for the same
+        reason `stats` is. Defaults to the last 12 months when the range is
+        missing/invalid.
+      parameters:
+        - name: from
+          in: query
+          description: Inclusive start date (YYYY-MM-DD). Defaults to the first of the month 11 months ago.
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          description: Inclusive end date (YYYY-MM-DD). Defaults to today.
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: The revenue report
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RevenueReport" }
         "403":
           $ref: "#/components/responses/Forbidden"
 
@@ -734,11 +825,12 @@ paths:
       tags: [Payments]
       summary: Record a payment
       description: |
-        Gated by `payments:manage`. If the order is currently marked
-        `fully_paid`, this is rejected with 409 unless the resulting ledger
-        sum would still exactly equal `total_amount` -- see the README's
-        Flow Map for the full consistency rule (it runs in both directions:
-        here, and on `PATCH /orders/{id}` when *setting* `fully_paid`).
+        Gated by `payments:manage`. Rejected with 400 `PAYMENT_EXCEEDS_TOTAL`
+        if the resulting ledger sum would exceed `total_amount` (overpayment).
+        After recording, the order's DERIVED payment status is recomputed and
+        synced (unpaid -> advance_paid -> fully_paid), and its `nextPaymentDate`
+        is rescheduled: cleared once fully paid, or set to the request's
+        `nextPaymentDate` while a balance remains.
       parameters:
         - $ref: "#/components/parameters/OrderIdPath"
       requestBody:
@@ -924,7 +1016,8 @@ components:
 
     PaymentStatus:
       type: string
-      enum: [advance_paid, partially_paid, fully_paid]
+      description: DERIVED from the ledger (sum of payments vs order total), never submitted. unpaid -> advance_paid -> fully_paid.
+      enum: [unpaid, advance_paid, fully_paid]
 
     PaymentMethod:
       type: string
@@ -989,6 +1082,11 @@ components:
         method: { $ref: "#/components/schemas/PaymentMethod" }
         paidAt: { type: string, format: date, description: Defaults to today if omitted. }
         notes: { type: string }
+        nextPaymentDate:
+          type: string
+          format: date
+          nullable: true
+          description: "When the next payment is expected if a balance remains (reschedules the order's due tracking). Null clears it; ignored once fully paid (always cleared)."
 
     UpdatePaymentRequest:
       type: object
@@ -1051,10 +1149,15 @@ components:
         purchaseRequired: { type: boolean }
         paymentStatus:
           allOf: [{ $ref: "#/components/schemas/PaymentStatus" }]
-          description: Absent entirely (not null) for callers without payments:read (master_tailor) -- a real server-side omission, not a UI-only hide.
+          description: Derived from the ledger (never submitted). Absent entirely (not null) for callers without payments:read (master_tailor) -- a real server-side omission, not a UI-only hide.
         totalAmount: { type: number, description: "Absent for master_tailor -- see paymentStatus." }
         amountPaid: { type: number, description: "Absent for master_tailor. The real sum of GET /orders/{orderId}/payments -- never stored, always derived at read time." }
         outstanding: { type: number, description: "Absent for master_tailor -- see paymentStatus." }
+        nextPaymentDate:
+          type: string
+          format: date
+          nullable: true
+          description: "When the next payment is expected (payment-due tracking). Null when unset or fully paid. Visible to all roles."
         productionStatus: { $ref: "#/components/schemas/GranularStatus" }
         designerInstructions: { type: string, nullable: true }
         specialNotes: { type: string, nullable: true }
@@ -1073,9 +1176,30 @@ components:
         total: { type: integer, description: Every order in the caller's row scope. }
         active: { type: integer, description: "Not yet in a completed canonical stage (ready_for_delivery/delivered)." }
         completed: { type: integer, description: In the ready_for_delivery or delivered canonical stage. }
+        thisMonth: { type: integer, description: "Orders created in the current calendar month. Visible to all roles." }
+        inProduction: { type: integer, description: "Orders in an active production stage (cutting..QC, excluding ready/delivered). Visible to all roles." }
+        overdue: { type: integer, description: "Active orders past their delivery due date. Visible to all roles." }
+        urgent: { type: integer, description: "Active orders due within 3 days (not overdue). Visible to all roles." }
         pendingPayments: { type: integer, description: "Absent for master_tailor. Orders whose paymentStatus isn't fully_paid." }
         collectedRevenue: { type: number, description: "Absent for master_tailor. SUM(payments.amount) across the scope." }
         outstandingRevenue: { type: number, description: "Absent for master_tailor. SUM(orders.total_amount) - collectedRevenue, floored at 0." }
+
+    RevenueReport:
+      type: object
+      description: Monthly collected-revenue report from GET /orders/revenue (reports:financial).
+      properties:
+        cycleStartDay: { type: integer, minimum: 1, maximum: 28, description: "Day of month each accounting period begins (ACCOUNTING_CYCLE_START_DAY; 1 = calendar months)." }
+        from: { type: string, format: date, description: Inclusive start of the requested window (echoed from the request). }
+        to: { type: string, format: date, description: Inclusive end of the requested window (echoed from the request). }
+        periods:
+          type: array
+          description: Accounting periods, oldest first.
+          items:
+            type: object
+            properties:
+              periodStart: { type: string, format: date, description: First day of the accounting period. }
+              collected: { type: number, description: SUM(payments.amount) with paid_at in this period. }
+              paymentCount: { type: integer, description: Number of ledger entries in this period. }
 
     CreateOrderRequest:
       type: object
@@ -1088,7 +1212,6 @@ components:
         - masterTailorId
         - productCategory
         - orderDetails
-        - paymentStatus
         - productionStatus
       properties:
         customerName: { type: string }
@@ -1103,8 +1226,10 @@ components:
         handWork: { type: boolean, default: false }
         machineWork: { type: boolean, default: false }
         purchaseRequired: { type: boolean, default: false }
-        paymentStatus: { $ref: "#/components/schemas/PaymentStatus" }
+        # paymentStatus is NOT accepted -- it is derived from the ledger. Record
+        # an advance via POST /orders/{orderId}/payments right after creation.
         totalAmount: { type: number, minimum: 0, default: 0 }
+        nextPaymentDate: { type: string, format: date, nullable: true, description: "When the next payment is expected (payment-due tracking). Optional; null to leave unset." }
         productionStatus: { $ref: "#/components/schemas/GranularStatus" }
         designerInstructions: { type: string }
         specialNotes: { type: string }
@@ -1131,8 +1256,10 @@ components:
         handWork: { type: boolean }
         machineWork: { type: boolean }
         purchaseRequired: { type: boolean }
-        paymentStatus: { $ref: "#/components/schemas/PaymentStatus" }
+        # paymentStatus is NOT accepted -- derived from the ledger. Changing
+        # totalAmount re-derives it server-side; record payments via the ledger.
         totalAmount: { type: number, minimum: 0 }
+        nextPaymentDate: { type: string, format: date, nullable: true, description: "When the next payment is expected (payment-due tracking). Null to clear." }
         productionStatus: { $ref: "#/components/schemas/GranularStatus" }
         designerInstructions: { type: string }
         specialNotes: { type: string }

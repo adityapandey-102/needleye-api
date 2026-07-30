@@ -19,6 +19,7 @@ export const orders = pgTable("orders", {
   billNumber: text("bill_number").notNull(),
   bookingDate: date("booking_date").notNull(),
   dueDate: date("due_date").notNull(),
+  nextPaymentDate: date("next_payment_date"),
   designerId: uuid("designer_id").notNull(),
   masterTailorId: uuid("master_tailor_id").notNull(),
   productCategory: text("product_category").notNull().$type<ProductCategory>(),

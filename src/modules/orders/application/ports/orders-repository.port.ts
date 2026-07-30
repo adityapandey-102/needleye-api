@@ -13,6 +13,8 @@ export interface OrderListFilters {
   status?: string;
   designerId?: string;
   masterTailorId?: string;
+  /** Dashboard/list filter: active | production | completed | ready | delivered | pending_payment | payment_overdue | payment_upcoming | overdue | urgent | this_month. */
+  bucket?: string;
 }
 
 /** Offset pagination for the orders list -- keeps the default list response bounded regardless of how many orders exist. */
@@ -27,6 +29,7 @@ export interface NewOrderRecord {
   billNumber: string;
   bookingDate: string;
   dueDate: string;
+  nextPaymentDate: string | null;
   designerId: string;
   masterTailorId: string;
   productCategory: ProductCategory;
@@ -49,6 +52,7 @@ export interface UpdateOrderRecord {
   billNumber?: string;
   bookingDate?: string;
   dueDate?: string;
+  nextPaymentDate?: string | null;
   designerId?: string;
   masterTailorId?: string;
   productCategory?: ProductCategory;
@@ -95,9 +99,23 @@ export interface OrderStatsRaw {
   total: number;
   active: number;
   completed: number;
+  thisMonth: number;
+  inProduction: number;
+  overdue: number;
+  urgent: number;
   pendingPayments: number;
   collectedRevenue: number;
   outstandingRevenue: number;
+}
+
+/** One accounting period's collected revenue, for the monthly revenue report. */
+export interface RevenuePeriod {
+  /** First day of the accounting period (YYYY-MM-DD). */
+  periodStart: string;
+  /** SUM(payments.amount) with paid_at inside this period. */
+  collected: number;
+  /** Number of payment entries recorded in this period. */
+  paymentCount: number;
 }
 
 /** Persistence contract for the Orders module -- pure data access, no business rules. */
@@ -107,6 +125,8 @@ export interface OrdersRepositoryPort {
   countMany(scope: RowScope, filters: OrderListFilters): Promise<number>;
   findById(scope: RowScope, id: string): Promise<OrderEntity | null>;
   getStats(scope: RowScope): Promise<OrderStatsRaw>;
+  /** Collected revenue grouped into accounting periods (most recent first), for the revenue report. */
+  getMonthlyRevenue(scope: RowScope, cycleStartDay: number, range: { from: string; to: string }): Promise<RevenuePeriod[]>;
   findBasicById(id: string): Promise<OrderBasicInfo | null>;
   create(data: NewOrderRecord): Promise<OrderEntity>;
   /**

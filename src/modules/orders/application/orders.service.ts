@@ -1,7 +1,8 @@
+import { env } from "../../../config/env";
 import { BadRequestError, NotFoundError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
 import { assertFieldsEditable, assertOwnershipForScopedEdit } from "../domain/order-edit.rules";
-import { assertOrderCanBeMarkedFullyPaid } from "../domain/order-ledger.rules";
+import { derivePaymentStatus } from "../domain/order-ledger.rules";
 import { assertCanTransitionStatus } from "../domain/order-status.rules";
 import { toOrderResponseDto } from "../api/order.presenter";
 import { toOrderStatusHistoryResponseDto } from "../api/order-status-history.presenter";
@@ -25,6 +26,7 @@ import type { UpdateOrderDto } from "../api/dto/update-order.dto";
 import type { OrderResponseDto } from "../api/dto/order.response.dto";
 import type { OrderStatusHistoryResponseDto } from "../api/dto/order-status-history.response.dto";
 import type { OrderStatsResponseDto } from "../api/dto/order-stats.response.dto";
+import type { RevenueResponseDto } from "../api/dto/revenue.response.dto";
 
 interface AuthContext {
   profile: Profile;
@@ -89,6 +91,11 @@ export class OrdersService {
     const record: NewOrderRecord = {
       ...dto,
       bookingDate: dto.bookingDate ?? new Date().toISOString().slice(0, 10),
+      nextPaymentDate: dto.nextPaymentDate ?? null,
+      // Payment status is derived from the ledger, never chosen at creation. A
+      // new order starts unpaid; if the creator records an advance (a separate
+      // ledger call right after), that write recomputes and syncs the status.
+      paymentStatus: "unpaid",
       designerInstructions: dto.designerInstructions || null,
       specialNotes: dto.specialNotes || null,
       createdBy: ctx.authUserId,
@@ -114,21 +121,20 @@ export class OrdersService {
     if (submittedKeys.length === 0) throw new BadRequestError("No editable fields to update", ERROR_CODES.VALIDATION_NO_FIELDS);
 
     const { needsOwnershipCheck } = assertFieldsEditable(ctx.profile.role, submittedKeys);
-    const markingFullyPaid = fields.paymentStatus === "fully_paid";
 
-    if (needsOwnershipCheck || markingFullyPaid) {
+    if (needsOwnershipCheck) {
       const existing = await this.ordersRepository.findBasicById(orderId);
       if (!existing) throw new NotFoundError("Order not found", ERROR_CODES.ORDER_NOT_FOUND);
-      if (needsOwnershipCheck) assertOwnershipForScopedEdit(existing.designerId, ctx.authUserId);
-
-      if (markingFullyPaid) {
-        const finalTotalAmount = fields.totalAmount ?? existing.totalAmount;
-        const sum = await this.ordersRepository.sumPaymentsForOrder(orderId);
-        assertOrderCanBeMarkedFullyPaid(sum, finalTotalAmount);
-      }
+      assertOwnershipForScopedEdit(existing.designerId, ctx.authUserId);
     }
 
     const record: UpdateOrderRecord = { ...fields, updatedBy: ctx.authUserId };
+    // If the total changed, the derived payment status may need to move with
+    // it (e.g. lowering the total past the recorded sum makes it fully paid).
+    if (fields.totalAmount !== undefined) {
+      const sum = await this.ordersRepository.sumPaymentsForOrder(orderId);
+      record.paymentStatus = derivePaymentStatus(sum, fields.totalAmount);
+    }
     const entity = await this.ordersRepository.update(orderId, record, expectedVersion);
     await this.audit.record({
       action: AUDIT_ACTIONS.ORDER_UPDATED,
@@ -167,6 +173,16 @@ export class OrdersService {
   async getStats(ctx: AuthContext): Promise<OrderStatsResponseDto> {
     const stats = await this.ordersRepository.getStats({ role: ctx.profile.role, userId: ctx.authUserId });
     return toOrderStatsResponseDto(stats, ctx.profile.role);
+  }
+
+  /** Monthly revenue report over an inclusive date range -- route-gated by reports:financial (owner_manager/accountant), whose scope is unscoped. */
+  async getRevenue(ctx: AuthContext, range: { from: string; to: string }): Promise<RevenueResponseDto> {
+    const periods = await this.ordersRepository.getMonthlyRevenue(
+      { role: ctx.profile.role, userId: ctx.authUserId },
+      env.ACCOUNTING_CYCLE_START_DAY,
+      range,
+    );
+    return { cycleStartDay: env.ACCOUNTING_CYCLE_START_DAY, from: range.from, to: range.to, periods };
   }
 
   async getOrderHistory(ctx: AuthContext, orderId: string): Promise<OrderStatusHistoryResponseDto[]> {

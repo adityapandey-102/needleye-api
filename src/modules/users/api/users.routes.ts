@@ -16,10 +16,28 @@ export const usersRouter = Router();
 
 usersRouter.use(requireAuth, requireCapability("users:manage"));
 
+/** Clamp to a sane page window -- same bounds as the Orders list. */
+const DEFAULT_LIMIT = 20;
+const MAX_LIMIT = 100;
+
 usersRouter.get(
   "/",
-  asyncHandler(async (_req, res) => {
-    res.json({ users: await usersService.listUsers() });
+  asyncHandler(async (req, res) => {
+    const { search, limit, offset } = req.query;
+    const parsedLimit = Math.min(Math.max(Number(limit) || DEFAULT_LIMIT, 1), MAX_LIMIT);
+    const parsedOffset = Math.max(Number(offset) || 0, 0);
+    const result = await usersService.listUsers(
+      { search: typeof search === "string" ? search : undefined },
+      { limit: parsedLimit, offset: parsedOffset },
+    );
+    res.json(result);
+  }),
+);
+
+usersRouter.get(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    res.json({ user: await usersService.getUser(req.params.id!) });
   }),
 );
 
@@ -61,6 +79,14 @@ usersRouter.post(
   "/:id/deactivate",
   asyncHandler(async (req, res) => {
     await usersService.deactivateUser(req.params.id!, req.authUserId!);
+    res.status(204).send();
+  }),
+);
+
+usersRouter.post(
+  "/:id/reactivate",
+  asyncHandler(async (req, res) => {
+    await usersService.reactivateUser(req.params.id!);
     res.status(204).send();
   }),
 );

@@ -15,6 +15,7 @@ export const AUDIT_ACTIONS = {
   USER_CREATED: "user.created",
   USER_UPDATED: "user.updated",
   USER_DEACTIVATED: "user.deactivated",
+  USER_REACTIVATED: "user.reactivated",
   USER_PASSWORD_REGENERATED: "user.password_regenerated",
   USER_QR_GENERATED: "user.qr_generated",
 

@@ -13,9 +13,15 @@ export const PRODUCT_CATEGORY_VALUES = PRODUCT_CATEGORIES.map((c) => c.value) as
   ...ProductCategory[],
 ];
 
+/**
+ * Payment status is DERIVED from the ledger (sum of payments vs order total),
+ * never chosen by hand -- see derivePaymentStatus in the Orders domain. These
+ * three values are the possible derived outcomes, kept as a labelled list only
+ * for display/formatting.
+ */
 export const PAYMENT_STATUSES = [
+  { value: "unpaid", label: "Unpaid" },
   { value: "advance_paid", label: "Advance Paid" },
-  { value: "partially_paid", label: "Partially Paid" },
   { value: "fully_paid", label: "Fully Paid" },
 ] as const;
 

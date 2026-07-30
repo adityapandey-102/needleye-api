@@ -9,7 +9,12 @@ import { payments } from "./payments.schema";
 import { InternalError } from "../../../common/errors/app-error";
 import { PaymentsMapper, type PaymentRow } from "./payments.mapper";
 import type { PaymentEntity, OrderLedgerContext } from "../domain/payment.entity";
-import type { PaymentsRepositoryPort, NewPaymentRecord, UpdatePaymentRecord } from "../application/ports/payments-repository.port";
+import type {
+  PaymentsRepositoryPort,
+  NewPaymentRecord,
+  UpdatePaymentRecord,
+  OrderLedgerStateUpdate,
+} from "../application/ports/payments-repository.port";
 import type { PaymentMethod } from "../../../domain";
 
 const PAYMENT_ROW_SELECT = {
@@ -151,6 +156,22 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
       await db.delete(payments).where(eq(payments.id, paymentId));
     } catch (error) {
       throw new InternalError("Failed to delete payment", error);
+    }
+  }
+
+  async updateOrderLedgerState(orderId: string, update: OrderLedgerStateUpdate): Promise<void> {
+    // Only the derived fields are touched; updated_at is maintained by the
+    // orders_set_updated_at trigger, and version isn't bumped (this isn't a
+    // user edit competing for the optimistic lock).
+    const record: Partial<typeof orders.$inferInsert> = {
+      paymentStatus: update.paymentStatus as typeof orders.$inferInsert.paymentStatus,
+    };
+    if (update.nextPaymentDate !== undefined) record.nextPaymentDate = update.nextPaymentDate;
+
+    try {
+      await db.update(orders).set(record).where(eq(orders.id, orderId));
+    } catch (error) {
+      throw new InternalError("Failed to update order payment state", error);
     }
   }
 }

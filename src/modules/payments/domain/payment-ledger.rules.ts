@@ -1,5 +1,6 @@
-import { ConflictError } from "../../../common/errors/app-error";
+import { BadRequestError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
+import type { PaymentStatus } from "../../../domain";
 
 /** Avoids JS floating-point noise (0.1 + 0.2 !== 0.3) when comparing currency sums. */
 export function roundCurrency(amount: number): number {
@@ -7,33 +8,34 @@ export function roundCurrency(amount: number): number {
 }
 
 /**
- * The core domain invariant of this module: whenever an order is marked
- * fully_paid, its recorded ledger total must exactly equal total_amount.
- * A pure function -- no repository, no HTTP, no Express -- so it's testable
- * in complete isolation and callable from anywhere that needs to enforce
- * it (every ledger write in PaymentsService, and the status-change check
- * in OrdersService once that module is converted -- see the README's
- * "Known duplication, deferred on purpose" note).
- *
- * Throws AppError (ConflictError) directly rather than a separate
- * "domain error" type that some translation layer would map to HTTP later
- * -- a deliberate call, not an oversight: this codebase has exactly one
- * delivery mechanism (Express REST) and will not gain a second one, so a
- * parallel domain-error hierarchy would be speculative complexity with no
- * real consumer. See docs/adr/0002-repository-port-implementation-split.md
- * for the fuller reasoning.
+ * Derives an order's payment status from its recorded ledger sum vs the order
+ * total -- the single source of truth (status is never chosen by hand). A
+ * small, deliberate copy of Orders' own derivePaymentStatus: Domain layers
+ * don't import across modules (see docs/adr/0003-per-module-schema-ownership.md),
+ * so this invariant gets its own copy here rather than a cross-module
+ * dependency. `unpaid` -> `advance_paid` -> `fully_paid`.
  */
-export function assertLedgerReconciles(
-  wouldBeSum: number,
-  totalAmount: number,
-  action: "save this payment" | "remove this payment",
-): void {
-  if (roundCurrency(wouldBeSum) === roundCurrency(totalAmount)) return;
+export function derivePaymentStatus(paymentsSum: number, totalAmount: number): PaymentStatus {
+  const paid = Math.round((Number(paymentsSum) || 0) * 100);
+  const total = Math.round((Number(totalAmount) || 0) * 100);
+  if (total <= 0 || paid <= 0) return "unpaid";
+  if (paid >= total) return "fully_paid";
+  return "advance_paid";
+}
 
-  throw new ConflictError(
-    `Cannot ${action}: the order is marked fully paid, but this would leave the recorded total ` +
-      `(₹${roundCurrency(wouldBeSum)}) not matching the order total (₹${roundCurrency(totalAmount)}). ` +
-      `Change the order's payment status first if that's intentional.`,
-    ERROR_CODES.PAYMENT_LEDGER_MISMATCH,
+/**
+ * A ledger's recorded payments must never exceed the order total -- you can't
+ * collect more than the order is worth. Enforced on every add/update
+ * regardless of payment_status (the fully_paid equality rule below is a
+ * stricter, separate case). Throws BadRequestError (a client input problem,
+ * 400) with the outstanding amount in the message so the UI can guide the user.
+ */
+export function assertDoesNotExceedTotal(wouldBeSum: number, totalAmount: number, action = "record"): void {
+  if (roundCurrency(wouldBeSum) <= roundCurrency(totalAmount)) return;
+
+  throw new BadRequestError(
+    `Cannot ${action} this payment: it would bring the recorded total to ₹${roundCurrency(wouldBeSum)}, ` +
+      `over the order total of ₹${roundCurrency(totalAmount)}.`,
+    ERROR_CODES.PAYMENT_EXCEEDS_TOTAL,
   );
 }

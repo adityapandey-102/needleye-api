@@ -45,4 +45,6 @@ export interface AuthProvider {
   mintSessionForUser(email: string): Promise<AuthSession>;
   createUser(user: NewAuthUser): Promise<string>;
   banUser(userId: string): Promise<void>;
+  /** Lifts a ban applied by banUser -- restores sign-in for a reactivated account. */
+  unbanUser(userId: string): Promise<void>;
 }
