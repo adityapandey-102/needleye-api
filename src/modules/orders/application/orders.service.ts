@@ -2,7 +2,7 @@ import { env } from "../../../config/env";
 import { BadRequestError, NotFoundError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
 import { assertFieldsEditable, assertOwnershipForScopedEdit } from "../domain/order-edit.rules";
-import { derivePaymentStatus } from "../domain/order-ledger.rules";
+import { assertTotalCoversLedger, derivePaymentStatus } from "../domain/order-ledger.rules";
 import { assertCanTransitionStatus } from "../domain/order-status.rules";
 import { toOrderResponseDto } from "../api/order.presenter";
 import { toOrderStatusHistoryResponseDto } from "../api/order-status-history.presenter";
@@ -129,10 +129,12 @@ export class OrdersService {
     }
 
     const record: UpdateOrderRecord = { ...fields, updatedBy: ctx.authUserId };
-    // If the total changed, the derived payment status may need to move with
-    // it (e.g. lowering the total past the recorded sum makes it fully paid).
+    // If the total changed, keep the ledger invariant intact: the new total can
+    // never sit below what's already been collected (that would be an "overpaid"
+    // order). Then re-derive the payment status from the (unchanged) ledger sum.
     if (fields.totalAmount !== undefined) {
       const sum = await this.ordersRepository.sumPaymentsForOrder(orderId);
+      assertTotalCoversLedger(fields.totalAmount, sum);
       record.paymentStatus = derivePaymentStatus(sum, fields.totalAmount);
     }
     const entity = await this.ordersRepository.update(orderId, record, expectedVersion);

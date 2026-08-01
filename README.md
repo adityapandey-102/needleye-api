@@ -481,10 +481,18 @@ manual-status class of bugs (status disagreeing with the ledger) is gone:
 - `PATCH /orders/:id` doesn't accept `paymentStatus` either; changing
   `total_amount` re-derives it server-side.
 
-The only ledger guard left is the overpayment rule
-(`assertDoesNotExceedTotal`, `PAYMENT_EXCEEDS_TOTAL`, 400): the recorded sum
-can never exceed `total_amount`. Currency comparisons round to the cent
-(`Math.round(amount * 100)`) to avoid float noise.
+The `sum(ledger) <= total_amount` invariant is guarded from **both**
+directions, so an order can never be "overpaid" (which would silently inflate
+collected revenue):
+- **Payment side** -- `assertDoesNotExceedTotal` (`PAYMENT_EXCEEDS_TOTAL`, 400):
+  a payment can't push the recorded sum over `total_amount`.
+- **Order side** -- `assertTotalCoversLedger` (`ORDER_TOTAL_BELOW_PAID`, 400):
+  `PATCH /orders/:id` can't lower `total_amount` below the sum already
+  collected. To discount after collecting, reduce/remove the payment in the
+  ledger first (i.e. record the refund), then lower the total.
+
+Currency comparisons round to the cent (`Math.round(amount * 100)`) to avoid
+float noise.
 
 **Access**: `payments:read`/`payments:manage` gate `GET`/`POST`/`PATCH`/`DELETE`
 on `/orders/:orderId/payments[/:paymentId]` at the router level (`requireCapability`);

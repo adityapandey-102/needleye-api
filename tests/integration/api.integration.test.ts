@@ -115,6 +115,61 @@ describe("API endpoints (integration)", () => {
     expect(auditRows[0]?.requestId).toBeTruthy();
   });
 
+  it("rejects lowering an order's total below what's already been collected (no overpaid state)", async () => {
+    const owner = await createFixtureUser("owner_manager", "API Integration Owner");
+    const masterTailor = await createFixtureUser("master_tailor", "API Integration Master 2");
+    createdUserIds.push(owner.id, masterTailor.id);
+    const session = await authProvider.signInWithPassword(owner.email, owner.password);
+    const auth = `Bearer ${session.accessToken}`;
+
+    const createRes = await request(app)
+      .post("/api/v1/orders")
+      .set("Authorization", auth)
+      .send({
+        customerName: "Overpaid Guard Customer",
+        phone: "9000000010",
+        billNumber: `API-${Date.now()}`,
+        bookingDate: "2026-01-01",
+        dueDate: "2026-02-01",
+        designerId: owner.id,
+        masterTailorId: masterTailor.id,
+        productCategory: "saree",
+        orderDetails: "Total-below-paid guard fixture",
+        handWork: false,
+        machineWork: true,
+        purchaseRequired: false,
+        totalAmount: 1000,
+        productionStatus: "design_pending",
+      });
+    expect(createRes.status).toBe(201);
+    const orderId = (createRes.body as { order: { id: string } }).order.id;
+    createdOrderIds.push(orderId);
+
+    // Collect ₹600 against the ₹1000 order.
+    const payRes = await request(app)
+      .post(`/api/v1/orders/${orderId}/payments`)
+      .set("Authorization", auth)
+      .send({ amount: 600, method: "cash" });
+    expect(payRes.status).toBe(201);
+
+    // Lowering the total to ₹500 (below the ₹600 collected) is rejected...
+    const badRes = await request(app)
+      .patch(`/api/v1/orders/${orderId}`)
+      .set("Authorization", auth)
+      .send({ totalAmount: 500 });
+    expect(badRes.status).toBe(400);
+    expect((badRes.body as { code: string }).code).toBe("ORDER_TOTAL_BELOW_PAID");
+
+    // ...but lowering to ₹800 (still >= ₹600) is fine, and re-derives to advance_paid.
+    const okRes = await request(app)
+      .patch(`/api/v1/orders/${orderId}`)
+      .set("Authorization", auth)
+      .send({ totalAmount: 800 });
+    expect(okRes.status).toBe(200);
+    expect((okRes.body as { order: { paymentStatus: string; totalAmount: number } }).order.paymentStatus).toBe("advance_paid");
+    expect((okRes.body as { order: { totalAmount: number } }).order.totalAmount).toBe(800);
+  });
+
   it("clamps an over-large limit to the max page size", async () => {
     const designer = await createFixtureUser("designer", "API Integration Limit Designer");
     createdUserIds.push(designer.id);

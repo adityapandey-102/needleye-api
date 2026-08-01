@@ -1,5 +1,36 @@
 import { describe, expect, it } from "vitest";
-import { derivePaymentStatus } from "./order-ledger.rules";
+import { assertTotalCoversLedger, derivePaymentStatus } from "./order-ledger.rules";
+import { BadRequestError } from "../../../common/errors/app-error";
+import { ERROR_CODES } from "../../../common/errors/error-codes";
+
+describe("assertTotalCoversLedger", () => {
+  it("allows a total above the recorded ledger sum", () => {
+    expect(() => assertTotalCoversLedger(10000, 4000)).not.toThrow();
+  });
+
+  it("allows a total exactly equal to the recorded ledger sum (fully paid)", () => {
+    expect(() => assertTotalCoversLedger(5000, 5000)).not.toThrow();
+  });
+
+  it("rejects lowering the total below what's already collected (would be overpaid)", () => {
+    expect(() => assertTotalCoversLedger(8000, 10000)).toThrow(BadRequestError);
+  });
+
+  it("carries the ORDER_TOTAL_BELOW_PAID code and both amounts in the message", () => {
+    try {
+      assertTotalCoversLedger(8000, 10000);
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect((err as BadRequestError).code).toBe(ERROR_CODES.ORDER_TOTAL_BELOW_PAID);
+      expect((err as Error).message).toContain("8000");
+      expect((err as Error).message).toContain("10000");
+    }
+  });
+
+  it("tolerates cent rounding at the boundary", () => {
+    expect(() => assertTotalCoversLedger(0.3, 0.1 + 0.2)).not.toThrow();
+  });
+});
 
 describe("derivePaymentStatus", () => {
   it("is unpaid when nothing has been recorded", () => {

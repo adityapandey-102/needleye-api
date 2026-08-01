@@ -37,6 +37,8 @@ export const ERROR_CODES = {
   ORDER_NOT_ASSIGNED: "ORDER_NOT_ASSIGNED",
   ORDER_STATUS_TRANSITION_FORBIDDEN: "ORDER_STATUS_TRANSITION_FORBIDDEN",
   ORDER_PAYMENT_MISMATCH: "ORDER_PAYMENT_MISMATCH",
+  /** Edit would set total_amount below the sum already recorded in the ledger (would create an "overpaid" order). */
+  ORDER_TOTAL_BELOW_PAID: "ORDER_TOTAL_BELOW_PAID",
   /** Optimistic-lock conflict: the order was modified by someone else since it was loaded. */
   ORDER_MODIFIED: "ORDER_MODIFIED",
 

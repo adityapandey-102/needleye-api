@@ -670,7 +670,11 @@ paths:
         `totalAmount`. `productionStatus` is accepted by the request schema
         but silently stripped by the controller before it reaches the service
         -- status changes go through `PATCH /orders/{id}/status` instead,
-        which enforces design-stage vs production-stage RBAC.
+        which enforces design-stage vs production-stage RBAC. Changing
+        `totalAmount` re-derives the payment status from the ledger, and is
+        rejected (400 `ORDER_TOTAL_BELOW_PAID`) if the new total would fall
+        below what's already been recorded in the ledger (which would leave the
+        order "overpaid") -- the mirror of the payment-side overpayment guard.
       parameters:
         - $ref: "#/components/parameters/OrderId"
       requestBody:
@@ -686,6 +690,11 @@ paths:
               schema:
                 type: object
                 properties: { order: { $ref: "#/components/schemas/Order" } }
+        "400":
+          description: "No editable fields, or the new totalAmount is below the collected ledger sum (ORDER_TOTAL_BELOW_PAID)"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
