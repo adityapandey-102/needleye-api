@@ -10,6 +10,7 @@ export const CAPABILITIES = [
   "payments:manage",
   "payments:read",
   "reports:financial",
+  "reports:staff",
   "users:manage",
 ] as const;
 
@@ -82,6 +83,15 @@ export const CAPABILITY_MATRIX: Record<Capability, Record<Role, CapabilityScope>
     designer: false,
     master_tailor: false,
     accountant: true,
+  },
+  // Staff performance reports (per designer/master weekly workload) -- a
+  // management view, Owner/Manager only (deliberately NOT the accountant, who
+  // only gets financial reporting).
+  "reports:staff": {
+    owner_manager: true,
+    designer: false,
+    master_tailor: false,
+    accountant: false,
   },
   "users:manage": {
     owner_manager: true,

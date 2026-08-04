@@ -51,4 +51,11 @@ describe("capabilities matrix", () => {
     expect(hasCapability("accountant", "reports:financial")).toBe(true);
     expect(hasCapability("designer", "reports:financial")).toBe(false);
   });
+
+  it("reserves reports:staff for owner_manager only (not even the accountant)", () => {
+    expect(hasCapability("owner_manager", "reports:staff")).toBe(true);
+    expect(hasCapability("accountant", "reports:staff")).toBe(false);
+    expect(hasCapability("designer", "reports:staff")).toBe(false);
+    expect(hasCapability("master_tailor", "reports:staff")).toBe(false);
+  });
 });

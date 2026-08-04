@@ -27,10 +27,41 @@ import type { OrderResponseDto } from "../api/dto/order.response.dto";
 import type { OrderStatusHistoryResponseDto } from "../api/dto/order-status-history.response.dto";
 import type { OrderStatsResponseDto } from "../api/dto/order-stats.response.dto";
 import type { RevenueResponseDto } from "../api/dto/revenue.response.dto";
+import type { StaffReportResponseDto } from "../api/dto/staff-report.response.dto";
+import type { LedgerEventsResponseDto, LedgerEventDto, LedgerAmountSnapshot } from "../api/dto/ledger-events.response.dto";
+import type { LedgerEventRaw } from "./ports/orders-repository.port";
 
 interface AuthContext {
   profile: Profile;
   authUserId: string;
+}
+
+/** Pulls a {amount, method} snapshot out of a slice of audit metadata, coercing defensively (old records may predate a field). */
+function readSnapshot(source: unknown): LedgerAmountSnapshot {
+  const obj = (source ?? {}) as Record<string, unknown>;
+  return { amount: Number(obj.amount ?? 0), method: typeof obj.method === "string" ? obj.method : "" };
+}
+
+/** Decodes one raw payment-audit record into the display DTO, keying off its action verb. */
+function toLedgerEventDto(raw: LedgerEventRaw): LedgerEventDto {
+  const meta = raw.metadata ?? {};
+  const verb: LedgerEventDto["action"] =
+    raw.action === AUDIT_ACTIONS.PAYMENT_CREATED ? "created" : raw.action === AUDIT_ACTIONS.PAYMENT_DELETED ? "deleted" : "updated";
+
+  const base: LedgerEventDto = {
+    id: raw.id,
+    action: verb,
+    at: raw.createdAt,
+    actorName: raw.actorName,
+    orderId: raw.orderId,
+    orderNumber: raw.orderNumber,
+  };
+
+  if (verb === "updated") {
+    return { ...base, before: readSnapshot(meta.before), after: readSnapshot(meta.after) };
+  }
+  // created/deleted both record the payment's amount+method at top level.
+  return { ...base, snapshot: readSnapshot(meta) };
 }
 
 /** A page of orders plus the total matching the filters, so the client can render a pager. */
@@ -81,10 +112,19 @@ export class OrdersService {
   }
 
   async getOrder(ctx: AuthContext, orderId: string): Promise<OrderResponseDto> {
-    const entity = await this.ordersRepository.findById({ role: ctx.profile.role, userId: ctx.authUserId }, orderId);
-    if (!entity) throw new NotFoundError("Order not found", ERROR_CODES.ORDER_NOT_FOUND);
-    const amountPaid = await this.ordersRepository.sumPaymentsForOrder(orderId);
-    return toOrderResponseDto(entity, amountPaid, ctx.profile.role, await this.signImageUrls([entity]));
+    // In-scope read (owner/accountant: any order; designer/master: their own).
+    const scoped = await this.ordersRepository.findById({ role: ctx.profile.role, userId: ctx.authUserId }, orderId);
+    if (scoped) {
+      const amountPaid = await this.ordersRepository.sumPaymentsForOrder(orderId);
+      return toOrderResponseDto(scoped, amountPaid, ctx.profile.role, await this.signImageUrls([scoped]));
+    }
+
+    // Out of scope: any authenticated user may still VIEW a single order
+    // (reached via QR/link), but read-only with payment fields stripped. Truly
+    // missing orders still 404.
+    const any = await this.ordersRepository.findAnyById(orderId);
+    if (!any) throw new NotFoundError("Order not found", ERROR_CODES.ORDER_NOT_FOUND);
+    return toOrderResponseDto(any, 0, ctx.profile.role, await this.signImageUrls([any]), { viewOnly: true });
   }
 
   async createOrder(ctx: AuthContext, dto: CreateOrderDto): Promise<OrderResponseDto> {
@@ -185,6 +225,45 @@ export class OrdersService {
       range,
     );
     return { cycleStartDay: env.ACCOUNTING_CYCLE_START_DAY, from: range.from, to: range.to, periods };
+  }
+
+  /**
+   * Per-staff workload report -- route-gated by reports:staff (owner_manager
+   * only). Loads ONE designer/master's report on demand (the UI drills down
+   * role -> person -> here), so all-staff aggregation never happens. 404s when
+   * the id isn't an active designer/master_tailor.
+   */
+  async getStaffReport(staffId: string, month: string): Promise<StaffReportResponseDto> {
+    // month is YYYY-MM -> the report covers that calendar month. Compute the
+    // last day in UTC so toISOString() can't shift it across a day boundary in
+    // a non-UTC server timezone.
+    const from = `${month}-01`;
+    const parts = month.split("-");
+    const y = Number(parts[0]);
+    const m = Number(parts[1]);
+    const to = new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10); // day 0 of next month (1-based m) = last day of this one
+    const report = await this.ordersRepository.getStaffReport(staffId, { from, to });
+    if (!report) throw new NotFoundError("No active designer or master tailor with that id", ERROR_CODES.USER_NOT_FOUND);
+    return { ...report, month };
+  }
+
+  /**
+   * Payment-ledger activity feed over an inclusive date range -- route-gated by
+   * reports:financial (owner_manager/accountant). Reads the append-only audit
+   * trail (payment.created/updated/deleted) and decodes each record's metadata
+   * into a display shape (who, when, which order, what changed). Paginated;
+   * newest first.
+   */
+  async getLedgerEvents(range: { from: string; to: string }, page: OrderListPage): Promise<LedgerEventsResponseDto> {
+    const { events, total } = await this.ordersRepository.getLedgerEvents(range, page);
+    return {
+      events: events.map(toLedgerEventDto),
+      total,
+      limit: page.limit,
+      offset: page.offset,
+      from: range.from,
+      to: range.to,
+    };
   }
 
   async getOrderHistory(ctx: AuthContext, orderId: string): Promise<OrderStatusHistoryResponseDto[]> {

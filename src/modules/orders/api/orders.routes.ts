@@ -3,6 +3,8 @@ import multer from "multer";
 import { requireAuth } from "../../../common/middleware/auth.middleware";
 import { requireCapability } from "../../../common/middleware/capability.middleware";
 import { asyncHandler } from "../../../common/http/async-handler";
+import { BadRequestError } from "../../../common/errors/app-error";
+import { ERROR_CODES } from "../../../common/errors/error-codes";
 import { validateBody } from "../../../common/http/validate.middleware";
 import { createOrderDtoSchema, type CreateOrderDto } from "./dto/create-order.dto";
 import { updateOrderDtoSchema, type UpdateOrderDto } from "./dto/update-order.dto";
@@ -80,6 +82,45 @@ ordersRouter.get(
     if (from > to) from = defaultFrom <= to ? defaultFrom : to;
     const revenue = await ordersService.getRevenue({ profile: req.profile!, authUserId: req.authUserId! }, { from, to });
     res.json(revenue);
+  }),
+);
+
+// Per-staff workload report -- Owner/Manager only. Registered before "/:id"
+// so "staff-report" isn't matched as an order id. `staffId` is required; the
+// weekly breakdown covers `month` (YYYY-MM), defaulting to the current month
+// (the UI offers the last 6 months and fetches per selection).
+const ISO_MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
+ordersRouter.get(
+  "/staff-report",
+  requireCapability("reports:staff"),
+  asyncHandler(async (req, res) => {
+    const staffId = typeof req.query.staffId === "string" ? req.query.staffId : "";
+    if (!staffId) throw new BadRequestError("staffId is required", ERROR_CODES.VALIDATION_ERROR);
+    const monthRaw = req.query.month;
+    const month = typeof monthRaw === "string" && ISO_MONTH.test(monthRaw) ? monthRaw : new Date().toISOString().slice(0, 7);
+    const report = await ordersService.getStaffReport(staffId, month);
+    res.json(report);
+  }),
+);
+
+// Payment-ledger activity feed over an inclusive [from, to] window --
+// Owner/Manager + Accountant only (reports:financial). Registered before
+// "/:id" so "ledger-events" isn't matched as an order id. Defaults to the last
+// 12 months; paginated (the revenue page's year/month/week filters map to a
+// [from, to] here and page through the results).
+ordersRouter.get(
+  "/ledger-events",
+  requireCapability("reports:financial"),
+  asyncHandler(async (req, res) => {
+    const today = new Date();
+    const toRaw = req.query.to;
+    const fromRaw = req.query.from;
+    const to = typeof toRaw === "string" && ISO_DATE.test(toRaw) ? toRaw : today.toISOString().slice(0, 10);
+    const defaultFrom = new Date(today.getFullYear(), today.getMonth() - 11, 1).toISOString().slice(0, 10);
+    let from = typeof fromRaw === "string" && ISO_DATE.test(fromRaw) ? fromRaw : defaultFrom;
+    if (from > to) from = defaultFrom <= to ? defaultFrom : to;
+    const events = await ordersService.getLedgerEvents({ from, to }, parseOrdersPage(req.query));
+    res.json(events);
   }),
 );
 

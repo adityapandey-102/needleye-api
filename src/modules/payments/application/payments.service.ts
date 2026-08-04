@@ -90,11 +90,17 @@ export class PaymentsService {
     // Editing an amount changes the derived status -- resync it (the next
     // date isn't touched here; that's rescheduled when recording a payment).
     if (newSum !== null) await this.syncOrderLedgerState(orderId, newSum, order.totalAmount);
+    // Record the full before/after so the ledger-event history can show what
+    // changed (e.g. amount ₹800 -> ₹1000).
     await this.audit.record({
       action: AUDIT_ACTIONS.PAYMENT_UPDATED,
       entityType: AUDIT_ENTITIES.PAYMENT,
       entityId: paymentId,
-      metadata: { orderId, fields: Object.keys(updates) },
+      metadata: {
+        orderId,
+        before: { amount: existing.amount, method: existing.method, paidAt: existing.paidAt, notes: existing.notes },
+        after: { amount: entity.amount, method: entity.method, paidAt: entity.paidAt, notes: entity.notes },
+      },
     });
     return toPaymentResponseDto(entity);
   }
@@ -112,7 +118,8 @@ export class PaymentsService {
       action: AUDIT_ACTIONS.PAYMENT_DELETED,
       entityType: AUDIT_ENTITIES.PAYMENT,
       entityId: paymentId,
-      metadata: { orderId },
+      // The removed values, so the ledger-event history can show what was deleted.
+      metadata: { orderId, amount: existing.amount, method: existing.method, paidAt: existing.paidAt },
     });
   }
 

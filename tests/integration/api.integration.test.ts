@@ -211,4 +211,51 @@ describe("API endpoints (integration)", () => {
 
     expect(res.status).toBe(403);
   });
+
+  it("lets an authenticated outsider VIEW a single order read-only (payments stripped, writes forbidden)", async () => {
+    const owner = await createFixtureUser("owner_manager", "VO Owner");
+    const designer = await createFixtureUser("designer", "VO Assigned Designer");
+    const outsider = await createFixtureUser("designer", "VO Outsider Designer");
+    const master = await createFixtureUser("master_tailor", "VO Master");
+    createdUserIds.push(owner.id, designer.id, outsider.id, master.id);
+    const ownerSession = await authProvider.signInWithPassword(owner.email, owner.password);
+
+    const createRes = await request(app)
+      .post("/api/v1/orders")
+      .set("Authorization", `Bearer ${ownerSession.accessToken}`)
+      .send({
+        customerName: "View Only Customer",
+        phone: "9000000020",
+        billNumber: `API-${Date.now()}`,
+        bookingDate: "2026-01-01",
+        dueDate: "2026-02-01",
+        designerId: designer.id,
+        masterTailorId: master.id,
+        productCategory: "saree",
+        orderDetails: "View-only fixture",
+        totalAmount: 5000,
+        productionStatus: "design_pending",
+      });
+    expect(createRes.status).toBe(201);
+    const orderId = (createRes.body as { order: { id: string } }).order.id;
+    createdOrderIds.push(orderId);
+
+    const outsiderSession = await authProvider.signInWithPassword(outsider.email, outsider.password);
+    const auth = `Bearer ${outsiderSession.accessToken}`;
+
+    // Reads the order (view-only) -- 200, but payment fields are absent.
+    const view = await request(app).get(`/api/v1/orders/${orderId}`).set("Authorization", auth);
+    expect(view.status).toBe(200);
+    const order = (view.body as { order: Record<string, unknown> }).order;
+    expect(order.customerName).toBe("View Only Customer");
+    expect(order.paymentStatus).toBeUndefined();
+    expect(order.totalAmount).toBeUndefined();
+    expect(order.outstanding).toBeUndefined();
+
+    // ...but cannot change its status, and cannot see its payment ledger.
+    const patch = await request(app).patch(`/api/v1/orders/${orderId}/status`).set("Authorization", auth).send({ status: "cutting" });
+    expect(patch.status).toBe(403);
+    const ledger = await request(app).get(`/api/v1/orders/${orderId}/payments`).set("Authorization", auth);
+    expect(ledger.status).toBe(403);
+  });
 });

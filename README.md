@@ -503,6 +503,24 @@ immediately), not the RLS policy on `payments` (no `master_tailor` branch,
 unlike `orders`/`order_images`), and not the `Order` response's payment
 fields (stripped, see above).
 
+### Authenticated view-only single-order access
+
+The `GET /orders` **list** stays strictly row-scoped (a Designer/Master Tailor
+sees only their own orders). A single `GET /orders/:id`, though, is relaxed:
+any authenticated user may open one order (reached via its QR code or a shared
+link), read-only. `OrdersService.getOrder` first tries the row-scoped
+`findById`; on a miss it falls back to `findAnyById` (unscoped) and, if the
+order exists, presents it with `{ viewOnly: true }` — which force-strips every
+payment field regardless of role, and the caller sees an `amountPaid` of 0. A
+genuinely missing order still 404s. Writes and the payment ledger are
+unaffected: `PATCH /orders/:id/status` still returns 403 for a non-assigned
+user, and `GET /orders/:id/payments` still 403s — view-only means *view*, and
+never exposes money. The web detail page mirrors this: it shows a "view only"
+banner and hides the status-history feed (which is itself row-scoped and names
+who changed what) for an outsider, leaving the visual status tracker as the
+only progress indicator. Anonymous (unauthenticated) users get nothing — this
+is an authenticated-only relaxation.
+
 ### Order status history & Kanban
 
 `order_status_history` (`modules/orders/infrastructure/order-status-history.schema.ts`)
@@ -574,6 +592,21 @@ accountant can export any year range; defaults to the last 12 months). Period
 boundaries follow `ACCOUNTING_CYCLE_START_DAY` (1 = calendar months by default;
 e.g. 7 gives 7th-to-6th billing cycles), computed in SQL with `date_trunc` +
 `make_interval` over the `payments` ledger.
+
+`GET /orders/ledger-events?from=&to=&limit=&offset=` (`getLedgerEvents`,
+`reports:financial` only) is the **payment audit trail** behind the revenue
+page's "Ledger Activity" section: every payment recorded / edited / removed in
+the window, newest first, decoded for display (who, when, which order, and what
+changed — before/after amounts for an edit, a signed amount for a
+record/removal). It reads the append-only `audit_log` (`entity_type =
+'payment'`), joining `profiles` for the actor name and `orders` for the order
+number via the event's `metadata->>'orderId'`; nothing is mutated. The write
+side enriches this: `PaymentsService.updatePayment` now records a full
+`before`/`after` snapshot so an edit is legible in the feed. Paginated (the
+UI's year/month/week filters map to a `[from, to]` here). A composite index
+`audit_log (entity_type, created_at desc)` backs the equality+range+order
+access pattern. Registered before `/orders/{id}` so `ledger-events` isn't
+matched as an order id.
 
 ### Authentication
 
@@ -950,7 +983,9 @@ sequenceDiagram
 | POST `/orders` | bearer | `orders:create` | orders.routes.ts | `createOrder` | `create` |
 | GET `/orders/stats` | bearer | `orders:read` | orders.routes.ts | `getStats` | `getStats` (row-scoped; registered before `/:id`) |
 | GET `/orders/revenue` | bearer | `reports:financial` | orders.routes.ts | `getMonthlyRevenue` | `getMonthlyRevenue` (registered before `/:id`) |
-| GET `/orders/:id` | bearer | `orders:read` | orders.routes.ts | `getOrder` | `findById` (row-scoped) |
+| GET `/orders/staff-report` | bearer | `reports:staff` | orders.routes.ts | `getStaffReport` | `getStaffReport` (one designer/master on demand; registered before `/:id`) |
+| GET `/orders/ledger-events` | bearer | `reports:financial` | orders.routes.ts | `getLedgerEvents` | `getLedgerEvents` (payment audit trail; paginated; registered before `/:id`) |
+| GET `/orders/:id` | bearer | `orders:read` | orders.routes.ts | `getOrder` | `findById` row-scoped, else `findAnyById` (view-only outsider, payments stripped) |
 | PATCH `/orders/:id` | bearer | field-split, see below | orders.routes.ts | `updateOrder` | `findBasicById`, `update` |
 | PATCH `/orders/:id/status` | bearer | stage-split, see "Order status history & Kanban" below | orders.routes.ts | `updateStatus` | `findBasicById`, `updateStatus` |
 | GET `/orders/:id/history` | bearer | `orders:read` | orders.routes.ts | `getOrderHistory` | `findById` (row-scoped), `listStatusHistory` |

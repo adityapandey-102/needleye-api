@@ -2,7 +2,7 @@ import { afterAll, afterEach, describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
 import { authProvider } from "../../src/common/auth/supabase-auth-provider";
-import { createFixtureUser, deleteFixtureUser, closeDb } from "./helpers";
+import { createFixtureUser, deleteFixtureUser, deleteFixtureOrder, closeDb } from "./helpers";
 
 /**
  * Integration coverage for the user-management and financial-reporting
@@ -13,6 +13,7 @@ import { createFixtureUser, deleteFixtureUser, closeDb } from "./helpers";
 describe("Users & reports (integration)", () => {
   const app = createApp();
   const createdUserIds: string[] = [];
+  const createdOrderIds: string[] = [];
 
   async function ownerToken(): Promise<string> {
     const owner = await createFixtureUser("owner_manager", "Reports Owner");
@@ -22,6 +23,7 @@ describe("Users & reports (integration)", () => {
   }
 
   afterEach(async () => {
+    for (const id of createdOrderIds.splice(0)) await deleteFixtureOrder(id);
     for (const id of createdUserIds.splice(0)) await deleteFixtureUser(id);
   });
 
@@ -138,5 +140,134 @@ describe("Users & reports (integration)", () => {
       .get("/api/v1/orders/revenue")
       .set("Authorization", `Bearer ${session.accessToken}`);
     expect(designerRes.status).toBe(403);
+  });
+
+  it("returns a per-staff report to owner_manager (correct shape + month's weeks)", async () => {
+    const token = await ownerToken();
+    const designer = await createFixtureUser("designer", "Report Designer");
+    createdUserIds.push(designer.id);
+
+    const res = await request(app)
+      .get(`/api/v1/orders/staff-report?staffId=${designer.id}&month=2026-07`)
+      .set("Authorization", `Bearer ${token}`);
+    expect(res.status).toBe(200);
+    const body = res.body as {
+      staff: { id: string; role: string };
+      summary: Record<string, number>;
+      weekly: { weekStart: string; booked: number; completed: number }[];
+      month: string;
+    };
+    expect(body.staff.id).toBe(designer.id);
+    expect(body.staff.role).toBe("designer");
+    for (const field of ["booked", "active", "inProduction", "completed", "overdue", "urgent", "paymentPendingCount", "paymentPendingAmount"]) {
+      expect(body.summary[field]).toBeTypeOf("number");
+    }
+    // The month's weeks: continuous, zero-filled, oldest first (a month spans 4-6 Mondays).
+    expect(body.month).toBe("2026-07");
+    expect(body.weekly.length).toBeGreaterThanOrEqual(4);
+    expect(body.weekly.length).toBeLessThanOrEqual(6);
+    expect(body.weekly[0]!.weekStart < body.weekly[body.weekly.length - 1]!.weekStart).toBe(true);
+  });
+
+  it("returns the payment-ledger activity feed (created/updated/deleted) to owner_manager but forbids a designer", async () => {
+    const owner = await createFixtureUser("owner_manager", "Ledger Owner");
+    const master = await createFixtureUser("master_tailor", "Ledger Master");
+    createdUserIds.push(owner.id, master.id);
+    const session = await authProvider.signInWithPassword(owner.email, owner.password);
+    const auth = `Bearer ${session.accessToken}`;
+    const today = new Date().toISOString().slice(0, 10);
+
+    // Create an order, then record -> edit -> remove a payment so all three
+    // audit verbs land in the feed.
+    const createRes = await request(app)
+      .post("/api/v1/orders")
+      .set("Authorization", auth)
+      .send({
+        customerName: "Ledger Feed Customer",
+        phone: "9000000030",
+        billNumber: `LEDGER-${Date.now()}`,
+        bookingDate: today,
+        dueDate: today,
+        designerId: owner.id,
+        masterTailorId: master.id,
+        productCategory: "saree",
+        orderDetails: "Ledger feed fixture",
+        totalAmount: 2000,
+        productionStatus: "design_pending",
+      });
+    expect(createRes.status).toBe(201);
+    const orderId = (createRes.body as { order: { id: string; orderNumber: string } }).order.id;
+    const orderNumber = (createRes.body as { order: { orderNumber: string } }).order.orderNumber;
+    createdOrderIds.push(orderId);
+
+    const payRes = await request(app)
+      .post(`/api/v1/orders/${orderId}/payments`)
+      .set("Authorization", auth)
+      .send({ amount: 500, method: "cash" });
+    expect(payRes.status).toBe(201);
+    const paymentId = (payRes.body as { payment: { id: string } }).payment.id;
+
+    const editRes = await request(app)
+      .patch(`/api/v1/orders/${orderId}/payments/${paymentId}`)
+      .set("Authorization", auth)
+      .send({ amount: 800 });
+    expect(editRes.status).toBe(200);
+
+    const delRes = await request(app).delete(`/api/v1/orders/${orderId}/payments/${paymentId}`).set("Authorization", auth);
+    expect(delRes.status).toBe(204);
+
+    const feed = await request(app)
+      .get(`/api/v1/orders/ledger-events?from=${today}&to=${today}&limit=50`)
+      .set("Authorization", auth);
+    expect(feed.status).toBe(200);
+    const body = feed.body as {
+      events: { action: string; at: string; actorName: string | null; orderNumber: string | null; snapshot?: { amount: number }; before?: { amount: number }; after?: { amount: number } }[];
+      total: number;
+      limit: number;
+      from: string;
+      to: string;
+    };
+    expect(body.limit).toBe(50);
+    expect(body.from).toBe(today);
+    expect(body.to).toBe(today);
+    expect(body.total).toBeGreaterThanOrEqual(3);
+
+    const mine = body.events.filter((e) => e.orderNumber === orderNumber);
+    const created = mine.find((e) => e.action === "created");
+    const updated = mine.find((e) => e.action === "updated");
+    const deleted = mine.find((e) => e.action === "deleted");
+    expect(created?.snapshot?.amount).toBe(500);
+    expect(updated?.before?.amount).toBe(500);
+    expect(updated?.after?.amount).toBe(800);
+    expect(deleted?.snapshot?.amount).toBe(800);
+    // The actor's name is resolved from profiles.
+    expect(created?.actorName).toBe("Ledger Owner");
+
+    // A designer has no reports:financial -> forbidden.
+    const designer = await createFixtureUser("designer", "Ledger Nosy Designer");
+    createdUserIds.push(designer.id);
+    const dSession = await authProvider.signInWithPassword(designer.email, designer.password);
+    const forbidden = await request(app).get("/api/v1/orders/ledger-events").set("Authorization", `Bearer ${dSession.accessToken}`);
+    expect(forbidden.status).toBe(403);
+  });
+
+  it("requires staffId, 404s a non-staff id, and forbids non-owner roles on the staff report", async () => {
+    const token = await ownerToken();
+    // Missing staffId -> 400.
+    const noId = await request(app).get("/api/v1/orders/staff-report").set("Authorization", `Bearer ${token}`);
+    expect(noId.status).toBe(400);
+    // A random (non-existent) id -> 404.
+    const bogus = await request(app)
+      .get("/api/v1/orders/staff-report?staffId=00000000-0000-0000-0000-000000000000")
+      .set("Authorization", `Bearer ${token}`);
+    expect(bogus.status).toBe(404);
+    // Accountant has reports:financial but NOT reports:staff -> 403.
+    const accountant = await createFixtureUser("accountant", "No Staff Report Accountant");
+    createdUserIds.push(accountant.id);
+    const session = await authProvider.signInWithPassword(accountant.email, accountant.password);
+    const forbidden = await request(app)
+      .get(`/api/v1/orders/staff-report?staffId=${accountant.id}`)
+      .set("Authorization", `Bearer ${session.accessToken}`);
+    expect(forbidden.status).toBe(403);
   });
 });

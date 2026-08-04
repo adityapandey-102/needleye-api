@@ -118,15 +118,77 @@ export interface RevenuePeriod {
   paymentCount: number;
 }
 
+/**
+ * A designer/master-tailor's workload snapshot for the staff report. The
+ * "this week" throughput fields (bookedThisWeek/completedThisWeek) are
+ * time-windowed; the rest are the CURRENT state of every order assigned to
+ * them (their live board), computed the same way the dashboard stats are.
+ */
+export interface StaffReportSummary {
+  /**
+   * All metrics are scoped to the orders this person BOOKED in the selected
+   * month (the month's cohort), showing where that cohort stands now.
+   */
+  booked: number;
+  active: number;
+  inProduction: number;
+  completed: number;
+  overdue: number;
+  urgent: number;
+  paymentPendingCount: number;
+  paymentPendingAmount: number;
+}
+
+/** One week's throughput for the 6-month graph (Monday-started weeks, oldest first). */
+export interface StaffWeeklyPoint {
+  weekStart: string;
+  booked: number;
+  completed: number;
+}
+
+export interface StaffReportRaw {
+  staff: { id: string; fullName: string; role: "designer" | "master_tailor" };
+  summary: StaffReportSummary;
+  weekly: StaffWeeklyPoint[];
+}
+
+/** One payment-ledger audit event (created/updated/deleted), joined with the actor + order for display. */
+export interface LedgerEventRaw {
+  id: string;
+  action: string;
+  createdAt: string;
+  actorName: string | null;
+  orderId: string | null;
+  orderNumber: string | null;
+  metadata: Record<string, unknown> | null;
+}
+
+export interface LedgerEventsResult {
+  events: LedgerEventRaw[];
+  total: number;
+}
+
 /** Persistence contract for the Orders module -- pure data access, no business rules. */
 export interface OrdersRepositoryPort {
   findMany(scope: RowScope, filters: OrderListFilters, page: OrderListPage): Promise<OrderEntity[]>;
   /** Total orders matching the same scope+filters as findMany, ignoring pagination -- backs the list's total count. */
   countMany(scope: RowScope, filters: OrderListFilters): Promise<number>;
   findById(scope: RowScope, id: string): Promise<OrderEntity | null>;
+  /** Loads an order ignoring row scope -- backs the authenticated view-only path (any logged-in user can read a single order, payments stripped by the presenter). */
+  findAnyById(id: string): Promise<OrderEntity | null>;
   getStats(scope: RowScope): Promise<OrderStatsRaw>;
   /** Collected revenue grouped into accounting periods (most recent first), for the revenue report. */
   getMonthlyRevenue(scope: RowScope, cycleStartDay: number, range: { from: string; to: string }): Promise<RevenuePeriod[]>;
+  /**
+   * Per-staff workload report (Owner/Manager only). Returns null if the id
+   * isn't an active designer/master_tailor. Computes the current-state counts +
+   * a weekly throughput series for the given month window (`range`), on demand
+   * for ONE person -- never all staff at once (the UI drills down: role ->
+   * person -> month -> this call).
+   */
+  getStaffReport(staffId: string, range: { from: string; to: string }): Promise<StaffReportRaw | null>;
+  /** Paginated payment-ledger audit events (created/updated/deleted) in a date range, newest first -- backs the ledger-activity history. */
+  getLedgerEvents(range: { from: string; to: string }, page: OrderListPage): Promise<LedgerEventsResult>;
   findBasicById(id: string): Promise<OrderBasicInfo | null>;
   create(data: NewOrderRecord): Promise<OrderEntity>;
   /**

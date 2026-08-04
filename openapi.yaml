@@ -640,11 +640,100 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /orders/staff-report:
+    get:
+      tags: [Orders]
+      summary: One designer/master-tailor's weekly workload report
+      description: |
+        Owner/Manager only (`reports:staff` -- NOT the accountant). Loads ONE
+        person's report on demand (the UI drills down role -> person -> here),
+        so all-staff aggregation never runs. Computed live from `orders`
+        (+ `order_status_history` for weekly completion) over a rolling window;
+        nothing is stored/deleted. Registered before `/orders/{id}` so
+        `staff-report` isn't matched as an order id.
+      parameters:
+        - name: staffId
+          in: query
+          required: true
+          description: An ACTIVE designer or master_tailor profile id.
+          schema: { type: string, format: uuid }
+        - name: month
+          in: query
+          description: The month (YYYY-MM) the weekly breakdown covers. Defaults to the current month; the UI offers the last 6 months and fetches per selection.
+          schema: { type: string, pattern: "^\\d{4}-(0[1-9]|1[0-2])$" }
+      responses:
+        "200":
+          description: The staff report
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffReport" }
+        "400":
+          description: staffId is required
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No active designer/master_tailor with that id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /orders/ledger-events:
+    get:
+      tags: [Orders]
+      summary: Payment-ledger activity feed (audit trail)
+      description: |
+        Owner/Manager and Accountant only (`reports:financial`). The
+        append-only payment audit trail over an inclusive `[from, to]` window:
+        every payment recorded / edited / removed, newest first, decoded into a
+        display shape (who did it, when, on which order, and what changed --
+        before/after amounts for an edit, a signed amount for a
+        record/removal). Read from `audit_log` (`entity_type = 'payment'`);
+        nothing is mutated. Paginated (the revenue page's year/month/week
+        filters map to a `[from, to]` here). Registered before `/orders/{id}`
+        so `ledger-events` isn't matched as an order id. Defaults to the last
+        12 months when the range is missing/invalid.
+      parameters:
+        - name: from
+          in: query
+          description: Inclusive start date (YYYY-MM-DD). Defaults to the first of the month 11 months ago.
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          description: Inclusive end date (YYYY-MM-DD). Defaults to today.
+          schema: { type: string, format: date }
+        - name: limit
+          in: query
+          description: Page size (default 20, max 100).
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - name: offset
+          in: query
+          description: Rows to skip for pagination.
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: The ledger-activity feed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LedgerEventsResult" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /orders/{id}:
     get:
       tags: [Orders]
       summary: Get a single order
-      description: 404s (not 403) if the order exists but is outside the caller's row scope -- doesn't confirm the order's existence to someone who shouldn't see it.
+      description: |
+        In-scope readers (owner/accountant on any order; a designer/master on
+        their own) get the full order. An authenticated OUTSIDER (a
+        designer/master reaching a non-assigned order via QR/link) gets a
+        read-only view -- the same 200, but payment fields
+        (paymentStatus/totalAmount/amountPaid/outstanding) are stripped, and
+        writes (status/edit/payment ledger) stay 403. A truly missing order is
+        404. The list endpoint stays row-scoped -- outsiders can reach one order
+        by id, not browse everyone's.
       parameters:
         - $ref: "#/components/parameters/OrderId"
       responses:
@@ -1209,6 +1298,82 @@ components:
               periodStart: { type: string, format: date, description: First day of the accounting period. }
               collected: { type: number, description: SUM(payments.amount) with paid_at in this period. }
               paymentCount: { type: integer, description: Number of ledger entries in this period. }
+
+    StaffReport:
+      type: object
+      description: One designer/master-tailor's workload report from GET /orders/staff-report (reports:staff).
+      properties:
+        staff:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            fullName: { type: string }
+            role: { type: string, enum: [designer, master_tailor] }
+        summary:
+          type: object
+          description: The current status of the orders they BOOKED in the selected month (the month's cohort).
+          properties:
+            booked: { type: integer, description: Orders they booked in the month (cohort size). }
+            active: { type: integer }
+            inProduction: { type: integer }
+            completed: { type: integer, description: Orders currently in a completed stage (ready/delivered). }
+            overdue: { type: integer }
+            urgent: { type: integer }
+            paymentPendingCount: { type: integer }
+            paymentPendingAmount: { type: number, description: Sum of outstanding across their not-fully-paid orders. }
+        weekly:
+          type: array
+          description: The selected month's weeks, oldest first, zero-filled and continuous.
+          items:
+            type: object
+            properties:
+              weekStart: { type: string, format: date, description: Monday of the week. }
+              booked: { type: integer, description: Orders whose booking date falls in that week. }
+              completed: { type: integer, description: Orders that reached a completed stage that week. }
+        month: { type: string, description: "The month (YYYY-MM) the weekly breakdown covers (echoes the request; default current month)." }
+
+    LedgerAmountSnapshot:
+      type: object
+      description: A payment's amount + method at a point in time.
+      properties:
+        amount: { type: number }
+        method: { type: string, description: "cash | card | upi | bank_transfer | cheque | other" }
+
+    LedgerEvent:
+      type: object
+      description: One payment-ledger audit event, decoded for display.
+      properties:
+        id: { type: string, format: uuid, description: The audit_log row id. }
+        action: { type: string, enum: [created, updated, deleted], description: "created = recorded, updated = edited, deleted = removed." }
+        at: { type: string, format: date-time, description: When the action happened (UTC). }
+        actorName: { type: string, nullable: true, description: Who did it (null if that account was since removed). }
+        orderId: { type: string, format: uuid, nullable: true }
+        orderNumber: { type: string, nullable: true, description: Human-readable order number (null if the order was since removed). }
+        snapshot:
+          allOf: [{ $ref: "#/components/schemas/LedgerAmountSnapshot" }]
+          nullable: true
+          description: created/deleted only -- the payment's amount + method.
+        before:
+          allOf: [{ $ref: "#/components/schemas/LedgerAmountSnapshot" }]
+          nullable: true
+          description: updated only -- values before the edit.
+        after:
+          allOf: [{ $ref: "#/components/schemas/LedgerAmountSnapshot" }]
+          nullable: true
+          description: updated only -- values after the edit.
+
+    LedgerEventsResult:
+      type: object
+      description: Paginated payment-ledger activity feed from GET /orders/ledger-events (reports:financial).
+      properties:
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/LedgerEvent" }
+        total: { type: integer, description: Total events matching the range, ignoring pagination. }
+        limit: { type: integer }
+        offset: { type: integer }
+        from: { type: string, format: date, description: Inclusive window start (echoes the resolved request). }
+        to: { type: string, format: date, description: Inclusive window end. }
 
     CreateOrderRequest:
       type: object

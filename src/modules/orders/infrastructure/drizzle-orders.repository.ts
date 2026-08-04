@@ -34,6 +34,9 @@ import type {
   OrderImageInfo,
   OrderStatsRaw,
   RevenuePeriod,
+  StaffReportRaw,
+  StaffWeeklyPoint,
+  LedgerEventsResult,
 } from "../application/ports/orders-repository.port";
 
 /** The granular values a Kanban card sits on once it reaches the "ready"/"delivered" canonical columns -- see domain/order-status.ts. */
@@ -41,6 +44,10 @@ const COMPLETED_STATUSES = COMPLETED_CANONICAL_STAGES.map((stage) => CANONICAL_T
 
 /** Production stages still actively being worked (excludes ready/delivered) -- the "In Production" dashboard bucket. */
 const IN_PRODUCTION_STATUSES = PRODUCTION_STAGE_STATUSES.filter((s) => !COMPLETED_STATUSES.includes(s));
+
+/** SQL-safe `'a','b'` lists of the status groups, for raw queries (values are code constants, never user input). */
+const COMPLETED_STATUS_SQL_LIST = COMPLETED_STATUSES.map((s) => `'${s}'`).join(", ");
+const IN_PRODUCTION_STATUS_SQL_LIST = IN_PRODUCTION_STATUSES.map((s) => `'${s}'`).join(", ");
 
 export class DrizzleOrdersRepository implements OrdersRepositoryPort {
   /** Applies row-level visibility for the caller's role -- owner_manager/accountant unscoped, designer/master_tailor limited to their own orders. */
@@ -239,12 +246,185 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     }));
   }
 
+  async getStaffReport(staffId: string, range: { from: string; to: string }): Promise<StaffReportRaw | null> {
+    // 1. Resolve the person -- must be an ACTIVE designer/master_tailor.
+    let staff;
+    try {
+      const rows = await db
+        .select({ id: profiles.id, fullName: profiles.fullName, role: profiles.role, active: profiles.active })
+        .from(profiles)
+        .where(eq(profiles.id, staffId))
+        .limit(1);
+      staff = rows[0];
+    } catch (error) {
+      throw new InternalError("Failed to load staff member", error);
+    }
+    if (!staff || !staff.active || (staff.role !== "designer" && staff.role !== "master_tailor")) return null;
+
+    // Which order column links this person to an order. The value is derived
+    // from the DB (one of two fixed strings), never user input -- safe to inline.
+    const staffColumnName = staff.role === "designer" ? "designer_id" : "master_tailor_id";
+
+    // 2. The month's COHORT board: every metric is over the orders this person
+    //    booked in [from, to], showing where that cohort stands now (same
+    //    COUNT(*) FILTER pattern as the dashboard). Written as a raw
+    //    parameterized query -- the outstanding-amount correlated ledger
+    //    subquery must run against the orders table directly, which the query
+    //    builder's sql-template interpolation didn't correlate reliably.
+    //    staffId + range are parameterized; the column name + status lists are
+    //    code constants (never user input). payments_order_idx keeps each
+    //    per-order ledger lookup cheap.
+    type SummaryRow = {
+      booked: number; active: number; in_production: number; completed: number;
+      overdue: number; urgent: number; pp_count: number; pp_amount: string;
+    };
+    let summary: SummaryRow;
+    try {
+      const res = await db.execute<SummaryRow>(sql`
+        select
+          count(*)::int as booked,
+          count(*) filter (where production_status not in (${sql.raw(COMPLETED_STATUS_SQL_LIST)}))::int as active,
+          count(*) filter (where production_status in (${sql.raw(IN_PRODUCTION_STATUS_SQL_LIST)}))::int as in_production,
+          count(*) filter (where production_status in (${sql.raw(COMPLETED_STATUS_SQL_LIST)}))::int as completed,
+          count(*) filter (where production_status not in (${sql.raw(COMPLETED_STATUS_SQL_LIST)}) and due_date < current_date)::int as overdue,
+          count(*) filter (where production_status not in (${sql.raw(COMPLETED_STATUS_SQL_LIST)}) and due_date >= current_date and due_date < current_date + 3)::int as urgent,
+          count(*) filter (where payment_status <> 'fully_paid')::int as pp_count,
+          coalesce(sum(greatest(total_amount - coalesce((select sum(p.amount) from payments p where p.order_id = orders.id), 0), 0)) filter (where payment_status <> 'fully_paid'), 0) as pp_amount
+        from orders
+        where orders.${sql.raw(staffColumnName)} = ${staffId}
+          and booking_date >= ${range.from}::date
+          and booking_date <= ${range.to}::date
+      `);
+      summary = (res.rows ?? (res as unknown as SummaryRow[]))[0]!;
+    } catch (error) {
+      throw new InternalError("Failed to load staff report summary", error);
+    }
+
+    // 3. Weekly throughput for the month window, zero-filled and continuous.
+    //    generate_series builds every Monday from the week of `from` to the week
+    //    of `to`; two correlated subqueries count orders booked (created_at) and
+    //    completed (earliest ready/delivered history event) in that week. One
+    //    query, ~4-6 rows out (a month's weeks).
+    let weekly: StaffWeeklyPoint[];
+    try {
+      const res = await db.execute<{ week_start: string; booked: number; completed: number }>(sql`
+        select
+          to_char(w.week_start, 'YYYY-MM-DD') as week_start,
+          (select count(*)::int from orders o2
+             where o2.${sql.raw(staffColumnName)} = ${staffId}
+               and date_trunc('week', o2.booking_date) = w.week_start) as booked,
+          (select count(*)::int from (
+             select h.order_id, min(h.created_at) as done_at
+             from order_status_history h
+             join orders o3 on o3.id = h.order_id
+             where o3.${sql.raw(staffColumnName)} = ${staffId}
+               and h.status in (${sql.raw(COMPLETED_STATUS_SQL_LIST)})
+             group by h.order_id
+           ) c where date_trunc('week', c.done_at) = w.week_start) as completed
+        from generate_series(
+          date_trunc('week', ${range.from}::date),
+          date_trunc('week', ${range.to}::date),
+          interval '1 week'
+        ) as w(week_start)
+        order by w.week_start asc
+      `);
+      const rows = (res.rows ?? (res as unknown as { week_start: string; booked: number; completed: number }[]));
+      weekly = rows.map((r) => ({ weekStart: r.week_start, booked: Number(r.booked), completed: Number(r.completed) }));
+    } catch (error) {
+      throw new InternalError("Failed to load staff weekly throughput", error);
+    }
+
+    return {
+      staff: { id: staff.id, fullName: staff.fullName, role: staff.role },
+      summary: {
+        booked: Number(summary.booked),
+        active: Number(summary.active),
+        inProduction: Number(summary.in_production),
+        completed: Number(summary.completed),
+        overdue: Number(summary.overdue),
+        urgent: Number(summary.urgent),
+        paymentPendingCount: Number(summary.pp_count),
+        paymentPendingAmount: Number(summary.pp_amount),
+      },
+      weekly,
+    };
+  }
+
+  /**
+   * Paginated payment-ledger audit trail: every payment.created/updated/deleted
+   * event in [from, to] (whole-day inclusive), newest first, joined to the
+   * actor (profiles) and the affected order. `orderId` is pulled out of the
+   * append-only audit metadata; the order join is a LEFT join so an event
+   * survives even if its order was later removed.
+   */
+  async getLedgerEvents(range: { from: string; to: string }, page: OrderListPage): Promise<LedgerEventsResult> {
+    let events: LedgerEventsResult["events"];
+    let total: number;
+    try {
+      const rows = await db.execute(sql`
+        select
+          a.id::text as id,
+          a.action,
+          to_char(a.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as created_at,
+          pr.full_name as actor_name,
+          (a.metadata->>'orderId') as order_id,
+          o.order_number as order_number,
+          a.metadata as metadata
+        from audit_log a
+        left join profiles pr on pr.id = a.actor_id
+        left join orders o on o.id = nullif(a.metadata->>'orderId', '')::uuid
+        where a.entity_type = 'payment'
+          and a.created_at >= ${range.from}::date
+          and a.created_at < (${range.to}::date + 1)
+        order by a.created_at desc
+        limit ${page.limit} offset ${page.offset}
+      `);
+      const list = (rows.rows ?? (rows as unknown as Record<string, unknown>[])) as {
+        id: string;
+        action: string;
+        created_at: string;
+        actor_name: string | null;
+        order_id: string | null;
+        order_number: string | null;
+        metadata: Record<string, unknown> | null;
+      }[];
+      events = list.map((r) => ({
+        id: r.id,
+        action: r.action,
+        createdAt: r.created_at,
+        actorName: r.actor_name,
+        orderId: r.order_id,
+        orderNumber: r.order_number,
+        metadata: r.metadata,
+      }));
+
+      const countRes = await db.execute(sql`
+        select count(*)::int as total
+        from audit_log a
+        where a.entity_type = 'payment'
+          and a.created_at >= ${range.from}::date
+          and a.created_at < (${range.to}::date + 1)
+      `);
+      const countRows = (countRes.rows ?? (countRes as unknown as { total: number }[])) as { total: number }[];
+      total = Number(countRows[0]?.total ?? 0);
+    } catch (error) {
+      throw new InternalError("Failed to load ledger events", error);
+    }
+
+    return { events, total };
+  }
+
   private async findByIdUnscoped(id: string): Promise<OrderEntity | null> {
     const row = await db.query.orders.findFirst({
       where: eq(orders.id, id),
       with: { designer: true, masterTailor: true, images: true },
     });
     return row ? OrderMapper.toEntity(row) : null;
+  }
+
+  /** Public, row-scope-ignoring lookup for the view-only path (see the port). */
+  findAnyById(id: string): Promise<OrderEntity | null> {
+    return this.findByIdUnscoped(id);
   }
 
   async findBasicById(id: string): Promise<OrderBasicInfo | null> {

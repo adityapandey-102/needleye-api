@@ -17,6 +17,7 @@ export function toOrderResponseDto(
   amountPaid: number,
   role: Role,
   signedUrls: Map<string, string>,
+  opts?: { viewOnly?: boolean },
 ): OrderResponseDto {
   const images = entity.images.map((img) => ({
     ...img,
@@ -30,7 +31,11 @@ export function toOrderResponseDto(
     outstanding: Math.max(entity.totalAmount - amountPaid, 0),
   };
 
-  if (canViewPaymentFields(role)) return dto;
+  // Payment fields are stripped when the role can't see them at all, OR when
+  // this is a view-only read of an order outside the caller's scope (an
+  // authenticated "outsider" reaching it via QR/link -- payments stay hidden
+  // even though their role could see payments on their OWN orders).
+  if (!opts?.viewOnly && canViewPaymentFields(role)) return dto;
 
   const { paymentStatus: _paymentStatus, totalAmount: _totalAmount, amountPaid: _amountPaid, outstanding: _outstanding, ...rest } = dto;
   return rest;
