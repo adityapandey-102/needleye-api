@@ -1098,6 +1098,7 @@ components:
       enum:
         - design_pending
         - design_approved
+        - falls_kutchu
         - fabric_purchased
         - cutting
         - stitching

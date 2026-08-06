@@ -1,7 +1,7 @@
 /**
  * Ported from prototype/script.js. Two parallel vocabularies exist on purpose:
- *  - GRANULAR_STATUSES (11): what the Create/Edit Order form sets.
- *  - CANONICAL_STAGES (9): what the Kanban board groups by.
+ *  - GRANULAR_STATUSES (12): what the Create/Edit Order form sets.
+ *  - CANONICAL_STAGES (10): what the Kanban board groups by.
  * `orders.production_status` always stores a granular value; canonical grouping
  * is a pure derivation via STATUS_ALIASES, never stored redundantly.
  */
@@ -9,6 +9,7 @@
 export const GRANULAR_STATUSES = [
   { value: "design_pending", label: "Design Pending" },
   { value: "design_approved", label: "Design Approved" },
+  { value: "falls_kutchu", label: "Falls / Kutchu" },
   { value: "fabric_purchased", label: "Fabric Purchased" },
   { value: "cutting", label: "Cutting" },
   { value: "stitching", label: "Stitching" },
@@ -29,6 +30,7 @@ export const GRANULAR_STATUS_VALUES = GRANULAR_STATUSES.map((s) => s.value) as [
 
 export const CANONICAL_STAGES = [
   { value: "designing", label: "Designing" },
+  { value: "falls_kutchu", label: "Falls / Kutchu" },
   { value: "fabric_purchase", label: "Fabric Purchase" },
   { value: "cutting", label: "Cutting" },
   { value: "stitching", label: "Stitching" },
@@ -50,6 +52,7 @@ export const CANONICAL_STAGE_VALUES = CANONICAL_STAGES.map((s) => s.value) as [
 export const STATUS_ALIASES: Record<GranularStatus, CanonicalStage> = {
   design_pending: "designing",
   design_approved: "designing",
+  falls_kutchu: "falls_kutchu",
   fabric_purchased: "fabric_purchase",
   cutting: "cutting",
   stitching: "stitching",
@@ -64,11 +67,12 @@ export const STATUS_ALIASES: Record<GranularStatus, CanonicalStage> = {
 /**
  * Canonical -> representative granular value written when a Kanban card is
  * dropped on that column (e.g. dropping on "QC" writes "quality_check").
- * Keeps `production_status` always holding one of the 11 known granular
+ * Keeps `production_status` always holding one of the 12 known granular
  * values, never a mixed vocabulary.
  */
 export const CANONICAL_TO_GRANULAR: Record<CanonicalStage, GranularStatus> = {
   designing: "design_pending",
+  falls_kutchu: "falls_kutchu",
   fabric_purchase: "fabric_purchased",
   cutting: "cutting",
   stitching: "stitching",

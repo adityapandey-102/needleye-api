@@ -35,6 +35,14 @@ describe("assertCanTransitionStatus", () => {
     expect(() => assertCanTransitionStatus("master_tailor", "design_pending", order, "master-1")).toThrow(ForbiddenError);
   });
 
+  it("treats Falls / Kutchu as a production stage (designer forbidden, assigned master tailor allowed)", () => {
+    // falls_kutchu follows design_approved but is production work -- the master
+    // tailor advances it, not the designer.
+    expect(() => assertCanTransitionStatus("designer", "falls_kutchu", order, "designer-1")).toThrow(ForbiddenError);
+    expect(() => assertCanTransitionStatus("master_tailor", "falls_kutchu", order, "master-1")).not.toThrow();
+    expect(() => assertCanTransitionStatus("master_tailor", "falls_kutchu", order, "master-2")).toThrow(ForbiddenError);
+  });
+
   it("forbids accountant from transitioning status at all", () => {
     expect(() => assertCanTransitionStatus("accountant", "design_pending", order, "anyone")).toThrow(ForbiddenError);
     expect(() => assertCanTransitionStatus("accountant", "cutting", order, "anyone")).toThrow(ForbiddenError);
