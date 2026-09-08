@@ -153,15 +153,18 @@ describe("Users & reports (integration)", () => {
     expect(res.status).toBe(200);
     const body = res.body as {
       staff: { id: string; role: string };
-      summary: Record<string, number>;
+      summary: Record<string, number | string> & { paymentPendingAmount: string };
       weekly: { weekStart: string; booked: number; completed: number }[];
       month: string;
     };
     expect(body.staff.id).toBe(designer.id);
     expect(body.staff.role).toBe("designer");
-    for (const field of ["booked", "active", "inProduction", "completed", "overdue", "urgent", "paymentPendingCount", "paymentPendingAmount"]) {
+    for (const field of ["booked", "active", "inProduction", "completed", "overdue", "urgent", "paymentPendingCount"]) {
       expect(body.summary[field]).toBeTypeOf("number");
     }
+    // paymentPendingAmount is money -- a 2dp string on the wire, not a number.
+    expect(body.summary.paymentPendingAmount).toBeTypeOf("string");
+    expect(body.summary.paymentPendingAmount).toMatch(/^\d+\.\d{2}$/);
     // The month's weeks: continuous, zero-filled, oldest first (a month spans 4-6 Mondays).
     expect(body.month).toBe("2026-07");
     expect(body.weekly.length).toBeGreaterThanOrEqual(4);
@@ -221,7 +224,7 @@ describe("Users & reports (integration)", () => {
       .set("Authorization", auth);
     expect(feed.status).toBe(200);
     const body = feed.body as {
-      events: { action: string; at: string; actorName: string | null; orderNumber: string | null; snapshot?: { amount: number }; before?: { amount: number }; after?: { amount: number } }[];
+      events: { action: string; at: string; actorName: string | null; orderNumber: string | null; snapshot?: { amount: string }; before?: { amount: string }; after?: { amount: string } }[];
       total: number;
       limit: number;
       from: string;
@@ -236,10 +239,10 @@ describe("Users & reports (integration)", () => {
     const created = mine.find((e) => e.action === "created");
     const updated = mine.find((e) => e.action === "updated");
     const deleted = mine.find((e) => e.action === "deleted");
-    expect(created?.snapshot?.amount).toBe(500);
-    expect(updated?.before?.amount).toBe(500);
-    expect(updated?.after?.amount).toBe(800);
-    expect(deleted?.snapshot?.amount).toBe(800);
+    expect(created?.snapshot?.amount).toBe("500.00");
+    expect(updated?.before?.amount).toBe("500.00");
+    expect(updated?.after?.amount).toBe("800.00");
+    expect(deleted?.snapshot?.amount).toBe("800.00");
     // The actor's name is resolved from profiles.
     expect(created?.actorName).toBe("Ledger Owner");
 

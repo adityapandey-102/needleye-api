@@ -7,7 +7,8 @@
  */
 export interface RevenuePeriodDto {
   periodStart: string;
-  collected: number;
+  /** Money as a 2dp string. */
+  collected: string;
   paymentCount: number;
 }
 

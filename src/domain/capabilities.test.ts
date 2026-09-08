@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { CAPABILITIES, getCapabilityScope, hasCapability, isScopedToOwnRecords } from "./capabilities";
 import type { Role } from "./roles";
 
-const ROLES: Role[] = ["owner_manager", "designer", "master_tailor", "accountant"];
+const ROLES: Role[] = ["owner_manager", "designer", "master_tailor", "accountant", "production_manager", "worker"];
 
 describe("capabilities matrix", () => {
   it("defines a scope for every role on every capability", () => {
@@ -32,16 +32,32 @@ describe("capabilities matrix", () => {
   });
 
   it("restricts pricing/assignment edits to owner_manager only", () => {
-    for (const role of ["designer", "master_tailor", "accountant"] as Role[]) {
+    for (const role of ["designer", "master_tailor", "accountant", "production_manager", "worker"] as Role[]) {
       expect(getCapabilityScope(role, "orders:edit:pricing_assignment")).toBe(false);
     }
   });
 
-  it("splits status transitions by stage between designer and master_tailor", () => {
-    expect(getCapabilityScope("designer", "orders:status:design_stages")).toBe("assigned");
-    expect(getCapabilityScope("designer", "orders:status:production_stages")).toBe(false);
-    expect(getCapabilityScope("master_tailor", "orders:status:production_stages")).toBe("assigned");
-    expect(getCapabilityScope("master_tailor", "orders:status:design_stages")).toBe(false);
+  it("gates each status tier by role (no assignment scope on status)", () => {
+    // Design tier: owner / designer / PM.
+    expect(getCapabilityScope("designer", "orders:status:design")).toBe(true);
+    expect(getCapabilityScope("production_manager", "orders:status:design")).toBe(true);
+    expect(getCapabilityScope("master_tailor", "orders:status:design")).toBe(false);
+    expect(getCapabilityScope("worker", "orders:status:design")).toBe(false);
+    // PM-received tier: owner / PM only.
+    expect(getCapabilityScope("production_manager", "orders:status:pm_received")).toBe(true);
+    expect(getCapabilityScope("designer", "orders:status:pm_received")).toBe(false);
+    expect(getCapabilityScope("master_tailor", "orders:status:pm_received")).toBe(false);
+    // Production tier: everyone on the floor (not accountant).
+    for (const role of ["owner_manager", "designer", "master_tailor", "production_manager", "worker"] as Role[]) {
+      expect(getCapabilityScope(role, "orders:status:production")).toBe(true);
+    }
+    expect(getCapabilityScope("accountant", "orders:status:production")).toBe(false);
+    // Status is never "assigned"-scoped.
+    for (const cap of ["orders:status:design", "orders:status:pm_received", "orders:status:production"] as const) {
+      for (const role of ROLES) {
+        expect(getCapabilityScope(role, cap)).not.toBe("assigned");
+      }
+    }
   });
 
   it("reserves users:manage and reports:financial for owner_manager/accountant only", () => {

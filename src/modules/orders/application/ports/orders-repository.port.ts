@@ -38,7 +38,7 @@ export interface NewOrderRecord {
   machineWork: boolean;
   purchaseRequired: boolean;
   paymentStatus: PaymentStatus;
-  totalAmount: number;
+  totalAmount: string;
   productionStatus: GranularStatus;
   designerInstructions: string | null;
   specialNotes: string | null;
@@ -61,7 +61,7 @@ export interface UpdateOrderRecord {
   machineWork?: boolean;
   purchaseRequired?: boolean;
   paymentStatus?: PaymentStatus;
-  totalAmount?: number;
+  totalAmount?: string;
   designerInstructions?: string | null;
   specialNotes?: string | null;
   updatedBy: string;
@@ -72,7 +72,7 @@ export interface OrderBasicInfo {
   id: string;
   designerId: string;
   masterTailorId: string;
-  totalAmount: number;
+  totalAmount: string;
   paymentStatus: PaymentStatus;
 }
 
@@ -104,16 +104,17 @@ export interface OrderStatsRaw {
   overdue: number;
   urgent: number;
   pendingPayments: number;
-  collectedRevenue: number;
-  outstandingRevenue: number;
+  /** Money as 2dp strings. */
+  collectedRevenue: string;
+  outstandingRevenue: string;
 }
 
 /** One accounting period's collected revenue, for the monthly revenue report. */
 export interface RevenuePeriod {
   /** First day of the accounting period (YYYY-MM-DD). */
   periodStart: string;
-  /** SUM(payments.amount) with paid_at inside this period. */
-  collected: number;
+  /** SUM(payments.amount) with paid_at inside this period. Money as a 2dp string. */
+  collected: string;
   /** Number of payment entries recorded in this period. */
   paymentCount: number;
 }
@@ -136,7 +137,8 @@ export interface StaffReportSummary {
   overdue: number;
   urgent: number;
   paymentPendingCount: number;
-  paymentPendingAmount: number;
+  /** Money as a 2dp string. */
+  paymentPendingAmount: string;
 }
 
 /** One week's throughput for the 6-month graph (Monday-started weeks, oldest first). */
@@ -204,7 +206,7 @@ export interface OrdersRepositoryPort {
   findImage(orderId: string, slot: number): Promise<OrderImageInfo | null>;
   deleteImage(orderId: string, slot: number): Promise<void>;
   /** Real (not cached) sum of the payment ledger -- used to compute amountPaid/outstanding and the fully_paid consistency check. */
-  sumPaymentsForOrder(orderId: string): Promise<number>;
-  /** Batched form of sumPaymentsForOrder, for listOrders -- one grouped aggregate query, not one query per row. */
-  sumPaymentsForOrders(orderIds: string[]): Promise<Record<string, number>>;
+  sumPaymentsForOrder(orderId: string): Promise<string>;
+  /** Batched form of sumPaymentsForOrder, for listOrders -- one grouped aggregate query, not one query per row. Money as 2dp strings. */
+  sumPaymentsForOrders(orderIds: string[]): Promise<Record<string, string>>;
 }

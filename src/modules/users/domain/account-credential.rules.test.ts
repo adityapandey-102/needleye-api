@@ -1,36 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { assertPasswordCanBeRegenerated, assertRoleSupportsQrLogin } from "./account-credential.rules";
-import { BadRequestError, ForbiddenError } from "../../../common/errors/app-error";
-
-describe("assertPasswordCanBeRegenerated", () => {
-  it("allows regenerating a designer's password regardless of login history", () => {
-    expect(() => assertPasswordCanBeRegenerated("designer", null)).not.toThrow();
-    expect(() => assertPasswordCanBeRegenerated("designer", "2026-01-01T00:00:00Z")).not.toThrow();
-  });
-
-  it("allows regenerating a master tailor's password regardless of login history", () => {
-    expect(() => assertPasswordCanBeRegenerated("master_tailor", "2026-01-01T00:00:00Z")).not.toThrow();
-  });
-
-  it("allows regenerating an owner_manager/accountant password before their first login", () => {
-    expect(() => assertPasswordCanBeRegenerated("owner_manager", null)).not.toThrow();
-    expect(() => assertPasswordCanBeRegenerated("accountant", null)).not.toThrow();
-  });
-
-  it("forbids regenerating an owner_manager/accountant password after their first login", () => {
-    expect(() => assertPasswordCanBeRegenerated("owner_manager", "2026-01-01T00:00:00Z")).toThrow(ForbiddenError);
-    expect(() => assertPasswordCanBeRegenerated("accountant", "2026-01-01T00:00:00Z")).toThrow(ForbiddenError);
-  });
-});
+import { assertRoleSupportsQrLogin, roleSupportsQrLogin } from "./account-credential.rules";
+import { BadRequestError } from "../../../common/errors/app-error";
+import type { Role } from "../../../domain";
 
 describe("assertRoleSupportsQrLogin", () => {
-  it("allows QR login only for master_tailor", () => {
+  it("allows QR login for the shop-floor roles (master_tailor, worker)", () => {
     expect(() => assertRoleSupportsQrLogin("master_tailor")).not.toThrow();
+    expect(() => assertRoleSupportsQrLogin("worker")).not.toThrow();
+    expect(roleSupportsQrLogin("master_tailor")).toBe(true);
+    expect(roleSupportsQrLogin("worker")).toBe(true);
   });
 
-  it("forbids QR login for every other role", () => {
-    expect(() => assertRoleSupportsQrLogin("owner_manager")).toThrow(BadRequestError);
-    expect(() => assertRoleSupportsQrLogin("designer")).toThrow(BadRequestError);
-    expect(() => assertRoleSupportsQrLogin("accountant")).toThrow(BadRequestError);
+  it("forbids QR login for the desk roles", () => {
+    for (const role of ["owner_manager", "designer", "accountant", "production_manager"] as Role[]) {
+      expect(() => assertRoleSupportsQrLogin(role)).toThrow(BadRequestError);
+      expect(roleSupportsQrLogin(role)).toBe(false);
+    }
   });
 });

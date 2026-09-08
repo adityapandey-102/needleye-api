@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from "express";
 import { ZodError } from "zod";
 import { AppError } from "../errors/app-error";
 import { ERROR_CODES } from "../errors/error-codes";
+import { describeDbError } from "../database/db-logging";
 import { env } from "../../config/env";
 
 export function notFoundHandler(req: Request, res: Response) {
@@ -45,8 +46,11 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
     if (err.statusCode >= 500) {
       // `cause` is the original error a repository/provider caught and wrapped
       // (see InternalError) -- logged explicitly so a DB/infra failure's real
-      // root cause is diagnosable, not just the generic wrapper message.
-      req.log.error({ ...logContext, err, cause: err.cause }, "Request failed with a 5xx AppError");
+      // root cause is diagnosable, not just the generic wrapper message. When
+      // it's a DB error, log only its SAFE metadata (SQLSTATE/constraint/table);
+      // the raw pg error's `detail` can contain customer row values.
+      const cause = describeDbError(err.cause) ?? err.cause;
+      req.log.error({ ...logContext, err, cause }, "Request failed with a 5xx AppError");
     } else {
       req.log.warn({ ...logContext, err: { message: err.message, code: err.code } }, "Request rejected");
     }
@@ -60,7 +64,8 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
   }
 
   if (isPostgrestLikeError(err)) {
-    req.log.error({ ...logContext, err }, "Database error");
+    // Log only safe DB metadata (no `detail`/row values).
+    req.log.error({ ...logContext, db: describeDbError(err), err: { message: err.message, code: err.code } }, "Database error");
     res.status(500).json({
       error: "A database error occurred",
       code: ERROR_CODES.DATABASE_ERROR,

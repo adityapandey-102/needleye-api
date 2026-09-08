@@ -1,4 +1,5 @@
 import { canViewPaymentFields } from "../domain/order-visibility.rules";
+import { outstanding, toMoneyString } from "../../../common/money/money";
 import type { Role } from "../../../domain";
 import type { OrderEntity } from "../domain/order.entity";
 import type { OrderResponseDto } from "./dto/order.response.dto";
@@ -14,7 +15,7 @@ import type { OrderResponseDto } from "./dto/order.response.dto";
  */
 export function toOrderResponseDto(
   entity: OrderEntity,
-  amountPaid: number,
+  amountPaid: string,
   role: Role,
   signedUrls: Map<string, string>,
   opts?: { viewOnly?: boolean },
@@ -27,8 +28,8 @@ export function toOrderResponseDto(
   const dto: OrderResponseDto = {
     ...entity,
     images,
-    amountPaid,
-    outstanding: Math.max(entity.totalAmount - amountPaid, 0),
+    amountPaid: toMoneyString(amountPaid),
+    outstanding: toMoneyString(outstanding(entity.totalAmount, amountPaid)),
   };
 
   // Payment fields are stripped when the role can't see them at all, OR when

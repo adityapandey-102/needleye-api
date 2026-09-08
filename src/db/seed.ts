@@ -31,6 +31,7 @@ import { generatePassword } from "../common/crypto/credentials";
 import { GRANULAR_STATUSES, DESIGN_STAGE_STATUSES, type GranularStatus } from "../domain/order-status";
 import { PRODUCT_CATEGORIES, PAYMENT_METHODS, type ProductCategory, type PaymentStatus } from "../domain/product-categories";
 import { derivePaymentStatus } from "../modules/orders/domain/order-ledger.rules";
+import { toMoneyString } from "../common/money/money";
 import type { Role } from "../domain/roles";
 
 const usersRepository = new DrizzleUsersRepository(authProvider);
@@ -139,7 +140,7 @@ async function addLedgerEntry(orderId: string, amount: number, recordedBy: strin
   if (amount <= 0) return;
   await paymentsRepository.create({
     orderId,
-    amount,
+    amount: toMoneyString(amount),
     method: pick(PAYMENT_METHOD_VALUES, Math.floor(Math.random() * PAYMENT_METHOD_VALUES.length)),
     paidAt: bookingDate,
     recordedBy,
@@ -197,7 +198,19 @@ async function main() {
     if (staff.password) credentials.push({ role: "master_tailor", name, email, password: staff.password });
   }
 
-  console.log(`Staff ready: 1 owner_manager, 1 accountant, ${designers.length} designers, ${masters.length} master tailors.\n`);
+  // One Production Manager (designer-like, reads/edits any order) and one Worker
+  // (QR-scan only, no dashboard) so the two new roles can be demoed/logged in.
+  const pmEmail = "prakash.menon@needleeye.test";
+  const pm = await findOrCreateStaff(pmEmail, "Prakash Menon", "production_manager");
+  if (pm.password) credentials.push({ role: "production_manager", name: "Prakash Menon", email: pmEmail, password: pm.password });
+
+  const workerEmail = "wasim.khan@needleeye.test";
+  const worker = await findOrCreateStaff(workerEmail, "Wasim Khan", "worker");
+  if (worker.password) credentials.push({ role: "worker", name: "Wasim Khan", email: workerEmail, password: worker.password });
+
+  console.log(
+    `Staff ready: 1 owner_manager, 1 accountant, ${designers.length} designers, ${masters.length} master tailors, 1 production_manager, 1 worker.\n`,
+  );
 
   const ORDER_COUNT = 40;
   // 4 due-date buckets x 10 orders each: overdue, urgent (<3d), due soon (<=7d), on track.
@@ -253,7 +266,7 @@ async function main() {
       machineWork: i % 4 === 0,
       purchaseRequired: i % 5 === 0,
       paymentStatus,
-      totalAmount,
+      totalAmount: toMoneyString(totalAmount),
       productionStatus: "design_pending",
       designerInstructions: i % 6 === 0 ? "Confirm measurements with client before cutting." : null,
       specialNotes: i % 7 === 0 ? "Client requested extra fabric buffer for future alterations." : null,

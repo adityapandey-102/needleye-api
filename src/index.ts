@@ -44,3 +44,22 @@ function shutdown(signal: string): void {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
+
+/**
+ * Last-resort crash net. Without these, an uncaught exception or an unhandled
+ * promise rejection prints to stderr (outside the structured pino log) and the
+ * process exits silently -- exactly the "the API just stopped with no message"
+ * situation that's impossible to diagnose. Log it structurally first.
+ *
+ * uncaughtException: the process may be in a corrupt state, so log and exit(1)
+ * and let the supervisor (container/systemd/tsx-watch) restart it cleanly.
+ * unhandledRejection: log and keep serving -- a single stray rejection
+ * shouldn't take the whole API down (the default Node behaviour would crash).
+ */
+process.on("uncaughtException", (err) => {
+  logger.fatal({ err }, "Uncaught exception -- exiting");
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  logger.error({ err: reason }, "Unhandled promise rejection");
+});

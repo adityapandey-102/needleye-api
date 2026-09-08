@@ -166,8 +166,52 @@ describe("API endpoints (integration)", () => {
       .set("Authorization", auth)
       .send({ totalAmount: 800 });
     expect(okRes.status).toBe(200);
-    expect((okRes.body as { order: { paymentStatus: string; totalAmount: number } }).order.paymentStatus).toBe("advance_paid");
-    expect((okRes.body as { order: { totalAmount: number } }).order.totalAmount).toBe(800);
+    expect((okRes.body as { order: { paymentStatus: string; totalAmount: string } }).order.paymentStatus).toBe("advance_paid");
+    expect((okRes.body as { order: { totalAmount: string } }).order.totalAmount).toBe("800.00");
+  });
+
+  it("advances an order into the Falls / Kutchu production stage (status + history both accept it)", async () => {
+    const owner = await createFixtureUser("owner_manager", "FK Owner");
+    const master = await createFixtureUser("master_tailor", "FK Master");
+    createdUserIds.push(owner.id, master.id);
+    const session = await authProvider.signInWithPassword(owner.email, owner.password);
+    const auth = `Bearer ${session.accessToken}`;
+
+    const createRes = await request(app)
+      .post("/api/v1/orders")
+      .set("Authorization", auth)
+      .send({
+        customerName: "Falls Kutchu Customer",
+        phone: "9000000040",
+        billNumber: `API-${Date.now()}`,
+        bookingDate: "2026-01-01",
+        dueDate: "2026-02-01",
+        designerId: owner.id,
+        masterTailorId: master.id,
+        productCategory: "saree",
+        orderDetails: "Falls/Kutchu fixture",
+        totalAmount: 1000,
+        productionStatus: "design_approved",
+      });
+    expect(createRes.status).toBe(201);
+    const orderId = (createRes.body as { order: { id: string } }).order.id;
+    createdOrderIds.push(orderId);
+
+    // The transaction writes BOTH orders.production_status AND an
+    // order_status_history row -- each has its own CHECK constraint, so this
+    // guards against only one of them knowing the new value (a real bug we hit).
+    const patch = await request(app)
+      .patch(`/api/v1/orders/${orderId}/status`)
+      .set("Authorization", auth)
+      .send({ status: "falls_kutchu" });
+    expect(patch.status).toBe(200);
+    expect((patch.body as { order: { productionStatus: string } }).order.productionStatus).toBe("falls_kutchu");
+
+    const history = await request(app).get(`/api/v1/orders/${orderId}/history`).set("Authorization", auth);
+    expect(history.status).toBe(200);
+    const entries = (history.body as { history: { status: string; label: string }[] }).history;
+    const fk = entries.find((h) => h.status === "falls_kutchu");
+    expect(fk?.label).toBe("Falls / Kutchu");
   });
 
   it("clamps an over-large limit to the max page size", async () => {
@@ -252,10 +296,64 @@ describe("API endpoints (integration)", () => {
     expect(order.totalAmount).toBeUndefined();
     expect(order.outstanding).toBeUndefined();
 
-    // ...but cannot change its status, and cannot see its payment ledger.
-    const patch = await request(app).patch(`/api/v1/orders/${orderId}/status`).set("Authorization", auth).send({ status: "cutting" });
-    expect(patch.status).toBe(403);
+    // ...cannot see its payment ledger (payments stay assignment/role gated).
     const ledger = await request(app).get(`/api/v1/orders/${orderId}/payments`).set("Authorization", auth);
     expect(ledger.status).toBe(403);
+
+    // ...but CAN advance its production stage even though it isn't assigned to
+    // them -- the new shop-floor model: whoever receives the garment advances it
+    // (a designer is in the production tier). Forward-only from design_pending.
+    const patch = await request(app).patch(`/api/v1/orders/${orderId}/status`).set("Authorization", auth).send({ status: "cutting" });
+    expect(patch.status).toBe(200);
+    expect((patch.body as { order: { productionStatus: string } }).order.productionStatus).toBe("cutting");
+  });
+
+  it("enforces forward-only, idempotent, concurrency-safe status changes", async () => {
+    const owner = await createFixtureUser("owner_manager", "FO Owner");
+    const master = await createFixtureUser("master_tailor", "FO Master");
+    createdUserIds.push(owner.id, master.id);
+    const session = await authProvider.signInWithPassword(owner.email, owner.password);
+    const auth = `Bearer ${session.accessToken}`;
+
+    const createRes = await request(app)
+      .post("/api/v1/orders")
+      .set("Authorization", auth)
+      .send({
+        customerName: "Forward Only Customer",
+        phone: "9000000050",
+        billNumber: `API-${Date.now()}`,
+        bookingDate: "2026-01-01",
+        dueDate: "2026-02-01",
+        designerId: owner.id,
+        masterTailorId: master.id,
+        productCategory: "saree",
+        orderDetails: "Forward-only fixture",
+        totalAmount: 1000,
+        productionStatus: "design_pending",
+      });
+    const orderId = (createRes.body as { order: { id: string } }).order.id;
+    createdOrderIds.push(orderId);
+
+    // Move forward to cutting.
+    const fwd = await request(app).patch(`/api/v1/orders/${orderId}/status`).set("Authorization", auth).send({ status: "cutting" });
+    expect(fwd.status).toBe(200);
+
+    // Re-applying the SAME stage is rejected (idempotency) with the forward-only code.
+    const same = await request(app).patch(`/api/v1/orders/${orderId}/status`).set("Authorization", auth).send({ status: "cutting" });
+    expect(same.status).toBe(409);
+    expect((same.body as { code: string }).code).toBe("ORDER_STATUS_NOT_FORWARD");
+
+    // Going BACKWARDS is rejected too.
+    const back = await request(app).patch(`/api/v1/orders/${orderId}/status`).set("Authorization", auth).send({ status: "design_approved" });
+    expect(back.status).toBe(409);
+    expect((back.body as { code: string }).code).toBe("ORDER_STATUS_NOT_FORWARD");
+
+    // Two concurrent advances to the SAME next stage: exactly one wins (row lock).
+    const [a, b] = await Promise.all([
+      request(app).patch(`/api/v1/orders/${orderId}/status`).set("Authorization", auth).send({ status: "stitching" }),
+      request(app).patch(`/api/v1/orders/${orderId}/status`).set("Authorization", auth).send({ status: "stitching" }),
+    ]);
+    const statuses = [a.status, b.status].sort();
+    expect(statuses).toEqual([200, 409]);
   });
 });

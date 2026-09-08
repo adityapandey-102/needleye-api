@@ -5,6 +5,8 @@ import swaggerUi from "swagger-ui-express";
 import { sql } from "drizzle-orm";
 import { env } from "./config/env";
 import { db } from "./common/database/drizzle-client";
+import { describeDbError } from "./common/database/db-logging";
+import { logger } from "./common/logger/logger";
 import { requestLogger } from "./common/logger/request-logger.middleware";
 import { requestContextMiddleware } from "./common/context/request-context.middleware";
 import { authRouter } from "./modules/auth/api/auth.routes";
@@ -15,6 +17,15 @@ import { teamMembersRouter } from "./modules/team-members/api/team-members.route
 import { errorHandler, notFoundHandler } from "./common/middleware/error.middleware";
 import { openApiDocument } from "./docs/openapi";
 
+/** Turns the TRUST_PROXY env string into what Express's `trust proxy` expects:
+ *  a boolean, a hop count, or a preset/subnet string (e.g. "loopback"). */
+function parseTrustProxy(value: string): boolean | number | string {
+  if (value === "false") return false;
+  if (value === "true") return true;
+  const n = Number(value);
+  return Number.isInteger(n) && value.trim() !== "" ? n : value;
+}
+
 /**
  * Composition root: builds the Express app and mounts every module's
  * router. Each module wires its own controller/service/repository/mapper
@@ -24,11 +35,13 @@ import { openApiDocument } from "./docs/openapi";
 export function createApp() {
   const app = express();
 
-  // Behind a hosting proxy (Railway/Render/Fly/etc.) the real client IP is in
-  // X-Forwarded-For; trust one hop so the rate limiter keys on the actual
-  // client, not the proxy. Only in production -- locally there's no proxy, and
-  // trusting the header there would let anything spoof its IP.
-  if (env.NODE_ENV === "production") app.set("trust proxy", 1);
+  // The API sits behind a proxy that sets X-Forwarded-For: the Next.js session
+  // proxy in dev (over loopback), and a reverse proxy (Railway/Render/nginx) in
+  // prod. Express must be told how far to trust XFF so the rate limiter keys on
+  // the real client IP -- otherwise express-rate-limit throws when it sees an
+  // untrusted XFF. Configured via TRUST_PROXY (default "loopback"): a hop count,
+  // a preset like "loopback", or "false" to disable. See config/env.ts.
+  app.set("trust proxy", parseTrustProxy(env.TRUST_PROXY));
 
   app.use(requestLogger);
   // Must come right after the request logger: it reads req.id (set above) so
@@ -71,7 +84,12 @@ export function createApp() {
     void db
       .execute(sql`select 1`)
       .then(() => res.json({ status: "ready" }))
-      .catch(() => res.status(503).json({ status: "not_ready", reason: "database_unreachable" }));
+      .catch((err: unknown) => {
+        // Previously silent -- a DB-unreachable readiness probe now leaves a
+        // trace, so "the app is up but not serving" is diagnosable.
+        logger.error({ db: describeDbError(err) ?? { message: err instanceof Error ? err.message : String(err) } }, "Readiness check failed -- database unreachable");
+        res.status(503).json({ status: "not_ready", reason: "database_unreachable" });
+      });
   });
 
   // Source of truth: openapi.yaml (repo root). Keep it updated alongside any

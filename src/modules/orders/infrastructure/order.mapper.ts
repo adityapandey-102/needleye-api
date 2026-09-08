@@ -1,3 +1,4 @@
+import { toMoneyString } from "../../../common/money/money";
 import type { OrderEntity } from "../domain/order.entity";
 
 /** Shape returned by db.query.orders.find{Many,First} with the `with` config used in drizzle-orders.repository.ts. */
@@ -62,7 +63,7 @@ export const OrderMapper = {
       machineWork: row.machineWork,
       purchaseRequired: row.purchaseRequired,
       paymentStatus: row.paymentStatus,
-      totalAmount: Number(row.totalAmount),
+      totalAmount: toMoneyString(row.totalAmount),
       productionStatus: row.productionStatus,
       designerInstructions: row.designerInstructions,
       specialNotes: row.specialNotes,

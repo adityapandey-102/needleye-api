@@ -1,3 +1,4 @@
+import { toMoneyString } from "../../../common/money/money";
 import type { PaymentEntity } from "../domain/payment.entity";
 import type { PaymentMethod } from "../../../domain";
 
@@ -24,7 +25,7 @@ export class PaymentsMapper {
     return {
       id: row.id,
       orderId: row.orderId,
-      amount: Number(row.amount),
+      amount: toMoneyString(row.amount),
       method: row.method as PaymentMethod,
       paidAt: row.paidAt,
       recordedBy: row.recordedBy,

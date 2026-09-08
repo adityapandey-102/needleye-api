@@ -2,7 +2,7 @@ import { env } from "../../../config/env";
 import { BadRequestError, NotFoundError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
 import { generatePassword, generateQrToken, hashToken } from "../../../common/crypto/credentials";
-import { assertPasswordCanBeRegenerated, assertRoleSupportsQrLogin } from "../domain/account-credential.rules";
+import { assertRoleSupportsQrLogin } from "../domain/account-credential.rules";
 import { toUserResponseDto } from "../api/user.presenter";
 import { AUDIT_ACTIONS, AUDIT_ENTITIES } from "../../../common/audit/audit-actions";
 import { auditLogger as defaultAuditLogger } from "../../../common/audit/drizzle-audit-logger";
@@ -67,8 +67,8 @@ export class UsersService {
     const target = await this.usersRepository.findById(targetId);
     if (!target) throw new NotFoundError("User not found", ERROR_CODES.USER_NOT_FOUND);
 
-    assertPasswordCanBeRegenerated(target.role, target.lastLoginAt);
-
+    // Owner/Manager can generate a fresh one-time password for ANY role's
+    // account (all roles are managed this way now).
     const password = generatePassword(target.fullName);
     await this.usersRepository.setPassword(targetId, password);
     await this.audit.record({ action: AUDIT_ACTIONS.USER_PASSWORD_REGENERATED, entityType: AUDIT_ENTITIES.USER, entityId: targetId });

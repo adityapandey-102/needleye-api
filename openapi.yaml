@@ -1073,6 +1073,29 @@ components:
           schema: { $ref: "#/components/schemas/Error" }
 
   schemas:
+    Money:
+      type: string
+      pattern: '^-?\d+\.\d{2}$'
+      example: "1500.00"
+      description: >
+        A monetary amount. Money crosses every boundary as a STRING with
+        exactly two decimals ("1500.00"), never a JSON number -- JSON numbers
+        are IEEE-754 floats and can drift, a string is exact. The server uses
+        decimal.js (see src/common/money/money.ts); clients should treat these
+        as opaque decimal strings and never parse them into floats for
+        arithmetic. Currency is INR.
+    MoneyInput:
+      oneOf:
+        - type: string
+          pattern: '^\d+(\.\d{1,2})?$'
+        - type: number
+          minimum: 0
+      example: "1500.00"
+      description: >
+        Money coming IN over the wire. Prefer a decimal string ("1500.00"); a
+        JSON number is also accepted for convenience. The server validates and
+        normalises it to a canonical 2-decimal string (see
+        src/common/money/money-schema.ts).
     Error:
       type: object
       description: >
@@ -1091,13 +1114,19 @@ components:
 
     Role:
       type: string
-      enum: [owner_manager, designer, master_tailor, accountant]
+      enum: [owner_manager, designer, master_tailor, accountant, production_manager, worker]
 
     GranularStatus:
       type: string
+      description: >
+        The 13-stage, forward-only production flow. `orders.production_status`
+        always stores one of these. Moving into a stage is gated by role tier
+        (design / pm_received / production) -- not by assignment -- and can only
+        move forward (see PATCH /orders/{id}/status).
       enum:
         - design_pending
         - design_approved
+        - production_manager_received
         - falls_kutchu
         - fabric_purchased
         - cutting
@@ -1106,7 +1135,7 @@ components:
         - machine_work
         - finishing
         - quality_check
-        - ready_for_delivery
+        - alteration
         - delivered
 
     ProductCategory:
@@ -1165,7 +1194,9 @@ components:
       properties:
         id: { type: string, format: uuid }
         orderId: { type: string, format: uuid }
-        amount: { type: number, description: Always > 0 -- a correction is a payment update/delete, not a negative entry. }
+        amount:
+          allOf: [{ $ref: "#/components/schemas/Money" }]
+          description: Always > 0 -- a correction is a payment update/delete, not a negative entry.
         method: { $ref: "#/components/schemas/PaymentMethod" }
         paidAt: { type: string, format: date }
         recordedBy: { type: string, format: uuid, nullable: true }
@@ -1177,7 +1208,7 @@ components:
       type: object
       required: [amount, method]
       properties:
-        amount: { type: number, minimum: 0, exclusiveMinimum: true }
+        amount: { $ref: "#/components/schemas/MoneyInput" }
         method: { $ref: "#/components/schemas/PaymentMethod" }
         paidAt: { type: string, format: date, description: Defaults to today if omitted. }
         notes: { type: string }
@@ -1191,7 +1222,7 @@ components:
       type: object
       description: Every field from CreatePaymentRequest, but optional (partial update).
       properties:
-        amount: { type: number, minimum: 0, exclusiveMinimum: true }
+        amount: { $ref: "#/components/schemas/MoneyInput" }
         method: { $ref: "#/components/schemas/PaymentMethod" }
         paidAt: { type: string, format: date }
         notes: { type: string }
@@ -1249,9 +1280,15 @@ components:
         paymentStatus:
           allOf: [{ $ref: "#/components/schemas/PaymentStatus" }]
           description: Derived from the ledger (never submitted). Absent entirely (not null) for callers without payments:read (master_tailor) -- a real server-side omission, not a UI-only hide.
-        totalAmount: { type: number, description: "Absent for master_tailor -- see paymentStatus." }
-        amountPaid: { type: number, description: "Absent for master_tailor. The real sum of GET /orders/{orderId}/payments -- never stored, always derived at read time." }
-        outstanding: { type: number, description: "Absent for master_tailor -- see paymentStatus." }
+        totalAmount:
+          allOf: [{ $ref: "#/components/schemas/Money" }]
+          description: "Absent for master_tailor -- see paymentStatus."
+        amountPaid:
+          allOf: [{ $ref: "#/components/schemas/Money" }]
+          description: "Absent for master_tailor. The real sum of GET /orders/{orderId}/payments -- never stored, always derived at read time."
+        outstanding:
+          allOf: [{ $ref: "#/components/schemas/Money" }]
+          description: "Absent for master_tailor -- see paymentStatus."
         nextPaymentDate:
           type: string
           format: date
@@ -1280,8 +1317,12 @@ components:
         overdue: { type: integer, description: "Active orders past their delivery due date. Visible to all roles." }
         urgent: { type: integer, description: "Active orders due within 3 days (not overdue). Visible to all roles." }
         pendingPayments: { type: integer, description: "Absent for master_tailor. Orders whose paymentStatus isn't fully_paid." }
-        collectedRevenue: { type: number, description: "Absent for master_tailor. SUM(payments.amount) across the scope." }
-        outstandingRevenue: { type: number, description: "Absent for master_tailor. SUM(orders.total_amount) - collectedRevenue, floored at 0." }
+        collectedRevenue:
+          allOf: [{ $ref: "#/components/schemas/Money" }]
+          description: "Absent for master_tailor. SUM(payments.amount) across the scope."
+        outstandingRevenue:
+          allOf: [{ $ref: "#/components/schemas/Money" }]
+          description: "Absent for master_tailor. SUM(orders.total_amount) - collectedRevenue, floored at 0."
 
     RevenueReport:
       type: object
@@ -1297,7 +1338,9 @@ components:
             type: object
             properties:
               periodStart: { type: string, format: date, description: First day of the accounting period. }
-              collected: { type: number, description: SUM(payments.amount) with paid_at in this period. }
+              collected:
+                allOf: [{ $ref: "#/components/schemas/Money" }]
+                description: SUM(payments.amount) with paid_at in this period.
               paymentCount: { type: integer, description: Number of ledger entries in this period. }
 
     StaffReport:
@@ -1321,7 +1364,9 @@ components:
             overdue: { type: integer }
             urgent: { type: integer }
             paymentPendingCount: { type: integer }
-            paymentPendingAmount: { type: number, description: Sum of outstanding across their not-fully-paid orders. }
+            paymentPendingAmount:
+              allOf: [{ $ref: "#/components/schemas/Money" }]
+              description: Sum of outstanding across their not-fully-paid orders.
         weekly:
           type: array
           description: The selected month's weeks, oldest first, zero-filled and continuous.
@@ -1337,7 +1382,7 @@ components:
       type: object
       description: A payment's amount + method at a point in time.
       properties:
-        amount: { type: number }
+        amount: { $ref: "#/components/schemas/Money" }
         method: { type: string, description: "cash | card | upi | bank_transfer | cheque | other" }
 
     LedgerEvent:
@@ -1403,7 +1448,9 @@ components:
         purchaseRequired: { type: boolean, default: false }
         # paymentStatus is NOT accepted -- it is derived from the ledger. Record
         # an advance via POST /orders/{orderId}/payments right after creation.
-        totalAmount: { type: number, minimum: 0, default: 0 }
+        totalAmount:
+          allOf: [{ $ref: "#/components/schemas/MoneyInput" }]
+          default: "0.00"
         nextPaymentDate: { type: string, format: date, nullable: true, description: "When the next payment is expected (payment-due tracking). Optional; null to leave unset." }
         productionStatus: { $ref: "#/components/schemas/GranularStatus" }
         designerInstructions: { type: string }
@@ -1433,7 +1480,7 @@ components:
         purchaseRequired: { type: boolean }
         # paymentStatus is NOT accepted -- derived from the ledger. Changing
         # totalAmount re-derives it server-side; record payments via the ledger.
-        totalAmount: { type: number, minimum: 0 }
+        totalAmount: { $ref: "#/components/schemas/MoneyInput" }
         nextPaymentDate: { type: string, format: date, nullable: true, description: "When the next payment is expected (payment-due tracking). Null to clear." }
         productionStatus: { $ref: "#/components/schemas/GranularStatus" }
         designerInstructions: { type: string }

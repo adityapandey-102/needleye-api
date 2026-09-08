@@ -2,7 +2,8 @@ import type { PaymentEntity, OrderLedgerContext } from "../../domain/payment.ent
 
 export interface NewPaymentRecord {
   orderId: string;
-  amount: number;
+  /** Money as a 2dp string. */
+  amount: string;
   method: string;
   paidAt: string;
   recordedBy: string;
@@ -10,21 +11,11 @@ export interface NewPaymentRecord {
 }
 
 export interface UpdatePaymentRecord {
-  amount?: number;
+  /** Money as a 2dp string. */
+  amount?: string;
   method?: string;
   paidAt?: string;
   notes?: string | null;
-}
-
-/**
- * The derived order-level state a ledger change writes back to the order:
- * the recomputed payment status, and (optionally) the rescheduled next-payment
- * date. `nextPaymentDate` is only applied when present -- `undefined` leaves
- * the existing schedule untouched; `null` clears it (e.g. once fully paid).
- */
-export interface OrderLedgerStateUpdate {
-  paymentStatus: string;
-  nextPaymentDate?: string | null;
 }
 
 /**
@@ -35,21 +26,43 @@ export interface OrderLedgerStateUpdate {
  * technology, adding a cached/read-replica/test-double implementation, all
  * mean writing a new class against this same interface -- nothing above
  * this line changes.
+ *
+ * The three ledger MUTATIONS (`recordPayment`/`editPayment`/`removePayment`)
+ * are each atomic and concurrency-safe: they run in one transaction that first
+ * locks the order row (`SELECT ... FOR UPDATE`), then re-reads the ledger sum,
+ * enforces the no-overpayment invariant, writes the payment, and recomputes the
+ * order's derived payment_status -- so two staff recording payments on the same
+ * order at once serialize instead of both passing a stale overpayment check.
+ * This mirrors OrdersRepository.updateStatus (see ADR 0005).
  */
 export interface PaymentsRepositoryPort {
   findOrderContext(orderId: string): Promise<OrderLedgerContext | null>;
   findByOrderId(orderId: string): Promise<PaymentEntity[]>;
   findById(orderId: string, paymentId: string): Promise<PaymentEntity | null>;
-  sumByOrderId(orderId: string): Promise<number>;
-  create(record: NewPaymentRecord): Promise<PaymentEntity>;
-  update(paymentId: string, data: UpdatePaymentRecord): Promise<PaymentEntity>;
-  delete(paymentId: string): Promise<void>;
   /**
-   * Writes the derived payment status (and optional rescheduled next-payment
-   * date) back onto the order after a ledger change. A cross-module
-   * Infrastructure-to-Infrastructure write into the Orders-owned `orders`
-   * table -- the same table this repo already reads via findOrderContext (see
-   * docs/adr/0003-per-module-schema-ownership.md).
+   * Plain insert with no guard -- used only by the dev seed, which generates
+   * controlled, within-total data single-threaded. The guarded, order-state-
+   * syncing path is `recordPayment`.
    */
-  updateOrderLedgerState(orderId: string, update: OrderLedgerStateUpdate): Promise<void>;
+  create(record: NewPaymentRecord): Promise<PaymentEntity>;
+  /**
+   * Records a payment atomically under an order row lock: rejects overpayment
+   * with `409 PAYMENT_EXCEEDS_TOTAL`, then recomputes payment_status and (when a
+   * balance remains and `nextPaymentDate` is supplied) reschedules the next
+   * payment date -- cleared once fully paid.
+   */
+  recordPayment(record: NewPaymentRecord, nextPaymentDate: string | null | undefined): Promise<PaymentEntity>;
+  /**
+   * Edits a payment atomically under an order row lock. When `amount` changes,
+   * re-checks the overpayment invariant against the rest of the ledger and
+   * recomputes payment_status (the next-payment schedule is left untouched).
+   * Returns null if the payment doesn't exist on that order.
+   */
+  editPayment(orderId: string, paymentId: string, data: UpdatePaymentRecord): Promise<PaymentEntity | null>;
+  /**
+   * Removes a payment atomically under an order row lock and recomputes the
+   * order's payment_status from the reduced ledger. Returns false if the
+   * payment doesn't exist on that order.
+   */
+  removePayment(orderId: string, paymentId: string): Promise<boolean>;
 }

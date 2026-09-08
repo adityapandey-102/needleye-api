@@ -67,7 +67,7 @@ describe("PaymentsService (integration)", () => {
       machineWork: true,
       purchaseRequired: false,
       paymentStatus: "unpaid",
-      totalAmount: 1000,
+      totalAmount: "1000.00",
       productionStatus: "design_pending",
       designerInstructions: null,
       specialNotes: null,
@@ -77,13 +77,13 @@ describe("PaymentsService (integration)", () => {
     createdOrderIds.push(order.id);
 
     const payment = await paymentsService.addPayment(ctx(), order.id, {
-      amount: 400,
+      amount: "400.00",
       method: "cash",
       paidAt: "2026-01-05",
       notes: undefined,
       nextPaymentDate: "2026-01-20",
     });
-    expect(payment.amount).toBe(400);
+    expect(payment.amount).toBe("400.00");
 
     // The order's derived status + schedule were synced from the ledger.
     const synced = await ordersRepo.findById(unscoped(designer.id), order.id);
@@ -107,7 +107,7 @@ describe("PaymentsService (integration)", () => {
       machineWork: true,
       purchaseRequired: false,
       paymentStatus: "unpaid",
-      totalAmount: 500,
+      totalAmount: "500.00",
       productionStatus: "design_pending",
       designerInstructions: null,
       specialNotes: null,
@@ -118,7 +118,7 @@ describe("PaymentsService (integration)", () => {
 
     // Paying the whole total derives fully_paid and clears the schedule.
     const payment = await paymentsService.addPayment(ctx(), order.id, {
-      amount: 500,
+      amount: "500.00",
       method: "cash",
       paidAt: "2026-01-05",
       notes: undefined,
@@ -149,7 +149,7 @@ describe("PaymentsService (integration)", () => {
       machineWork: true,
       purchaseRequired: false,
       paymentStatus: "unpaid",
-      totalAmount: 1000,
+      totalAmount: "1000.00",
       productionStatus: "design_pending",
       designerInstructions: null,
       specialNotes: null,
@@ -158,16 +158,16 @@ describe("PaymentsService (integration)", () => {
     });
     createdOrderIds.push(order.id);
 
-    await paymentsService.addPayment(ctx(), order.id, { amount: 600, method: "cash", paidAt: "2026-01-05", notes: undefined });
+    await paymentsService.addPayment(ctx(), order.id, { amount: "600.00", method: "cash", paidAt: "2026-01-05", notes: undefined });
 
     // 600 already recorded against a 1000 total; a further 500 (=1100) overpays.
     await expect(
-      paymentsService.addPayment(ctx(), order.id, { amount: 500, method: "cash", paidAt: "2026-01-06", notes: undefined }),
+      paymentsService.addPayment(ctx(), order.id, { amount: "500.00", method: "cash", paidAt: "2026-01-06", notes: undefined }),
     ).rejects.toMatchObject({ code: "PAYMENT_EXCEEDS_TOTAL" });
 
     // Exactly the remaining 400 is fine.
-    const ok = await paymentsService.addPayment(ctx(), order.id, { amount: 400, method: "cash", paidAt: "2026-01-06", notes: undefined });
-    expect(ok.amount).toBe(400);
+    const ok = await paymentsService.addPayment(ctx(), order.id, { amount: "400.00", method: "cash", paidAt: "2026-01-06", notes: undefined });
+    expect(ok.amount).toBe("400.00");
   });
 
   it("forbids a designer from managing payments on an order they are not assigned to", async () => {
@@ -188,7 +188,7 @@ describe("PaymentsService (integration)", () => {
         machineWork: true,
         purchaseRequired: false,
         paymentStatus: "unpaid",
-        totalAmount: 1000,
+        totalAmount: "1000.00",
         productionStatus: "design_pending",
         designerInstructions: null,
         specialNotes: null,
@@ -198,10 +198,56 @@ describe("PaymentsService (integration)", () => {
       createdOrderIds.push(order.id);
 
       await expect(
-        paymentsService.addPayment(ctx(), order.id, { amount: 100, method: "cash", paidAt: "2026-01-05", notes: undefined }),
+        paymentsService.addPayment(ctx(), order.id, { amount: "100.00", method: "cash", paidAt: "2026-01-05", notes: undefined }),
       ).rejects.toThrow();
     } finally {
       await deleteFixtureUser(otherDesigner.id);
     }
+  });
+
+  it("is concurrency-safe: two payments racing to overpay the same order never exceed the total", async () => {
+    const order = await ordersRepo.create({
+      customerName: "Concurrent Payments Customer",
+      phone: "9000000007",
+      billNumber: `PAY-${Date.now()}`,
+      bookingDate: "2026-01-01",
+      dueDate: "2026-02-01",
+      nextPaymentDate: null,
+      designerId: designer.id,
+      masterTailorId: masterTailor.id,
+      productCategory: "saree",
+      orderDetails: "Concurrency fixture",
+      handWork: false,
+      machineWork: true,
+      purchaseRequired: false,
+      paymentStatus: "unpaid",
+      totalAmount: "1000.00",
+      productionStatus: "design_pending",
+      designerInstructions: null,
+      specialNotes: null,
+      createdBy: designer.id,
+      updatedBy: designer.id,
+    });
+    createdOrderIds.push(order.id);
+
+    // Two ₹700 payments fired at once sum to ₹1400 > ₹1000. Without the order
+    // row lock, both could read a ₹0 ledger, both pass the overpayment check,
+    // and both insert -> ₹1400 recorded. With it, they serialize: one commits,
+    // the other re-reads ₹700 under the lock and is rejected.
+    const results = await Promise.allSettled([
+      paymentsService.addPayment(ctx(), order.id, { amount: "700.00", method: "cash", paidAt: "2026-01-05", notes: undefined }),
+      paymentsService.addPayment(ctx(), order.id, { amount: "700.00", method: "cash", paidAt: "2026-01-05", notes: undefined }),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0]!.reason as { code?: string }).code).toBe("PAYMENT_EXCEEDS_TOTAL");
+
+    // The ledger holds exactly one ₹700 payment -- never ₹1400.
+    const payments = await paymentsService.listPayments(ctx(), order.id);
+    expect(payments).toHaveLength(1);
+    expect(payments[0]!.amount).toBe("700.00");
   });
 });

@@ -11,11 +11,13 @@ import { payments } from "../../payments/infrastructure/payments.schema";
 import { profiles } from "../../users/infrastructure/profile.schema";
 import { ConflictError, InternalError, NotFoundError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
+import { outstanding, toMoneyString } from "../../../common/money/money";
 import {
   CANONICAL_TO_GRANULAR,
   COMPLETED_CANONICAL_STAGES,
   PRODUCTION_STAGE_STATUSES,
   granularLabel,
+  stageIndex,
   type GranularStatus,
 } from "../../../domain";
 import { OrderMapper, type OrderQueryResult } from "./order.mapper";
@@ -82,8 +84,6 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         return inArray(orders.productionStatus, IN_PRODUCTION_STATUSES);
       case "completed":
         return inArray(orders.productionStatus, COMPLETED_STATUSES);
-      case "ready":
-        return eq(orders.productionStatus, "ready_for_delivery");
       case "delivered":
         return eq(orders.productionStatus, "delivered");
       case "pending_payment":
@@ -189,8 +189,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     }
 
     const row = orderRows[0];
-    const collectedRevenue = Number(paymentRows[0]?.collected ?? 0);
-    const totalValue = row ? Number(row.totalValue) : 0;
+    const collectedRevenue = paymentRows[0]?.collected ?? "0";
+    const totalValue = row?.totalValue ?? "0";
 
     return {
       total: row ? Number(row.total) : 0,
@@ -201,8 +201,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
       overdue: row ? Number(row.overdue) : 0,
       urgent: row ? Number(row.urgent) : 0,
       pendingPayments: row ? Number(row.pendingPayments) : 0,
-      collectedRevenue,
-      outstandingRevenue: Math.max(totalValue - collectedRevenue, 0),
+      collectedRevenue: toMoneyString(collectedRevenue),
+      outstandingRevenue: toMoneyString(outstanding(totalValue, collectedRevenue)),
     };
   }
 
@@ -241,7 +241,7 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
 
     return rows.map((r) => ({
       periodStart: r.periodStart,
-      collected: Number(r.collected),
+      collected: toMoneyString(r.collected),
       paymentCount: Number(r.paymentCount),
     }));
   }
@@ -344,7 +344,7 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         overdue: Number(summary.overdue),
         urgent: Number(summary.urgent),
         paymentPendingCount: Number(summary.pp_count),
-        paymentPendingAmount: Number(summary.pp_amount),
+        paymentPendingAmount: toMoneyString(summary.pp_amount),
       },
       weekly,
     };
@@ -446,7 +446,7 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     }
     const row = rows[0];
     if (!row) return null;
-    return { ...row, totalAmount: Number(row.totalAmount) };
+    return { ...row, totalAmount: toMoneyString(row.totalAmount) };
   }
 
   async create(data: NewOrderRecord): Promise<OrderEntity> {
@@ -474,7 +474,7 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
             machineWork: data.machineWork,
             purchaseRequired: data.purchaseRequired,
             paymentStatus: data.paymentStatus,
-            totalAmount: String(data.totalAmount),
+            totalAmount: toMoneyString(data.totalAmount),
             productionStatus: data.productionStatus,
             designerInstructions: data.designerInstructions,
             specialNotes: data.specialNotes,
@@ -511,7 +511,7 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     // bumped so the next reader/editor sees a moved-on value (optimistic lock).
     const { totalAmount, ...rest } = data;
     const record: Partial<typeof orders.$inferInsert> = { ...rest };
-    if (totalAmount !== undefined) record.totalAmount = String(totalAmount);
+    if (totalAmount !== undefined) record.totalAmount = toMoneyString(totalAmount);
 
     // When a version is supplied, the write only lands if the stored version
     // still matches -- so a concurrent edit (holding the old version) hits 0 rows.
@@ -546,6 +546,30 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
   async updateStatus(id: string, status: GranularStatus, changedBy: string): Promise<OrderEntity> {
     try {
       await db.transaction(async (tx) => {
+        // Lock the order row for the duration of the transaction. Two staff
+        // scanning the same order at once now serialize here: the second one
+        // waits, then sees the already-advanced status and is rejected below --
+        // no duplicate history rows, no concurrent double-advance.
+        const rows = await tx
+          .select({ current: orders.productionStatus })
+          .from(orders)
+          .where(eq(orders.id, id))
+          .for("update");
+        const current = rows[0]?.current;
+        if (!current) throw new NotFoundError("Order not found", ERROR_CODES.ORDER_NOT_FOUND);
+
+        // Forward-only: the target stage must be strictly LATER in the flow than
+        // the current one. This rejects going backwards AND re-applying the same
+        // stage (idempotency) in one check.
+        if (stageIndex(status) <= stageIndex(current)) {
+          throw new ConflictError(
+            current === status
+              ? `This order is already at "${granularLabel(current)}".`
+              : `This order is already at "${granularLabel(current)}" -- the production flow only moves forward.`,
+            ERROR_CODES.ORDER_STATUS_NOT_FORWARD,
+          );
+        }
+
         // updated_at is deliberately not touched here either -- same trigger as update().
         await tx.update(orders).set({ productionStatus: status, updatedBy: changedBy }).where(eq(orders.id, id));
         await tx.insert(orderStatusHistory).values({
@@ -556,6 +580,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         });
       });
     } catch (error) {
+      // Preserve the meaningful domain errors; wrap anything unexpected.
+      if (error instanceof NotFoundError || error instanceof ConflictError) throw error;
       throw new InternalError("Failed to update order status", error);
     }
 
@@ -628,7 +654,7 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     await db.delete(orderImages).where(and(eq(orderImages.orderId, orderId), eq(orderImages.slot, slot)));
   }
 
-  async sumPaymentsForOrder(orderId: string): Promise<number> {
+  async sumPaymentsForOrder(orderId: string): Promise<string> {
     let rows;
     try {
       rows = await db
@@ -638,10 +664,10 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     } catch (error) {
       throw new InternalError("Failed to sum payments", error);
     }
-    return Number(rows[0]?.total ?? 0);
+    return toMoneyString(rows[0]?.total ?? 0);
   }
 
-  async sumPaymentsForOrders(orderIds: string[]): Promise<Record<string, number>> {
+  async sumPaymentsForOrders(orderIds: string[]): Promise<Record<string, string>> {
     if (orderIds.length === 0) return {};
 
     let rows;
@@ -655,8 +681,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
       throw new InternalError("Failed to sum payments", error);
     }
 
-    const sums: Record<string, number> = {};
-    for (const row of rows) sums[row.orderId] = Number(row.total);
+    const sums: Record<string, string> = {};
+    for (const row of rows) sums[row.orderId] = toMoneyString(row.total);
     return sums;
   }
 }

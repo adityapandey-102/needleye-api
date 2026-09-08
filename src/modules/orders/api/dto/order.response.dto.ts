@@ -39,9 +39,10 @@ export interface OrderResponseDto {
    * a real access control, not just a UI convenience.
    */
   paymentStatus?: PaymentStatus;
-  totalAmount?: number;
-  amountPaid?: number;
-  outstanding?: number;
+  // Money as 2dp strings (see common/money/money.ts).
+  totalAmount?: string;
+  amountPaid?: string;
+  outstanding?: string;
   productionStatus: GranularStatus;
   designerInstructions: string | null;
   specialNotes: string | null;

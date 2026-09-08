@@ -5,7 +5,9 @@ export default defineConfig([
   // supabase/.temp is a transient artifact the Supabase CLI writes on `supabase
   // start` (and gitignores); linting it is nondeterministic (present only when
   // the local stack is running) and it isn't our source.
-  globalIgnores(["dist/**", "drizzle/**", "node_modules/**", "supabase/.temp/**"]),
+  // scripts/scale-test/* are standalone tooling (run directly with node/psql),
+  // not part of the typed application build -- excluded from the typed lint.
+  globalIgnores(["dist/**", "drizzle/**", "node_modules/**", "supabase/.temp/**", "scripts/**"]),
   ...tseslint.configs.recommendedTypeChecked,
   {
     languageOptions: {

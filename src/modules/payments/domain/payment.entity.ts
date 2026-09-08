@@ -9,7 +9,8 @@ import type { PaymentMethod } from "../../../domain";
 export interface PaymentEntity {
   id: string;
   orderId: string;
-  amount: number;
+  /** Money as a canonical 2dp string (see common/money/money.ts). */
+  amount: string;
   method: PaymentMethod;
   paidAt: string;
   recordedBy: string | null;
@@ -26,6 +27,7 @@ export interface PaymentEntity {
  */
 export interface OrderLedgerContext {
   designerId: string;
-  totalAmount: number;
+  /** Money as a canonical 2dp string (see common/money/money.ts). */
+  totalAmount: string;
   paymentStatus: string;
 }

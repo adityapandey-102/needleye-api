@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { GRANULAR_STATUS_VALUES, PRODUCT_CATEGORY_VALUES } from "../../../../domain";
+import { moneyField } from "../../../../common/money/money-schema";
 
 /** Mirrors prototype's phoneNumber input filter + validateOrderForm() regex check. */
 const phoneSchema = z.string().regex(/^\d{10}$/, "Enter a valid 10-digit number");
@@ -24,7 +25,7 @@ export const createOrderDtoSchema = z.object({
   // Payment status is DERIVED from the ledger, never submitted -- see
   // derivePaymentStatus. An advance is recorded via the payments endpoint
   // right after creation, which recomputes and syncs the status.
-  totalAmount: z.coerce.number().min(0).default(0),
+  totalAmount: moneyField.default("0.00"),
   productionStatus: z.enum(GRANULAR_STATUS_VALUES, {
     errorMap: () => ({ message: "Please select current status" }),
   }),

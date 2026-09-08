@@ -1,50 +1,38 @@
 import { describe, expect, it } from "vitest";
-import { assertCanTransitionStatus } from "./order-status.rules";
+import { assertCanChangeStage } from "./order-status.rules";
 import { ForbiddenError } from "../../../common/errors/app-error";
-import type { StatusTransitionOwners } from "./order-status.rules";
+import type { Role } from "../../../domain";
 
-const order: StatusTransitionOwners = { designerId: "designer-1", masterTailorId: "master-1" };
-
-describe("assertCanTransitionStatus", () => {
-  it("lets owner_manager move any order into any stage", () => {
-    expect(() => assertCanTransitionStatus("owner_manager", "design_approved", order, "anyone")).not.toThrow();
-    expect(() => assertCanTransitionStatus("owner_manager", "cutting", order, "anyone")).not.toThrow();
+describe("assertCanChangeStage (stage-tier RBAC, no assignment)", () => {
+  it("lets owner_manager move an order into any stage", () => {
+    for (const status of ["design_pending", "production_manager_received", "cutting", "delivered"] as const) {
+      expect(() => assertCanChangeStage("owner_manager", status)).not.toThrow();
+    }
   });
 
-  it("lets the assigned designer move their own order between design stages", () => {
-    expect(() => assertCanTransitionStatus("designer", "design_approved", order, "designer-1")).not.toThrow();
+  it("design tier (Design Pending/Approved): owner / designer / PM only", () => {
+    for (const role of ["owner_manager", "designer", "production_manager"] as Role[]) {
+      expect(() => assertCanChangeStage(role, "design_approved")).not.toThrow();
+    }
+    for (const role of ["master_tailor", "worker", "accountant"] as Role[]) {
+      expect(() => assertCanChangeStage(role, "design_approved")).toThrow(ForbiddenError);
+    }
   });
 
-  it("forbids a designer moving a design-stage order they are not assigned to", () => {
-    expect(() => assertCanTransitionStatus("designer", "design_approved", order, "designer-2")).toThrow(ForbiddenError);
+  it("PM-received tier: owner / PM only", () => {
+    expect(() => assertCanChangeStage("owner_manager", "production_manager_received")).not.toThrow();
+    expect(() => assertCanChangeStage("production_manager", "production_manager_received")).not.toThrow();
+    for (const role of ["designer", "master_tailor", "worker", "accountant"] as Role[]) {
+      expect(() => assertCanChangeStage(role, "production_manager_received")).toThrow(ForbiddenError);
+    }
   });
 
-  it("forbids a designer from ever moving an order into a production stage", () => {
-    expect(() => assertCanTransitionStatus("designer", "cutting", order, "designer-1")).toThrow(ForbiddenError);
-  });
-
-  it("lets the assigned master tailor move their own order between production stages", () => {
-    expect(() => assertCanTransitionStatus("master_tailor", "stitching", order, "master-1")).not.toThrow();
-  });
-
-  it("forbids a master tailor moving a production-stage order they are not assigned to", () => {
-    expect(() => assertCanTransitionStatus("master_tailor", "stitching", order, "master-2")).toThrow(ForbiddenError);
-  });
-
-  it("forbids a master tailor from ever moving an order into a design stage", () => {
-    expect(() => assertCanTransitionStatus("master_tailor", "design_pending", order, "master-1")).toThrow(ForbiddenError);
-  });
-
-  it("treats Falls / Kutchu as a production stage (designer forbidden, assigned master tailor allowed)", () => {
-    // falls_kutchu follows design_approved but is production work -- the master
-    // tailor advances it, not the designer.
-    expect(() => assertCanTransitionStatus("designer", "falls_kutchu", order, "designer-1")).toThrow(ForbiddenError);
-    expect(() => assertCanTransitionStatus("master_tailor", "falls_kutchu", order, "master-1")).not.toThrow();
-    expect(() => assertCanTransitionStatus("master_tailor", "falls_kutchu", order, "master-2")).toThrow(ForbiddenError);
-  });
-
-  it("forbids accountant from transitioning status at all", () => {
-    expect(() => assertCanTransitionStatus("accountant", "design_pending", order, "anyone")).toThrow(ForbiddenError);
-    expect(() => assertCanTransitionStatus("accountant", "cutting", order, "anyone")).toThrow(ForbiddenError);
+  it("production tier (Falls/Kutchu ... Delivered): everyone on the floor, not the accountant", () => {
+    for (const status of ["falls_kutchu", "cutting", "alteration", "delivered"] as const) {
+      for (const role of ["owner_manager", "designer", "master_tailor", "production_manager", "worker"] as Role[]) {
+        expect(() => assertCanChangeStage(role, status)).not.toThrow();
+      }
+      expect(() => assertCanChangeStage("accountant", status)).toThrow(ForbiddenError);
+    }
   });
 });

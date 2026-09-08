@@ -12,7 +12,8 @@ export interface StaffReportSummaryDto {
   overdue: number;
   urgent: number;
   paymentPendingCount: number;
-  paymentPendingAmount: number;
+  /** Money as a 2dp string. */
+  paymentPendingAmount: string;
 }
 
 export interface StaffWeeklyPointDto {

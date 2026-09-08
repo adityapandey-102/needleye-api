@@ -6,16 +6,25 @@ import { db } from "../../../common/database/drizzle-client";
 import { orders } from "../../orders/infrastructure/order.schema";
 import { profiles } from "../../users/infrastructure/profile.schema";
 import { payments } from "./payments.schema";
-import { InternalError } from "../../../common/errors/app-error";
+import { InternalError, NotFoundError } from "../../../common/errors/app-error";
+import { ERROR_CODES } from "../../../common/errors/error-codes";
+import { BadRequestError } from "../../../common/errors/app-error";
+import { addMoney, subtractMoney, toMoneyString } from "../../../common/money/money";
+// A repository may depend inward on its own module's domain (Clean Architecture):
+// the invariant + status derivation run inside the same locked transaction as the
+// write, so they can't be raced. Mirrors OrdersRepository.updateStatus.
+import { assertDoesNotExceedTotal, derivePaymentStatus } from "../domain/payment-ledger.rules";
 import { PaymentsMapper, type PaymentRow } from "./payments.mapper";
 import type { PaymentEntity, OrderLedgerContext } from "../domain/payment.entity";
 import type {
   PaymentsRepositoryPort,
   NewPaymentRecord,
   UpdatePaymentRecord,
-  OrderLedgerStateUpdate,
 } from "../application/ports/payments-repository.port";
 import type { PaymentMethod } from "../../../domain";
+
+/** The transactional client Drizzle hands the `db.transaction` callback. */
+type TxLike = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 const PAYMENT_ROW_SELECT = {
   id: payments.id,
@@ -53,7 +62,7 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
     }
     const row = rows[0];
     if (!row) return null;
-    return { designerId: row.designerId, totalAmount: Number(row.totalAmount), paymentStatus: row.paymentStatus };
+    return { designerId: row.designerId, totalAmount: toMoneyString(row.totalAmount), paymentStatus: row.paymentStatus };
   }
 
   async findByOrderId(orderId: string): Promise<PaymentEntity[]> {
@@ -87,18 +96,22 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
     return row ? this.mapper.toEntity(row) : null;
   }
 
-  /** Sums in the database (not in JS after fetching every row) -- scales regardless of how many entries a ledger accumulates. */
-  async sumByOrderId(orderId: string): Promise<number> {
-    let rows;
-    try {
-      rows = await db
-        .select({ total: sql<string>`coalesce(sum(${payments.amount}), 0)` })
-        .from(payments)
-        .where(eq(payments.orderId, orderId));
-    } catch (error) {
-      throw new InternalError("Failed to sum payments", error);
-    }
-    return Number(rows[0]?.total ?? 0);
+  /** Ledger sum for an order, computed in the DB. Locks nothing -- callers that
+   *  need the invariant re-read this inside the locked transaction below. */
+  private async sumInTx(tx: TxLike, orderId: string): Promise<string> {
+    const rows = await tx
+      .select({ total: sql<string>`coalesce(sum(${payments.amount}), 0)` })
+      .from(payments)
+      .where(eq(payments.orderId, orderId));
+    return toMoneyString(rows[0]?.total ?? 0);
+  }
+
+  /** Locks the order row for the rest of the transaction and returns its total. */
+  private async lockOrderTotal(tx: TxLike, orderId: string): Promise<string> {
+    const rows = await tx.select({ total: orders.totalAmount }).from(orders).where(eq(orders.id, orderId)).for("update");
+    const total = rows[0]?.total;
+    if (total === undefined) throw new NotFoundError("Order not found", ERROR_CODES.ORDER_NOT_FOUND);
+    return toMoneyString(total);
   }
 
   async create(record: NewPaymentRecord): Promise<PaymentEntity> {
@@ -108,7 +121,7 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
         .insert(payments)
         .values({
           orderId: record.orderId,
-          amount: String(record.amount),
+          amount: toMoneyString(record.amount),
           method: record.method as PaymentMethod,
           paidAt: record.paidAt,
           recordedBy: record.recordedBy,
@@ -125,53 +138,117 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
     return entity;
   }
 
-  async update(paymentId: string, data: UpdatePaymentRecord): Promise<PaymentEntity> {
-    let existing;
+  async recordPayment(record: NewPaymentRecord, nextPaymentDate: string | null | undefined): Promise<PaymentEntity> {
+    let insertedId: string;
     try {
-      [existing] = await db.select({ orderId: payments.orderId }).from(payments).where(eq(payments.id, paymentId)).limit(1);
+      insertedId = await db.transaction(async (tx) => {
+        // Lock the order first: two staff recording a payment on the SAME order
+        // now serialize here, so the overpayment check + insert below can't be
+        // raced into an overpaid ledger.
+        const total = await this.lockOrderTotal(tx, record.orderId);
+        const newSum = addMoney(await this.sumInTx(tx, record.orderId), record.amount);
+        assertDoesNotExceedTotal(newSum, total); // 400 PAYMENT_EXCEEDS_TOTAL
+
+        const [inserted] = await tx
+          .insert(payments)
+          .values({
+            orderId: record.orderId,
+            amount: toMoneyString(record.amount),
+            method: record.method as PaymentMethod,
+            paidAt: record.paidAt,
+            recordedBy: record.recordedBy,
+            notes: record.notes,
+          })
+          .returning({ id: payments.id });
+        if (!inserted) throw new InternalError("Failed to record payment");
+
+        // Recompute the derived order state from the new ledger total: clear the
+        // schedule once fully paid, otherwise reschedule to the supplied date
+        // (undefined leaves it untouched -- Drizzle omits undefined from SET).
+        const status = derivePaymentStatus(newSum, total);
+        await tx
+          .update(orders)
+          .set({ paymentStatus: status, nextPaymentDate: status === "fully_paid" ? null : nextPaymentDate })
+          .where(eq(orders.id, record.orderId));
+
+        return inserted.id;
+      });
     } catch (error) {
+      if (error instanceof NotFoundError || error instanceof BadRequestError) throw error;
+      throw new InternalError("Failed to record payment", error);
+    }
+
+    const entity = await this.findById(record.orderId, insertedId);
+    if (!entity) throw new InternalError("Failed to record payment");
+    return entity;
+  }
+
+  async editPayment(orderId: string, paymentId: string, data: UpdatePaymentRecord): Promise<PaymentEntity | null> {
+    let found: boolean;
+    try {
+      found = await db.transaction(async (tx) => {
+        const total = await this.lockOrderTotal(tx, orderId);
+        const existing = (
+          await tx
+            .select({ amount: payments.amount })
+            .from(payments)
+            .where(and(eq(payments.id, paymentId), eq(payments.orderId, orderId)))
+            .limit(1)
+        )[0];
+        if (!existing) return false;
+
+        const patch: Partial<typeof payments.$inferInsert> = {};
+        if (data.amount !== undefined) patch.amount = toMoneyString(data.amount);
+        if (data.method !== undefined) patch.method = data.method as PaymentMethod;
+        if (data.paidAt !== undefined) patch.paidAt = data.paidAt;
+        if (data.notes !== undefined) patch.notes = data.notes;
+
+        if (data.amount !== undefined) {
+          // Swap this entry's contribution for the new amount and re-check.
+          const newSum = addMoney(subtractMoney(await this.sumInTx(tx, orderId), existing.amount), data.amount);
+          assertDoesNotExceedTotal(newSum, total, "update");
+          await tx.update(payments).set(patch).where(eq(payments.id, paymentId));
+          // Editing the amount changes the derived status; the schedule is left
+          // as-is (rescheduling only happens when recording a new payment).
+          await tx.update(orders).set({ paymentStatus: derivePaymentStatus(newSum, total) }).where(eq(orders.id, orderId));
+        } else {
+          await tx.update(payments).set(patch).where(eq(payments.id, paymentId));
+        }
+        return true;
+      });
+    } catch (error) {
+      if (error instanceof NotFoundError || error instanceof BadRequestError) throw error;
       throw new InternalError("Failed to update payment", error);
     }
-    if (!existing) throw new InternalError("Payment not found");
 
-    const record: Partial<typeof payments.$inferInsert> = {};
-    if (data.amount !== undefined) record.amount = String(data.amount);
-    if (data.method !== undefined) record.method = data.method as PaymentMethod;
-    if (data.paidAt !== undefined) record.paidAt = data.paidAt;
-    if (data.notes !== undefined) record.notes = data.notes;
-
-    try {
-      await db.update(payments).set(record).where(eq(payments.id, paymentId));
-    } catch (error) {
-      throw new InternalError("Failed to update payment", error);
-    }
-
-    const entity = await this.findById(existing.orderId, paymentId);
+    if (!found) return null;
+    const entity = await this.findById(orderId, paymentId);
     if (!entity) throw new InternalError("Failed to update payment");
     return entity;
   }
 
-  async delete(paymentId: string): Promise<void> {
+  async removePayment(orderId: string, paymentId: string): Promise<boolean> {
     try {
-      await db.delete(payments).where(eq(payments.id, paymentId));
+      return await db.transaction(async (tx) => {
+        const total = await this.lockOrderTotal(tx, orderId);
+        const existing = (
+          await tx
+            .select({ id: payments.id })
+            .from(payments)
+            .where(and(eq(payments.id, paymentId), eq(payments.orderId, orderId)))
+            .limit(1)
+        )[0];
+        if (!existing) return false;
+
+        await tx.delete(payments).where(eq(payments.id, paymentId));
+        // Reduced ledger -> re-derive status (schedule left untouched).
+        const newSum = await this.sumInTx(tx, orderId);
+        await tx.update(orders).set({ paymentStatus: derivePaymentStatus(newSum, total) }).where(eq(orders.id, orderId));
+        return true;
+      });
     } catch (error) {
+      if (error instanceof NotFoundError) throw error;
       throw new InternalError("Failed to delete payment", error);
-    }
-  }
-
-  async updateOrderLedgerState(orderId: string, update: OrderLedgerStateUpdate): Promise<void> {
-    // Only the derived fields are touched; updated_at is maintained by the
-    // orders_set_updated_at trigger, and version isn't bumped (this isn't a
-    // user edit competing for the optimistic lock).
-    const record: Partial<typeof orders.$inferInsert> = {
-      paymentStatus: update.paymentStatus as typeof orders.$inferInsert.paymentStatus,
-    };
-    if (update.nextPaymentDate !== undefined) record.nextPaymentDate = update.nextPaymentDate;
-
-    try {
-      await db.update(orders).set(record).where(eq(orders.id, orderId));
-    } catch (error) {
-      throw new InternalError("Failed to update order payment state", error);
     }
   }
 }

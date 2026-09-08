@@ -14,7 +14,27 @@ so a human can execute it directly.
 ## 0. Before you start
 
 - [ ] Decide on a hosting target for `needleye-api` (Railway/Fly/Render/etc. -- anywhere that runs a long-lived Node process) and one for `needleye-web` (Vercel is the natural fit for Next.js).
-- [ ] Create the hosted Supabase project at [supabase.com](https://supabase.com) (or self-hosted Supabase, if that's the direction -- same env vars either way).
+- [ ] Create the hosted Supabase project at [supabase.com](https://supabase.com) (or self-hosted Supabase, if that's the direction -- same env vars either way). Use a **paid tier** for real production: the free tier auto-pauses on inactivity, caps connections, and has no daily backups. Put the Supabase project, the API, and the frontend in the **same region** -- API↔DB round trips dominate latency.
+
+**Where each value comes from** (Supabase dashboard):
+
+| Value | Dashboard location |
+|---|---|
+| `SUPABASE_URL` | Project Settings → **API** → Project URL |
+| `SUPABASE_ANON_KEY` | Project Settings → **API** → Project API keys → `anon` `public` |
+| `SUPABASE_SERVICE_ROLE_KEY` | Project Settings → **API** → Project API keys → `service_role` (**secret**) |
+| `DATABASE_URL` | Project Settings → **Database** → Connection string → **Session pooler** (port 5432) |
+
+**Railway specifics** (if that's the API host): point Railway at the
+`needleye-api` repo; it will build the existing multi-stage `Dockerfile` (which
+already runs as non-root and installs prod-only deps -- no changes needed). Set
+the healthcheck path to **`/health`**. Nothing else about the image needs to
+change for production.
+
+**Vercel specifics**: `NEXT_PUBLIC_*` variables are **inlined at build time**,
+not read at runtime -- so both web variables must exist in the Vercel project
+*before* the build runs, and changing one requires a redeploy, not just a
+restart.
 
 ## 1. Database: apply the SQL migrations (not Drizzle, for this first cutover)
 
@@ -33,6 +53,15 @@ replay of history. So for the initial cutover:
 
 ### 1a. Least-privilege runtime database role (recommended)
 
+> Full rationale for this and every other production decision below (why
+> `BYPASSRLS` is correct, why Session-mode pooling, why two Supabase keys):
+> **`docs/adr/0006-production-deployment-and-database-privileges.md`**.
+>
+> **Easiest way to run it:** paste the script into the Supabase dashboard's
+> **SQL Editor** and hit Run. It executes as the database owner, so no admin
+> connection string has to leave your machine. Put the real password in the
+> editor, not in the tracked file.
+
 - [ ] Run `docs/least-privilege-db-role.sql` once against the hosted DB **as an admin/owner connection** (set a real password first -- don't commit it). It creates `needleye_app`: `LOGIN`, not superuser, data access on exactly the business tables, `BYPASSRLS` (required -- the app connects directly to Postgres, see the script's header and the README's "Operational hardening").
 - [ ] This is the **runtime** credential; keep it separate from the **migration** credential. Migrations (step 1, and future `supabase migration`/`drizzle-kit migrate` runs) use the Supabase CLI / an owner connection; the running app uses `needleye_app`. `needleye_app` deliberately cannot run DDL.
 - [ ] Point the app's `DATABASE_URL` (step 2) at `needleye_app`, not `postgres`. No application code changes -- it only ever knew a connection string.
@@ -49,10 +78,13 @@ for the authoritative list and what each one is for:
 - [ ] `STORAGE_BUCKET_NAME` -- `order-images` (matches what the migration created).
 - [ ] `CORS_ALLOWED_ORIGIN` -- the exact deployed `needleye-web` origin (e.g. `https://needleye.example.com`). A mismatch here is the single most common cutover bug: the API deploys fine, then every browser request silently fails CORS while curl/Postman work perfectly, because they don't send an `Origin` header.
 - [ ] `WEB_APP_URL` -- same origin as above; only used to build the link inside password-reset emails.
-- [ ] `API_PORT` -- whatever the hosting platform expects (many inject `PORT` themselves; confirm this one still gets read correctly, or set it to match).
+- [ ] **`API_PORT`** -- ⚠️ the app listens on `API_PORT` (`src/index.ts`), but most platforms inject **`PORT`**. On Railway set `API_PORT=${{PORT}}` (Railway's variable-reference syntax); on any platform that only sets `PORT`, either do the same or configure the service's target port to match a fixed `API_PORT`. Getting this wrong means the platform health-checks a port nothing is listening on.
+- [ ] **`TRUST_PROXY`** -- ⚠️ set to the **number of proxies in front of the app** (`1` on Railway/Render/Fly, which put exactly one edge proxy in front). The default is `loopback`, which is right for local dev but **wrong in production**: the platform forwards `X-Forwarded-For` from a non-loopback address, Express won't trust it, and `express-rate-limit` throws `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR` while the limiter keys on the proxy's IP instead of the real client's. Never `true` (that lets any client spoof its IP).
+- [ ] `DB_POOL_MAX` -- max Postgres connections for this instance's pool (default 10). The main concurrency lever: 10 suits ~20-30 concurrent users, ~20-30 suits 60+. Keep it comfortably under the database's connection limit; with the Session pooler (above) there is plenty of headroom.
 - [ ] `LOG_LEVEL` -- `info` is a reasonable prod default.
 - [ ] `SLOW_QUERY_MS` -- optional; queries slower than this (default 250ms) are logged at WARN.
-- [ ] `AUTH_RATE_LIMIT_WINDOW_MS` / `AUTH_RATE_LIMIT_MAX` -- optional; auth brute-force limits (default 15min / 30 attempts per IP). `app.set("trust proxy", 1)` is enabled in production so the limiter keys on the real client IP -- confirm your platform sets `X-Forwarded-For` (Railway/Render/Fly do).
+- [ ] `AUTH_RATE_LIMIT_WINDOW_MS` / `AUTH_RATE_LIMIT_MAX` -- optional; auth brute-force limits (default 15min / 30 attempts per IP). Depends on `TRUST_PROXY` being set correctly (above) to key on the real client IP.
+- [ ] `ACCOUNTING_CYCLE_START_DAY` -- optional; day of month the revenue cycle starts (1 = calendar months).
 - [ ] `NODE_ENV=production`.
 
 Deploy `needleye-api`. Confirm `GET /health` responds before continuing.
@@ -93,17 +125,53 @@ SEED_OWNER_PASSWORD=<its password> \
 npm run test:rbac
 ```
 
-`tests/rbac-matrix.mjs` creates its own throwaway staff accounts and one
-throwaway order, exercises the core capability matrix (`orders:create`,
-`orders:edit:pricing_assignment`, `payments:read`/`payments:manage`,
-`orders:status:design_stages`/`production_stages`, `users:manage`, plus
-row-scoping and the unauthenticated-request case), and exits non-zero if
-anything returns the wrong status code. It talks to the API over plain
-HTTP, so it works identically against `localhost:4000` or a hosted URL --
-that's the actual "zero code changes" proof for the backend's behavior, not
-just its deployability.
+`tests/rbac-matrix.mjs` creates its own throwaway staff accounts (**all six
+roles**) plus throwaway orders, runs 53 checks over plain HTTP, and exits
+non-zero if anything returns the wrong status code. It covers `orders:create`,
+`orders:edit:pricing_assignment` vs `customer_product_fields`,
+`payments:read`/`payments:manage`, `users:manage`, `reports:financial` vs
+`reports:staff`, row-scoping, the unauthenticated case, and the post-ADR-0005
+rules specifically:
 
-## 7. Optional: seed realistic demo data
+- the **three status tiers** (`orders:status:design` / `:pm_received` /
+  `:production`), which are gated by **role only** -- the old "must be assigned
+  to the order" rule is gone;
+- the **forward-only** flow (moving backwards, or re-applying the current stage,
+  returns `409 ORDER_STATUS_NOT_FORWARD`);
+- **Production Manager** editing an order that isn't theirs (allowed) but never
+  its pricing (forbidden);
+- **Worker** advancing a production stage (allowed) and nothing else;
+- an authenticated **outsider viewing one order read-only** with the payment
+  fields stripped from the response body.
+
+Because it talks HTTP only, it works identically against `localhost:4000` or a
+hosted URL -- that's the actual "zero code changes" proof for the backend's
+behaviour, not just its deployability. Note it is **order-sensitive** by design
+(the status section walks one order forward through the flow), and it leaves its
+fixture accounts/orders behind -- run it against staging, or accept a handful of
+`rbac-*@needleeye.test` rows in production.
+
+## 7. Load + security check against the deployed API
+
+`scripts/scale-test/` is a standalone harness (deliberately not part of CI) for
+exactly this moment -- see its README. Against a **deployed** API:
+
+```bash
+# Read-only load test -- safe against real data (no writes)
+BASE=https://<your-api>/api/v1 EMAIL=<owner> PASSWORD=<pw> \
+  VUS=60 DURATION_MS=20000 MIX_WRITES=0 node scripts/scale-test/load-test.mjs
+
+# Security scan (auth, token tampering, headers, SQLi, CORS, rate limiting)
+BASE=https://<your-api>/api/v1 EMAIL=<owner> PASSWORD=<pw> \
+  node scripts/scale-test/security-scan.mjs
+```
+
+The volume half of the harness (`setup.sh`, which seeds 250 staff / 25k orders)
+is for a **throwaway or staging** database only -- it refuses any database whose
+name doesn't contain `scaletest`, and it clones only the `public` schema, so it
+can never touch a primary database. Run that against staging, never production.
+
+## 8. Optional: seed realistic demo data
 
 `npm run seed` (same script used locally) is safe to run again here --
 `src/db/seed.ts` looks up staff by email before creating anyone, so it's

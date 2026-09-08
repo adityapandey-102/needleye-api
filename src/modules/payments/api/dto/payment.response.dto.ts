@@ -4,7 +4,8 @@ import type { PaymentMethod } from "../../../../domain";
 export interface PaymentResponseDto {
   id: string;
   orderId: string;
-  amount: number;
+  /** Money as a 2dp string. */
+  amount: string;
   method: PaymentMethod;
   paidAt: string;
   recordedBy: string | null;

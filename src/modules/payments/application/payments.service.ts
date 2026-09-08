@@ -1,6 +1,5 @@
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
-import { assertDoesNotExceedTotal, derivePaymentStatus } from "../domain/payment-ledger.rules";
 import { toPaymentResponseDto } from "../api/payment.presenter";
 import { AUDIT_ACTIONS, AUDIT_ENTITIES } from "../../../common/audit/audit-actions";
 import { auditLogger as defaultAuditLogger } from "../../../common/audit/drizzle-audit-logger";
@@ -20,10 +19,13 @@ interface AuthContext {
 }
 
 /**
- * Application/use-case layer for Payments: orchestrates the repository
- * port and the domain rule, translates domain entities into response
- * DTOs. Depends only on the PaymentsRepositoryPort interface and the pure
- * domain rule function -- never on Drizzle or any concrete adapter.
+ * Application/use-case layer for Payments: enforces access, translates domain
+ * entities into response DTOs, and writes the audit trail. The money invariant
+ * (no overpayment) and the derived-status recompute live in the repository's
+ * atomic, order-locked mutations (recordPayment/editPayment/removePayment) so
+ * concurrent writes to the same order can't race -- see ADR 0005. Depends only
+ * on the PaymentsRepositoryPort interface, never on Drizzle or any concrete
+ * adapter.
  */
 export class PaymentsService {
   constructor(
@@ -38,25 +40,22 @@ export class PaymentsService {
   }
 
   async addPayment(ctx: AuthContext, orderId: string, dto: CreatePaymentDto): Promise<PaymentResponseDto> {
-    const order = await this.loadOrderForAccess(ctx, orderId);
+    await this.loadOrderForAccess(ctx, orderId);
 
-    const currentSum = await this.paymentsRepository.sumByOrderId(orderId);
-    const newSum = currentSum + dto.amount;
-    // Never let the ledger exceed the order total (overpayment) -- always.
-    assertDoesNotExceedTotal(newSum, order.totalAmount);
-
-    const entity = await this.paymentsRepository.create({
-      orderId,
-      amount: dto.amount,
-      method: dto.method,
-      paidAt: dto.paidAt ?? new Date().toISOString().slice(0, 10),
-      recordedBy: ctx.authUserId,
-      notes: dto.notes || null,
-    });
-    // Recompute the order's derived payment state from the new ledger total,
-    // and reschedule the next-payment date (cleared once fully paid; set to
-    // the supplied date while a balance remains; left as-is if none supplied).
-    await this.syncOrderLedgerState(orderId, newSum, order.totalAmount, dto.nextPaymentDate);
+    // The overpayment check, the insert, and the order-status recompute all
+    // happen atomically under an order row lock inside the repository, so two
+    // concurrent payments on the same order can't both slip past the check.
+    const entity = await this.paymentsRepository.recordPayment(
+      {
+        orderId,
+        amount: dto.amount,
+        method: dto.method,
+        paidAt: dto.paidAt ?? new Date().toISOString().slice(0, 10),
+        recordedBy: ctx.authUserId,
+        notes: dto.notes || null,
+      },
+      dto.nextPaymentDate,
+    );
     await this.audit.record({
       action: AUDIT_ACTIONS.PAYMENT_CREATED,
       entityType: AUDIT_ENTITIES.PAYMENT,
@@ -69,16 +68,11 @@ export class PaymentsService {
   async updatePayment(ctx: AuthContext, orderId: string, paymentId: string, dto: UpdatePaymentDto): Promise<PaymentResponseDto> {
     if (Object.keys(dto).length === 0) throw new BadRequestError("No fields to update", ERROR_CODES.VALIDATION_NO_FIELDS);
 
-    const order = await this.loadOrderForAccess(ctx, orderId);
+    await this.loadOrderForAccess(ctx, orderId);
+    // Read the "before" snapshot for the audit trail (outside the lock is fine --
+    // the atomic edit re-reads and re-checks under the lock).
     const existing = await this.paymentsRepository.findById(orderId, paymentId);
     if (!existing) throw new NotFoundError("Payment not found", ERROR_CODES.PAYMENT_NOT_FOUND);
-
-    let newSum: number | null = null;
-    if (dto.amount !== undefined) {
-      const currentSum = await this.paymentsRepository.sumByOrderId(orderId);
-      newSum = currentSum - existing.amount + dto.amount;
-      assertDoesNotExceedTotal(newSum, order.totalAmount, "update");
-    }
 
     const updates: UpdatePaymentRecord = {};
     if (dto.amount !== undefined) updates.amount = dto.amount;
@@ -86,10 +80,8 @@ export class PaymentsService {
     if (dto.paidAt !== undefined) updates.paidAt = dto.paidAt;
     if (dto.notes !== undefined) updates.notes = dto.notes || null;
 
-    const entity = await this.paymentsRepository.update(paymentId, updates);
-    // Editing an amount changes the derived status -- resync it (the next
-    // date isn't touched here; that's rescheduled when recording a payment).
-    if (newSum !== null) await this.syncOrderLedgerState(orderId, newSum, order.totalAmount);
+    const entity = await this.paymentsRepository.editPayment(orderId, paymentId, updates);
+    if (!entity) throw new NotFoundError("Payment not found", ERROR_CODES.PAYMENT_NOT_FOUND);
     // Record the full before/after so the ledger-event history can show what
     // changed (e.g. amount ₹800 -> ₹1000).
     await this.audit.record({
@@ -106,14 +98,12 @@ export class PaymentsService {
   }
 
   async deletePayment(ctx: AuthContext, orderId: string, paymentId: string): Promise<void> {
-    const order = await this.loadOrderForAccess(ctx, orderId);
+    await this.loadOrderForAccess(ctx, orderId);
     const existing = await this.paymentsRepository.findById(orderId, paymentId);
     if (!existing) throw new NotFoundError("Payment not found", ERROR_CODES.PAYMENT_NOT_FOUND);
 
-    const currentSum = await this.paymentsRepository.sumByOrderId(orderId);
-    await this.paymentsRepository.delete(paymentId);
-    // Removing a payment lowers the ledger total -- resync the derived status.
-    await this.syncOrderLedgerState(orderId, currentSum - existing.amount, order.totalAmount);
+    const removed = await this.paymentsRepository.removePayment(orderId, paymentId);
+    if (!removed) throw new NotFoundError("Payment not found", ERROR_CODES.PAYMENT_NOT_FOUND);
     await this.audit.record({
       action: AUDIT_ACTIONS.PAYMENT_DELETED,
       entityType: AUDIT_ENTITIES.PAYMENT,
@@ -121,24 +111,6 @@ export class PaymentsService {
       // The removed values, so the ledger-event history can show what was deleted.
       metadata: { orderId, amount: existing.amount, method: existing.method, paidAt: existing.paidAt },
     });
-  }
-
-  /**
-   * Recomputes the order's derived payment status from its new ledger total and
-   * writes it back, along with the rescheduled next-payment date: cleared once
-   * fully paid, set to `nextPaymentDate` when a balance remains and a date was
-   * supplied, otherwise left unchanged (undefined). The single place a ledger
-   * change touches order-level state.
-   */
-  private async syncOrderLedgerState(
-    orderId: string,
-    newSum: number,
-    totalAmount: number,
-    nextPaymentDate?: string | null,
-  ): Promise<void> {
-    const paymentStatus = derivePaymentStatus(newSum, totalAmount);
-    const nextDate = paymentStatus === "fully_paid" ? null : nextPaymentDate;
-    await this.paymentsRepository.updateOrderLedgerState(orderId, { paymentStatus, nextPaymentDate: nextDate });
   }
 
   /**

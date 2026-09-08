@@ -3,13 +3,14 @@ import { BadRequestError, NotFoundError } from "../../../common/errors/app-error
 import { ERROR_CODES } from "../../../common/errors/error-codes";
 import { assertFieldsEditable, assertOwnershipForScopedEdit } from "../domain/order-edit.rules";
 import { assertTotalCoversLedger, derivePaymentStatus } from "../domain/order-ledger.rules";
-import { assertCanTransitionStatus } from "../domain/order-status.rules";
+import { assertCanChangeStage } from "../domain/order-status.rules";
 import { toOrderResponseDto } from "../api/order.presenter";
 import { toOrderStatusHistoryResponseDto } from "../api/order-status-history.presenter";
 import { toOrderStatsResponseDto } from "../api/order-stats.presenter";
 import { AUDIT_ACTIONS, AUDIT_ENTITIES } from "../../../common/audit/audit-actions";
 import { auditLogger as defaultAuditLogger } from "../../../common/audit/drizzle-audit-logger";
 import { logger } from "../../../common/logger/logger";
+import { toMoneyString, type MoneyLike } from "../../../common/money/money";
 import type { AuditLogger } from "../../../common/audit/audit-logger";
 import type { GranularStatus, Profile } from "../../../domain";
 import type { StorageProvider } from "../../../common/storage/storage-provider";
@@ -39,7 +40,7 @@ interface AuthContext {
 /** Pulls a {amount, method} snapshot out of a slice of audit metadata, coercing defensively (old records may predate a field). */
 function readSnapshot(source: unknown): LedgerAmountSnapshot {
   const obj = (source ?? {}) as Record<string, unknown>;
-  return { amount: Number(obj.amount ?? 0), method: typeof obj.method === "string" ? obj.method : "" };
+  return { amount: toMoneyString(obj.amount as MoneyLike), method: typeof obj.method === "string" ? obj.method : "" };
 }
 
 /** Decodes one raw payment-audit record into the display DTO, keying off its action verb. */
@@ -107,7 +108,7 @@ export class OrdersService {
       this.ordersRepository.sumPaymentsForOrders(entities.map((e) => e.id)),
       this.signImageUrls(entities),
     ]);
-    const orders = entities.map((entity) => toOrderResponseDto(entity, sums[entity.id] ?? 0, ctx.profile.role, signedUrls));
+    const orders = entities.map((entity) => toOrderResponseDto(entity, sums[entity.id] ?? "0.00", ctx.profile.role, signedUrls));
     return { orders, total, limit: page.limit, offset: page.offset };
   }
 
@@ -124,7 +125,7 @@ export class OrdersService {
     // missing orders still 404.
     const any = await this.ordersRepository.findAnyById(orderId);
     if (!any) throw new NotFoundError("Order not found", ERROR_CODES.ORDER_NOT_FOUND);
-    return toOrderResponseDto(any, 0, ctx.profile.role, await this.signImageUrls([any]), { viewOnly: true });
+    return toOrderResponseDto(any, "0.00", ctx.profile.role, await this.signImageUrls([any]), { viewOnly: true });
   }
 
   async createOrder(ctx: AuthContext, dto: CreateOrderDto): Promise<OrderResponseDto> {
@@ -191,15 +192,13 @@ export class OrdersService {
   /**
    * PATCH /orders/:id/status -- deliberately not gated by requireCapability
    * (the applicable capability depends on the *target* status, which isn't
-   * known until the body is parsed), so assertCanTransitionStatus owns the
-   * whole authorization decision here, same as updateOrder's field-split
-   * check does for orders:edit:*.
+   * known until the body is parsed), so assertCanChangeStage owns the role/tier
+   * decision here. Forward-only ordering, idempotency, and concurrency are
+   * enforced atomically inside repository.updateStatus (row-locked), which also
+   * 404s a missing order -- so no separate existence read is needed here.
    */
   async updateStatus(ctx: AuthContext, orderId: string, status: GranularStatus): Promise<OrderResponseDto> {
-    const existing = await this.ordersRepository.findBasicById(orderId);
-    if (!existing) throw new NotFoundError("Order not found", ERROR_CODES.ORDER_NOT_FOUND);
-
-    assertCanTransitionStatus(ctx.profile.role, status, existing, ctx.authUserId);
+    assertCanChangeStage(ctx.profile.role, status);
 
     const entity = await this.ordersRepository.updateStatus(orderId, status, ctx.authUserId);
     await this.audit.record({

@@ -27,8 +27,10 @@ describe("assertTotalCoversLedger", () => {
     }
   });
 
-  it("tolerates cent rounding at the boundary", () => {
-    expect(() => assertTotalCoversLedger(0.3, 0.1 + 0.2)).not.toThrow();
+  it("compares decimal strings exactly (no float drift at the boundary)", () => {
+    // Money crosses every boundary as a 2dp string, so the comparison is exact.
+    expect(() => assertTotalCoversLedger("0.30", "0.30")).not.toThrow();
+    expect(() => assertTotalCoversLedger("0.29", "0.30")).toThrow(BadRequestError);
   });
 });
 
@@ -45,8 +47,8 @@ describe("derivePaymentStatus", () => {
     expect(derivePaymentStatus(5000, 5000)).toBe("fully_paid");
   });
 
-  it("is fully_paid when the recorded sum meets the total across cent rounding", () => {
-    expect(derivePaymentStatus(0.1 + 0.2, 0.3)).toBe("fully_paid");
+  it("is fully_paid when the recorded decimal sum meets the total exactly", () => {
+    expect(derivePaymentStatus("0.30", "0.30")).toBe("fully_paid");
   });
 
   it("treats a zero-total order as unpaid", () => {

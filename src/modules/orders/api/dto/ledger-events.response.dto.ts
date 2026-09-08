@@ -6,7 +6,8 @@
  * what changed. Backs the "Ledger Activity" history on the revenue page.
  */
 export interface LedgerAmountSnapshot {
-  amount: number;
+  /** Money as a 2dp string. */
+  amount: string;
   method: string;
 }
 

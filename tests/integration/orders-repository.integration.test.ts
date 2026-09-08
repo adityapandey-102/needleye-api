@@ -47,7 +47,7 @@ describe("DrizzleOrdersRepository (integration)", () => {
       machineWork: true,
       purchaseRequired: false,
       paymentStatus: "advance_paid",
-      totalAmount: 1000,
+      totalAmount: "1000.00",
       productionStatus: "design_pending",
       designerInstructions: null,
       specialNotes: null,

@@ -40,7 +40,8 @@ export interface OrderEntity {
   machineWork: boolean;
   purchaseRequired: boolean;
   paymentStatus: PaymentStatus;
-  totalAmount: number;
+  /** Money as a canonical 2dp string (see common/money/money.ts). */
+  totalAmount: string;
   productionStatus: GranularStatus;
   designerInstructions: string | null;
   specialNotes: string | null;

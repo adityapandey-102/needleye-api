@@ -51,6 +51,13 @@ Or, once `.env` is filled in, **one command** does the whole local bring-up
 (start Postgres/Auth/Storage, apply any pending migrations, seed dev data,
 start the backend): `npm run dev:up`.
 
+To start **everything at once -- Supabase + this API + the `needleye-web`
+frontend** -- run the repo-root launcher from `needleye-pilot/` (a directory
+up): `.\start-dev.ps1` (PowerShell). It starts Supabase, applies migrations,
+and opens the API and web dev servers each in their own window; `-Seed`
+also seeds demo data, `-Reset` wipes+re-applies the DB first. See the header
+comment in `start-dev.ps1` for details.
+
 `npm run lint` (ESLint, flat config in `eslint.config.mjs`, type-aware via
 `typescript-eslint`'s `recommendedTypeChecked`), `npm run typecheck`, and
 `npm run test:unit` should all be clean before pushing -- lint, typecheck,
@@ -62,7 +69,7 @@ more scripts are useful for local development:
 
 - **`npm run seed`** (`src/db/seed.ts`) -- populates ~40 orders spanning every production status, payment state (unpaid/advance/fully, with the status **derived** from the ledger it records), and due-date bucket, with real multi-step status history and a handful of reference images, plus the 5 designer / 5 master-tailor / 1 accountant staff accounts (the designer/master names are the prototype's own, for continuity). Safe to re-run -- staff are looked up by email first, so a second run reuses the same accounts instead of duplicating them; it never deletes anything.
 - **`npm run test:integration`** (`tests/integration/`, Vitest) -- repository↔database, service↔repository, authentication, and API-endpoint coverage against the real local Supabase stack (no mocking). Creates and tears down its own fixtures every run. See `tests/integration/README.md`.
-- **`npm run test:rbac`** (`tests/rbac-matrix.mjs`) -- a small, self-contained per-role 200/403 check against the running API: `orders:create`, `orders:edit:pricing_assignment`, `payments:read`/`payments:manage`, `orders:status:design_stages`/`production_stages`, `users:manage`, row-scoping, and the unauthenticated case. Needs `SEED_OWNER_PASSWORD` set to an existing Owner/Manager's password; creates its own throwaway fixtures, so it never depends on `npm run seed` having been run first.
+- **`npm run test:rbac`** (`tests/rbac-matrix.mjs`) -- a small, self-contained per-role 200/403 check against the running API: `orders:create`, `orders:edit:pricing_assignment`, `payments:read`/`payments:manage`, the status tiers (`orders:status:design`/`pm_received`/`production`), `users:manage`, row-scoping, and the unauthenticated case. Needs `SEED_OWNER_PASSWORD` set to an existing Owner/Manager's password; creates its own throwaway fixtures, so it never depends on `npm run seed` having been run first.
 
 ### Docker
 
@@ -110,6 +117,15 @@ reasoning and `docs/adr/0002-repository-port-implementation-split.md` /
 the conversion. Layers are never merged for convenience -- every module
 ends up the same shape regardless of size, because consistency across the
 codebase matters more than trimming a few files for the smaller modules.
+
+The remaining ADRs record decisions made after the conversion:
+`0004-operational-hardening.md` (request context, error codes, audit,
+rate limiting, optimistic locking), `0005-money-roles-status-flow-and-concurrency.md`
+(decimal money as strings, the two new roles, the 13-stage forward-only flow,
+concurrency safety), and `0006-production-deployment-and-database-privileges.md`
+(the least-privilege runtime DB role, migration-vs-runtime credentials, the
+Session-mode pooler, `TRUST_PROXY`/`DB_POOL_MAX`/`API_PORT`, and why there are
+two Supabase keys).
 
 ### Module conversion history
 
@@ -214,7 +230,7 @@ src/
         order-status-history.entity.ts         # OrderStatusHistoryEntity -- one row in the status audit trail
         order-edit.rules.ts                    # assertFieldsEditable/assertOwnershipForScopedEdit -- the RBAC field-splitting + ownership invariants, framework-free
         order-ledger.rules.ts                    # derivePaymentStatus -- unpaid/advance_paid/fully_paid from the ledger sum, seen from the Orders side (a small, deliberate duplicate of Payments' own copy -- Domain layers don't import across modules, see ADR 0003)
-        order-status.rules.ts                      # assertCanTransitionStatus -- design-stage vs production-stage RBAC for PATCH /orders/:id/status, see "Order status history & Kanban" below
+        order-status.rules.ts                      # assertCanChangeStage -- three-tier stage RBAC for PATCH /orders/:id/status (forward-only enforced in the repository), see "Order status history & Kanban" below
         order-visibility.rules.ts                    # canViewPaymentFields -- master_tailor's zero payment-visibility rule
       infrastructure/
         drizzle-orders.repository.ts               # implements the port; reads `profiles` (via order.relations.ts) from Users and `payments` from Payments (see ADR 0003)
@@ -236,7 +252,7 @@ src/
         ports/payments-repository.port.ts   # the interface -- Application depends on this, never on the Drizzle adapter
       domain/
         payment.entity.ts                   # PaymentEntity, OrderLedgerContext -- pure, no persistence/HTTP shape
-        payment-ledger.rules.ts               # assertDoesNotExceedTotal (overpayment guard) + derivePaymentStatus + roundCurrency -- framework-free
+        payment-ledger.rules.ts               # assertDoesNotExceedTotal (overpayment guard) + derivePaymentStatus -- framework-free (decimal.js money, see common/money)
       infrastructure/
         drizzle-payments.repository.ts        # implements the port; reads `orders` from Orders' schema and `profiles` from Users' schema (see ADR 0003)
         payments.schema.ts                      # this module's own Drizzle table def for `payments`
@@ -251,10 +267,10 @@ below is `application/ports/*.port.ts` (the interface) plus
 `infrastructure/drizzle-*.repository.ts` (the implementation).
 
 - **Controller** (`api/*.routes.ts`) -- HTTP only: read `req`, call the service, shape `res`. Never touches Drizzle, Supabase, or any vendor SDK, never contains a business rule. Also the module's composition root -- wires the concrete Infrastructure adapter into the Application service.
-- **Validation** (`common/http/validate.middleware.ts`, applied per-route) -- confirms the request body/query is well-formed against a DTO's zod schema, *before* a controller calls a service. A service can assume its input is already valid; it never re-validates shape.
+- **Validation** (`common/http/validate.middleware.ts`, applied per-route) -- confirms the request body/query is well-formed against a DTO's zod schema, _before_ a controller calls a service. A service can assume its input is already valid; it never re-validates shape.
 - **Service** (`application/*.service.ts`) -- business rules and orchestration only: RBAC field-splitting, ownership checks, "what has to be true for this operation to be allowed." Calls the repository port and the domain rule functions; never imports Drizzle, a Provider, or any vendor client directly.
 - **Repository port** (`application/ports/*.port.ts`) -- what the Application layer needs from persistence, expressed in domain terms (e.g. `OrdersRepositoryPort`). Application depends on this interface only, never on the concrete adapter.
-- **Repository implementation** (`infrastructure/drizzle-*.repository.ts`) -- persistence only, one concrete `Drizzle*Repository` per port, built on Drizzle + this module's own `*.schema.ts`. No business rules -- row-level scoping by role *is* here (it's a data-visibility concern), but *whether the caller is even allowed to attempt the operation* is the service's job. Auth and Users additionally hold an `AuthProvider` dependency for identity operations (create/ban/set-password/mint-session) that aren't table queries at all -- see "Infrastructure & providers" below.
+- **Repository implementation** (`infrastructure/drizzle-*.repository.ts`) -- persistence only, one concrete `Drizzle*Repository` per port, built on Drizzle + this module's own `*.schema.ts`. No business rules -- row-level scoping by role _is_ here (it's a data-visibility concern), but _whether the caller is even allowed to attempt the operation_ is the service's job. Auth and Users additionally hold an `AuthProvider` dependency for identity operations (create/ban/set-password/mint-session) that aren't table queries at all -- see "Infrastructure & providers" below.
 - **Mapper** (`infrastructure/*.mapper.ts`) -- one direction only: Drizzle row → domain entity, sync, no business logic.
 - **Presenter** (`api/*.presenter.ts`) -- the other direction: domain entity → API response DTO, async where resolving something (e.g. signed image URLs) needs I/O. Kept explicit even where entity and DTO shapes are currently identical, so they can diverge later without leaking into each other.
 - **Entity** (`domain/*.entity.ts`) -- the in-memory business object a service actually operates on, deliberately distinct from both the raw Drizzle row (infrastructure-only, allowed to carry ORM quirks like a `Date` instead of a string) and the wire DTO (camelCase, with resolved image URLs and computed fields where relevant).
@@ -402,7 +418,8 @@ of needing a logger threaded through every function signature.
 - **Levels**: 2xx/3xx → `info`, 4xx → `warn`, 5xx or a thrown non-HTTP error → `error`. `common/middleware/error.middleware.ts` uses `req.log.error`/`req.log.warn` (never raw `console.*`) so every error that reaches it is structured and carries the request id. `pino` also supports `trace`/`debug` (developer diagnostics) and `fatal` (unrecoverable/startup) -- selected via `LOG_LEVEL`.
 - **Cloud-native, stdout only**: plain JSON on stdout in production (`NODE_ENV=production`); pretty-printed + colorized in development (`pino-pretty`). **No file logging, no rotation, no local log storage** -- the platform (Railway/Render/Fly/etc.) collects stdout. Nothing in the app ever opens a log file.
 - **Request context on every line**: a generated (or client-propagated) `x-request-id` is stamped on the response header and on the request/response log, and every authenticated request log also carries `userId`/`role`. An AsyncLocalStorage request context (`common/context/request-context.ts`, populated once by `request-context.middleware.ts` right after the logger, and by `requireAuth`) carries the same request id + user into code that has no `req` -- the audit logger and the slow-query logger -- so **one request id ties together the request log, every app log during that request, slow-query logs, audit records, and the error response**.
-- **Slow-query observability**: `common/database/query-timing.ts` wraps the pg pool so any statement over `SLOW_QUERY_MS` (default 250) is logged at `warn` with its duration, the (parameter-free) SQL text, and the correlating request id/user. It only provides visibility -- it never changes or optimizes a query. Parameter *values* are never logged (they can carry customer data).
+- **Slow-query observability**: `common/database/query-timing.ts` wraps the pg pool so any statement over `SLOW_QUERY_MS` (default 250) is logged at `warn` with its duration, the (parameter-free) SQL text, and the correlating request id/user. It only provides visibility -- it never changes or optimizes a query. Parameter _values_ are never logged (they can carry customer data).
+- **Database-error tracing**: the same pool wrapper logs **every failed query** at `error` right where it happens -- with the pg SQLSTATE `code`, a readable `label` (e.g. `unique_violation`, `check_violation`, `deadlock_detected`, `connection_refused`), the `constraint`/`table`, the (parameter-free) SQL, and request id/user (`common/database/db-logging.ts` extracts the safe fields). This is deliberate defence against _silent_ DB failures: a database error is traced at the DB layer even if a caller later swallows it or it never reaches the HTTP error middleware. The connection-pool `error` listener, the readiness check, and the 5xx error middleware all log through the same `describeDbError` helper. **It never logs pg's `detail`/`where`** -- those carry the offending row values (PII); the code + constraint + table are enough to diagnose which invariant failed without logging customer data.
 - **Redaction**: `authorization` and `cookie` headers (request and response) are redacted to `[redacted]` -- tokens/cookies must never reach a log line, in dev or prod. Never add a field containing a raw token/password to a log call without redacting it the same way.
 - **Startup logging** (`src/index.ts`) uses the same `logger` instance directly, not `req.log` (there's no request yet).
 
@@ -433,6 +450,14 @@ of needing a logger threaded through every function signature.
 
 ### RBAC
 
+There are **six roles** (`domain/roles.ts`): `owner_manager`, `designer`,
+`master_tailor`, `accountant`, `production_manager`, and `worker`. A
+**Production Manager** is a designer that can view/edit/search _any_ order (not
+just assigned) and owns the "Production Manager Received" stage; a **Worker** is
+a shop-floor role like a master tailor for status purposes but with no dashboard
+(the web nav is empty; `/orders` redirects to `/scan`) — it only scans an order
+QR and views/advances it. See ADR 0005 for the full rationale.
+
 `profiles.role` (not client-writable JWT metadata) is the authorization
 source of truth. `requireCapability('orders:read')` etc. gate access at the
 controller layer against the capability matrix in `domain/capabilities.ts`;
@@ -460,12 +485,37 @@ ledger; `amountPaid`/`outstanding` on every `Order` response are always the
 real `SUM(payments.amount)` (`DrizzleOrdersRepository.sumPaymentsForOrder`/
 `sumPaymentsForOrders`) -- never stored, always derived at read time.
 
+**Ledger writes are atomic and concurrency-safe.** The three mutations
+(`recordPayment`/`editPayment`/`removePayment` in
+`drizzle-payments.repository.ts`) each run in one transaction that first locks
+the order row (`SELECT ... FOR UPDATE`), then re-reads the ledger sum, enforces
+the no-overpayment invariant, writes, and recomputes `payment_status`. So two
+staff recording a payment on the same order at once serialize -- one commits,
+the other re-reads the updated sum under the lock and is rejected with
+`PAYMENT_EXCEEDS_TOTAL` -- instead of both passing a stale check and overpaying
+(the same row-lock pattern as `updateStatus`; proven by a concurrency
+integration test). See ADR 0005.
+
+**Money — one way, decimal, string on the wire.** All money is `numeric(12,2)`
+in Postgres and crosses every boundary (entity, DTO, JSON, and the frontend) as
+a 2-decimal **string** like `"1500.00"` — never a JS `number` (JSON numbers are
+IEEE-754 floats and can drift; a string is exact). `common/money/money.ts` is
+the single place money math/formatting happens (wraps **decimal.js**, half-up
+rounding): `money()`, `toMoneyString()`, `addMoney`, `subtractMoney`,
+`outstanding`, `moneyGreaterThan`, `moneyGte`, `isPositiveMoney`. Inbound money
+is validated + normalised by `moneyField`/`positiveMoneyField`
+(`common/money/money-schema.ts`), which accept a number _or_ a string and emit
+the canonical 2-dp string. Never do `+ - > Number() parseFloat` on money — add a
+helper to `money.ts` instead. Documented on the wire as the `Money`/`MoneyInput`
+schemas in `openapi.yaml`; see ADR 0005.
+
 **`payment_status` is DERIVED from the ledger, never chosen by hand**
 (`derivePaymentStatus`, a small deliberate duplicate in both the Orders and
 Payments domains -- Domain layers don't import across modules, see ADR 0003):
 `unpaid` (nothing recorded) -> `advance_paid` (some, below the total) ->
 `fully_paid` (recorded sum reaches the total). Because it's derived, the old
 manual-status class of bugs (status disagreeing with the ledger) is gone:
+
 - `CreateOrderRequest` no longer accepts `paymentStatus`; a new order starts
   `unpaid`, and an advance collected at booking is recorded as the first
   ledger entry (`POST /orders/:id/payments` right after creation), which
@@ -484,6 +534,7 @@ manual-status class of bugs (status disagreeing with the ledger) is gone:
 The `sum(ledger) <= total_amount` invariant is guarded from **both**
 directions, so an order can never be "overpaid" (which would silently inflate
 collected revenue):
+
 - **Payment side** -- `assertDoesNotExceedTotal` (`PAYMENT_EXCEEDS_TOTAL`, 400):
   a payment can't push the recorded sum over `total_amount`.
 - **Order side** -- `assertTotalCoversLedger` (`ORDER_TOTAL_BELOW_PAID`, 400):
@@ -514,7 +565,7 @@ order exists, presents it with `{ viewOnly: true }` — which force-strips every
 payment field regardless of role, and the caller sees an `amountPaid` of 0. A
 genuinely missing order still 404s. Writes and the payment ledger are
 unaffected: `PATCH /orders/:id/status` still returns 403 for a non-assigned
-user, and `GET /orders/:id/payments` still 403s — view-only means *view*, and
+user, and `GET /orders/:id/payments` still 403s — view-only means _view_, and
 never exposes money. The web detail page mirrors this: it shows a "view only"
 banner and hides the status-history feed (which is itself row-scoped and names
 who changed what) for an outsider, leaving the visual status tracker as the
@@ -535,27 +586,32 @@ the insert; `updateStatus()` writes every subsequent one in the same
 transaction as the `orders.production_status` update -- the order and its
 history entry can never disagree, even if one write fails.
 
-**Stage-ownership RBAC, not the flat `orders:edit:*` capabilities.**
-`PATCH /orders/:id/status` is deliberately *not* gated by a
-`requireCapability` middleware call: which capability applies
-(`orders:status:design_stages` vs `orders:status:production_stages`) depends
-on the *target* status in the request body, which isn't known until it's
-parsed, so `OrdersService.updateStatus` delegates the entire authorization
-decision to `domain/order-status.rules.ts`'s `assertCanTransitionStatus`
-(same pattern `updateOrder` already uses for its field-split check, via
-`assertFieldsEditable`). Moving an order into a design-stage status
-(`design_pending`/`design_approved`/`fabric_purchased`, see
-`DESIGN_STAGE_STATUSES` in `domain/order-status.ts`) requires
-`orders:status:design_stages`; moving it into any other (production-stage)
-status requires `orders:status:production_stages`. This makes the
-design-to-production handoff a real workflow boundary: a Designer can move
-an order freely between design stages, but only a Master Tailor (or
-Owner/Manager) can be the one who advances it into `cutting`/`stitching`/etc
--- verified live that a Designer's attempt to jump straight to `cutting`
-gets a 403, and that a Master Tailor trying to move an order *back* into a
-design-stage status also gets one. Both roles' capabilities are `"assigned"`
-scoped, so an unassigned Designer/Master Tailor gets a 403 even for a status
-change within their own capability's stage.
+**Tiered stage RBAC + forward-only, not the flat `orders:edit:*` capabilities.**
+`PATCH /orders/:id/status` is deliberately _not_ gated by a
+`requireCapability` middleware call: which capability applies depends on the
+_target_ status in the request body, which isn't known until it's parsed, so
+`OrdersService.updateStatus` delegates the authorization decision to
+`domain/order-status.rules.ts`'s `assertCanChangeStage(role, newStatus)` (same
+pattern `updateOrder` uses for its field-split check, via
+`assertFieldsEditable`). Each of the 13 stages maps to one of three capability
+tiers via `STAGE_CAPABILITY` in `domain/order-status.ts` (see ADR 0005):
+
+- `orders:status:design` — Design Pending, Design Approved (owner / designer /
+  production_manager)
+- `orders:status:pm_received` — Production Manager Received (owner /
+  production_manager only)
+- `orders:status:production` — Falls/Kutchu … Delivered (owner / designer /
+  production_manager / worker / master_tailor)
+
+The check is a **pure tier check with no ownership/`"assigned"` restriction** —
+whoever's role can reach a stage may advance any order to it (the earlier
+assigned-only rule was removed in ADR 0005). Movement is **forward-only**: the
+repository locks the row (`SELECT … FOR UPDATE`), reads the current stage, and
+rejects any move to an equal-or-earlier stage with
+`409 ORDER_STATUS_NOT_FORWARD`. That makes re-applying the current stage a no-op
+(no duplicate history row) and blocks reverts, and the row lock serialises two
+people advancing the same order at once (the loser gets the same 409) — see the
+concurrency integration test asserting `[200, 409]`.
 
 ### Dashboard stats & revenue report
 
@@ -614,17 +670,17 @@ matched as an order id.
 through this API's `modules/auth` endpoints, which are thin, stateless
 wrappers around Supabase Auth:
 
-| Endpoint | What it does |
-|---|---|
-| `POST /auth/login` | email+password → `{ accessToken, refreshToken, expiresAt, profile }` |
-| `POST /auth/refresh` | rotates a refresh token for a new pair |
-| `POST /auth/logout` | revokes the session server-side (`auth.admin.signOut`) -- not just "forget the token client-side" |
-| `POST /auth/password-reset-request` | always 204, whether or not the email matches an account (never leaks existence) |
-| `POST /auth/password-update` | requires a bearer token; updates the caller's own password |
-| `POST /auth/exchange-code` | exchanges a PKCE `?code=` from an email link for a session, for projects configured that way |
-| `POST /auth/qr-login` | Master Tailor QR login -- see "Account creation, passwords, and QR login" below |
-| `GET /auth/me` | the caller's profile, from the bearer token |
-| `GET /auth/bootstrap-status`, `POST /auth/bootstrap` | one-time first-Owner/Manager setup, self-disabling once an owner exists |
+| Endpoint                                             | What it does                                                                                      |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `POST /auth/login`                                   | email+password → `{ accessToken, refreshToken, expiresAt, profile }`                              |
+| `POST /auth/refresh`                                 | rotates a refresh token for a new pair                                                            |
+| `POST /auth/logout`                                  | revokes the session server-side (`auth.admin.signOut`) -- not just "forget the token client-side" |
+| `POST /auth/password-reset-request`                  | always 204, whether or not the email matches an account (never leaks existence)                   |
+| `POST /auth/password-update`                         | requires a bearer token; updates the caller's own password                                        |
+| `POST /auth/exchange-code`                           | exchanges a PKCE `?code=` from an email link for a session, for projects configured that way      |
+| `POST /auth/qr-login`                                | Master Tailor QR login -- see "Account creation, passwords, and QR login" below                   |
+| `GET /auth/me`                                       | the caller's profile, from the bearer token                                                       |
+| `GET /auth/bootstrap-status`, `POST /auth/bootstrap` | one-time first-Owner/Manager setup, self-disabling once an owner exists                           |
 
 `DrizzleAuthRepository` never touches Supabase directly for any of this --
 every one of those operations is a call to `common/auth/auth-provider.ts`'s
@@ -656,7 +712,7 @@ server-side on the spot, returned once in the response. See the Flow Map's
 
 - **Password scheme** (`common/crypto/credentials.ts`'s `generatePassword`): first name + `-` + an 8-character random suffix from a 57-symbol alphabet (visually-ambiguous characters like `0`/`O` and `1`/`l`/`I` excluded), e.g. `Aditya-9kQ2Xf7q`. Readable enough to write down or read aloud, with real entropy (~47 bits) so knowing the person's name gives no head start guessing it.
 - **Who can regenerate whose password** (`UsersService.generatePassword`): Owner/Manager can always regenerate a `designer` or `master_tailor` account's password. For `owner_manager`/`accountant` accounts, it's only available until `profiles.last_login_at` is set (i.e. before their first real login) -- `AuthService.login` records that timestamp, and only a password-based login counts, not a silent token refresh. After that, they're expected to use `POST /auth/password-reset-request` like everyone self-managing their own account.
-- **QR login** (`master_tailor` only): `POST /users/:id/qr-token` generates a high-entropy opaque token, stores only its SHA-256 hash (`qr_login_tokens` -- a table with no `anon`/`authenticated` grant at all, reachable only through this API's service-role client; see the migration comment for why it isn't just a column on `profiles`), and returns the raw token/URL once. Regenerating -- or deactivating the account -- immediately invalidates the previous one. `POST /auth/qr-login` verifies the hash, then mints a real session via Supabase's admin `generateLink` (magic-link type) immediately redeemed server-side via `verifyOtp` -- the link is never emailed, `generateLink` is used purely as an internal "issue a session for this user" primitive. See the Flow Map's QR diagrams.
+- **QR login** (`master_tailor` and `worker` -- the two shop-floor roles, `QR_LOGIN_ROLES`): `POST /users/:id/qr-token` generates a high-entropy opaque token, stores only its SHA-256 hash (`qr_login_tokens` -- a table with no `anon`/`authenticated` grant at all, reachable only through this API's service-role client; see the migration comment for why it isn't just a column on `profiles`), and returns the raw token/URL once. Regenerating -- or deactivating the account -- immediately invalidates the previous one. `POST /auth/qr-login` verifies the hash, then mints a real session via Supabase's admin `generateLink` (magic-link type) immediately redeemed server-side via `verifyOtp` -- the link is never emailed, `generateLink` is used purely as an internal "issue a session for this user" primitive. See the Flow Map's QR diagrams.
 - **Listing & lifecycle**: `GET /users` is server-side searchable (name/email, case-insensitive) and offset-paginated (`{ users, total, limit, offset }`, `limit` clamped 1-100) -- the admin screen never loads every account at once. `GET /users/:id` backs the per-user detail page. Deactivation is reversible: `POST /users/:id/reactivate` flips `profiles.active` back on and lifts the Supabase Auth ban (`unbanUser`); a fresh QR must be re-issued since deactivation cleared the old one.
 - **Order QR**: unrelated to login -- needleye-web renders a QR (via `qrcode.react`) on each order's detail page that just links to that order's own (already auth-gated, already role-scoped) URL. Nothing new on this API's side beyond the read-side payment-field stripping below.
 
@@ -681,8 +737,8 @@ the same change -- see "Keeping this documentation in sync" below.
 
 ## Flow map
 
-These diagrams show *how* a request moves through the layers described
-above -- the OpenAPI doc above covers *what* each endpoint accepts/returns.
+These diagrams show _how_ a request moves through the layers described
+above -- the OpenAPI doc above covers _what_ each endpoint accepts/returns.
 
 ### Every request, generically
 
@@ -936,66 +992,67 @@ sequenceDiagram
 
     User->>API: PATCH /orders/:id/status { status }
     API->>Svc: updateStatus(ctx, id, status)
-    Svc->>Repo: findBasicById(id)
-    Repo-->>Svc: { designerId, masterTailorId, ... }
-    Svc->>Rules: assertCanTransitionStatus(role, status, order, callerId)
-    Rules->>Rules: isDesignStage = DESIGN_STAGE_STATUSES.includes(status)
-    Rules->>Rules: getCapabilityScope(role, isDesignStage ? "orders:status:design_stages" : "orders:status:production_stages")
-    alt role has no access to this stage at all
-        Rules-->>Svc: throws ForbiddenError
-    else scope is "assigned" and caller isn't the stage's owner (designerId/masterTailorId)
-        Rules-->>Svc: throws ForbiddenError
+    Svc->>Rules: assertCanChangeStage(role, status)
+    Rules->>Rules: getCapabilityScope(role, STAGE_CAPABILITY[status])
+    alt role's tier can't reach this stage
+        Rules-->>Svc: throws ForbiddenError (403)
     else allowed
         Svc->>Repo: updateStatus(id, status, callerId)
-        Repo->>DB: UPDATE orders SET production_status, updated_by
-        Repo->>DB: INSERT INTO order_status_history (status, label, changed_by)
-        Note over Repo,DB: one transaction -- order and history row never disagree
-        DB-->>Repo: committed
-        Repo-->>Svc: OrderEntity
-        Svc-->>API: OrderResponseDto
-        API-->>User: 200 { order }
+        Repo->>DB: BEGIN; SELECT production_status FROM orders WHERE id = :id FOR UPDATE
+        DB-->>Repo: current stage (row locked)
+        alt stageIndex(status) <= stageIndex(current)  (revert, re-apply, or lost race)
+            Repo-->>Svc: throws ConflictError (409 ORDER_STATUS_NOT_FORWARD)
+        else forward move
+            Repo->>DB: UPDATE orders SET production_status, updated_by
+            Repo->>DB: INSERT INTO order_status_history (status, label, changed_by)
+            Note over Repo,DB: one transaction + row lock -- forward-only, race-safe, no duplicate history
+            DB-->>Repo: committed
+            Repo-->>Svc: OrderEntity
+            Svc-->>API: OrderResponseDto
+            API-->>User: 200 { order }
+        end
     end
 ```
 
 ### Route map -- every endpoint, at a glance
 
-| Method & path | Auth | Capability | Controller | Service method | Repository method |
-|---|---|---|---|---|---|
-| GET `/auth/me` | bearer | -- | auth.routes.ts | (none -- `req.profile` from middleware) | -- |
-| GET `/auth/bootstrap-status` | none | -- | auth.routes.ts | `getBootstrapStatus` | `countOwnerManagers` |
-| POST `/auth/bootstrap` | none | -- | auth.routes.ts | `bootstrap` | `countOwnerManagers`, `createOwnerManagerUser` |
-| POST `/auth/login` | none | -- | auth.routes.ts | `login` | `signInWithPassword`, `getProfile` |
-| POST `/auth/refresh` | none | -- | auth.routes.ts | `refresh` | `refreshSession`, `getProfile` |
-| POST `/auth/logout` | bearer | -- | auth.routes.ts | `logout` | `signOut` |
-| POST `/auth/password-reset-request` | none | -- | auth.routes.ts | `requestPasswordReset` | `requestPasswordReset` |
-| POST `/auth/password-update` | bearer | -- | auth.routes.ts | `updatePassword` | `updatePassword` |
-| POST `/auth/exchange-code` | none | -- | auth.routes.ts | `exchangeCode` | `exchangeCodeForSession`, `getProfile` |
-| POST `/auth/qr-login` | none | -- | auth.routes.ts | `qrLogin` | `signInWithQrToken` |
-| GET `/users` | bearer | `users:manage` | users.routes.ts | `listUsers` | `findMany`, `countMany` (searchable, paginated) |
-| GET `/users/:id` | bearer | `users:manage` | users.routes.ts | `getUser` | `findById` |
-| POST `/users` | bearer | `users:manage` | users.routes.ts | `createUser` | `createUser` |
-| POST `/users/:id/generate-password` | bearer | `users:manage` | users.routes.ts | `generatePassword` | `findById`, `setPassword` |
-| POST `/users/:id/qr-token` | bearer | `users:manage` | users.routes.ts | `generateQrToken` | `findById`, `setQrToken` |
-| PATCH `/users/:id` | bearer | `users:manage` | users.routes.ts | `updateUser` | `updateProfile` |
-| POST `/users/:id/deactivate` | bearer | `users:manage` | users.routes.ts | `deactivateUser` | `updateProfile`, `banAuthUser`, `clearQrToken` |
-| POST `/users/:id/reactivate` | bearer | `users:manage` | users.routes.ts | `reactivateUser` | `findById`, `updateProfile`, `unbanAuthUser` |
-| GET `/orders` | bearer | `orders:read` | orders.routes.ts | `listOrders` | `findMany` (row-scoped; `?bucket=` dashboard filters) |
-| POST `/orders` | bearer | `orders:create` | orders.routes.ts | `createOrder` | `create` |
-| GET `/orders/stats` | bearer | `orders:read` | orders.routes.ts | `getStats` | `getStats` (row-scoped; registered before `/:id`) |
-| GET `/orders/revenue` | bearer | `reports:financial` | orders.routes.ts | `getMonthlyRevenue` | `getMonthlyRevenue` (registered before `/:id`) |
-| GET `/orders/staff-report` | bearer | `reports:staff` | orders.routes.ts | `getStaffReport` | `getStaffReport` (one designer/master on demand; registered before `/:id`) |
-| GET `/orders/ledger-events` | bearer | `reports:financial` | orders.routes.ts | `getLedgerEvents` | `getLedgerEvents` (payment audit trail; paginated; registered before `/:id`) |
-| GET `/orders/:id` | bearer | `orders:read` | orders.routes.ts | `getOrder` | `findById` row-scoped, else `findAnyById` (view-only outsider, payments stripped) |
-| PATCH `/orders/:id` | bearer | field-split, see below | orders.routes.ts | `updateOrder` | `findBasicById`, `update` |
-| PATCH `/orders/:id/status` | bearer | stage-split, see "Order status history & Kanban" below | orders.routes.ts | `updateStatus` | `findBasicById`, `updateStatus` |
-| GET `/orders/:id/history` | bearer | `orders:read` | orders.routes.ts | `getOrderHistory` | `findById` (row-scoped), `listStatusHistory` |
-| POST `/orders/:id/images` | bearer | `orders:edit:customer_product_fields` | orders.routes.ts | `uploadOrderImage` | `upsertImage` |
-| DELETE `/orders/:id/images/:slot` | bearer | `orders:edit:customer_product_fields` | orders.routes.ts | `deleteOrderImage` | `findImage`, `deleteImage` |
-| GET `/orders/:orderId/payments` | bearer | `payments:read` | payments.routes.ts | `listPayments` | `findOrderContext`, `findByOrderId` |
-| POST `/orders/:orderId/payments` | bearer | `payments:manage` | payments.routes.ts | `addPayment` | `findOrderContext`, `sumByOrderId`, `create` |
-| PATCH `/orders/:orderId/payments/:paymentId` | bearer | `payments:manage` | payments.routes.ts | `updatePayment` | `findOrderContext`, `findById`, `sumByOrderId`, `update` |
-| DELETE `/orders/:orderId/payments/:paymentId` | bearer | `payments:manage` | payments.routes.ts | `deletePayment` | `findOrderContext`, `findById`, `sumByOrderId`, `delete` |
-| GET `/team-members` | bearer | -- (any authenticated role) | team-members.routes.ts | `listActive` | `findActive` |
+| Method & path                                 | Auth   | Capability                                             | Controller             | Service method                          | Repository method                                                                 |
+| --------------------------------------------- | ------ | ------------------------------------------------------ | ---------------------- | --------------------------------------- | --------------------------------------------------------------------------------- |
+| GET `/auth/me`                                | bearer | --                                                     | auth.routes.ts         | (none -- `req.profile` from middleware) | --                                                                                |
+| GET `/auth/bootstrap-status`                  | none   | --                                                     | auth.routes.ts         | `getBootstrapStatus`                    | `countOwnerManagers`                                                              |
+| POST `/auth/bootstrap`                        | none   | --                                                     | auth.routes.ts         | `bootstrap`                             | `countOwnerManagers`, `createOwnerManagerUser`                                    |
+| POST `/auth/login`                            | none   | --                                                     | auth.routes.ts         | `login`                                 | `signInWithPassword`, `getProfile`                                                |
+| POST `/auth/refresh`                          | none   | --                                                     | auth.routes.ts         | `refresh`                               | `refreshSession`, `getProfile`                                                    |
+| POST `/auth/logout`                           | bearer | --                                                     | auth.routes.ts         | `logout`                                | `signOut`                                                                         |
+| POST `/auth/password-reset-request`           | none   | --                                                     | auth.routes.ts         | `requestPasswordReset`                  | `requestPasswordReset`                                                            |
+| POST `/auth/password-update`                  | bearer | --                                                     | auth.routes.ts         | `updatePassword`                        | `updatePassword`                                                                  |
+| POST `/auth/exchange-code`                    | none   | --                                                     | auth.routes.ts         | `exchangeCode`                          | `exchangeCodeForSession`, `getProfile`                                            |
+| POST `/auth/qr-login`                         | none   | --                                                     | auth.routes.ts         | `qrLogin`                               | `signInWithQrToken`                                                               |
+| GET `/users`                                  | bearer | `users:manage`                                         | users.routes.ts        | `listUsers`                             | `findMany`, `countMany` (searchable, paginated)                                   |
+| GET `/users/:id`                              | bearer | `users:manage`                                         | users.routes.ts        | `getUser`                               | `findById`                                                                        |
+| POST `/users`                                 | bearer | `users:manage`                                         | users.routes.ts        | `createUser`                            | `createUser`                                                                      |
+| POST `/users/:id/generate-password`           | bearer | `users:manage`                                         | users.routes.ts        | `generatePassword`                      | `findById`, `setPassword`                                                         |
+| POST `/users/:id/qr-token`                    | bearer | `users:manage`                                         | users.routes.ts        | `generateQrToken`                       | `findById`, `setQrToken`                                                          |
+| PATCH `/users/:id`                            | bearer | `users:manage`                                         | users.routes.ts        | `updateUser`                            | `updateProfile`                                                                   |
+| POST `/users/:id/deactivate`                  | bearer | `users:manage`                                         | users.routes.ts        | `deactivateUser`                        | `updateProfile`, `banAuthUser`, `clearQrToken`                                    |
+| POST `/users/:id/reactivate`                  | bearer | `users:manage`                                         | users.routes.ts        | `reactivateUser`                        | `findById`, `updateProfile`, `unbanAuthUser`                                      |
+| GET `/orders`                                 | bearer | `orders:read`                                          | orders.routes.ts       | `listOrders`                            | `findMany` (row-scoped; `?bucket=` dashboard filters)                             |
+| POST `/orders`                                | bearer | `orders:create`                                        | orders.routes.ts       | `createOrder`                           | `create`                                                                          |
+| GET `/orders/stats`                           | bearer | `orders:read`                                          | orders.routes.ts       | `getStats`                              | `getStats` (row-scoped; registered before `/:id`)                                 |
+| GET `/orders/revenue`                         | bearer | `reports:financial`                                    | orders.routes.ts       | `getMonthlyRevenue`                     | `getMonthlyRevenue` (registered before `/:id`)                                    |
+| GET `/orders/staff-report`                    | bearer | `reports:staff`                                        | orders.routes.ts       | `getStaffReport`                        | `getStaffReport` (one designer/master on demand; registered before `/:id`)        |
+| GET `/orders/ledger-events`                   | bearer | `reports:financial`                                    | orders.routes.ts       | `getLedgerEvents`                       | `getLedgerEvents` (payment audit trail; paginated; registered before `/:id`)      |
+| GET `/orders/:id`                             | bearer | `orders:read`                                          | orders.routes.ts       | `getOrder`                              | `findById` row-scoped, else `findAnyById` (view-only outsider, payments stripped) |
+| PATCH `/orders/:id`                           | bearer | field-split, see below                                 | orders.routes.ts       | `updateOrder`                           | `findBasicById`, `update`                                                         |
+| PATCH `/orders/:id/status`                    | bearer | stage-split, see "Order status history & Kanban" below | orders.routes.ts       | `updateStatus`                          | `findBasicById`, `updateStatus`                                                   |
+| GET `/orders/:id/history`                     | bearer | `orders:read`                                          | orders.routes.ts       | `getOrderHistory`                       | `findById` (row-scoped), `listStatusHistory`                                      |
+| POST `/orders/:id/images`                     | bearer | `orders:edit:customer_product_fields`                  | orders.routes.ts       | `uploadOrderImage`                      | `upsertImage`                                                                     |
+| DELETE `/orders/:id/images/:slot`             | bearer | `orders:edit:customer_product_fields`                  | orders.routes.ts       | `deleteOrderImage`                      | `findImage`, `deleteImage`                                                        |
+| GET `/orders/:orderId/payments`               | bearer | `payments:read`                                        | payments.routes.ts     | `listPayments`                          | `findOrderContext`, `findByOrderId`                                               |
+| POST `/orders/:orderId/payments`              | bearer | `payments:manage`                                      | payments.routes.ts     | `addPayment`                            | `findOrderContext`, `sumByOrderId`, `create`                                      |
+| PATCH `/orders/:orderId/payments/:paymentId`  | bearer | `payments:manage`                                      | payments.routes.ts     | `updatePayment`                         | `findOrderContext`, `findById`, `sumByOrderId`, `update`                          |
+| DELETE `/orders/:orderId/payments/:paymentId` | bearer | `payments:manage`                                      | payments.routes.ts     | `deletePayment`                         | `findOrderContext`, `findById`, `sumByOrderId`, `delete`                          |
+| GET `/team-members`                           | bearer | -- (any authenticated role)                            | team-members.routes.ts | `listActive`                            | `findActive`                                                                      |
 
 `PATCH /orders/:id` isn't gated by a single capability at the router level --
 `OrdersService.updateOrder` checks `customer_product_fields` vs
