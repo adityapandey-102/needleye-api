@@ -1,7 +1,7 @@
 import type { Capability } from "./capabilities";
 
 /**
- * The production lifecycle. A single linear, forward-only flow of 13 stages
+ * The production lifecycle. A single linear, forward-only flow of 14 stages
  * (see STAGE_ORDER). `orders.production_status` always stores one of these
  * granular values.
  *
@@ -15,6 +15,7 @@ export const GRANULAR_STATUSES = [
   { value: "production_manager_received", label: "Production Manager Received" },
   { value: "falls_kutchu", label: "Falls / Kutchu" },
   { value: "fabric_purchased", label: "Fabric Purchased" },
+  { value: "dyeing", label: "Dyeing" },
   { value: "cutting", label: "Cutting" },
   { value: "stitching", label: "Stitching" },
   { value: "hand_work", label: "Hand Work" },
@@ -81,14 +82,15 @@ export const STAGE_CAPABILITY: Record<GranularStatus, StatusCapability> = {
   production_manager_received: "orders:status:pm_received",
   falls_kutchu: "orders:status:production",
   fabric_purchased: "orders:status:production",
+  dyeing: "orders:status:production",
   cutting: "orders:status:production",
   stitching: "orders:status:production",
   hand_work: "orders:status:production",
   machine_work: "orders:status:production",
   finishing: "orders:status:production",
-  quality_check: "orders:status:production",
-  alteration: "orders:status:production",
-  delivered: "orders:status:production",
+  quality_check: "orders:status:finalization",
+  alteration: "orders:status:finalization",
+  delivered: "orders:status:finalization",
 };
 
 export function stageCapability(status: GranularStatus): StatusCapability {
@@ -100,9 +102,17 @@ export const DESIGN_STAGE_STATUSES: GranularStatus[] = GRANULAR_STATUS_VALUES.fi
   (s) => STAGE_CAPABILITY[s] === "orders:status:design",
 );
 
-/** Production-tier stages (everything the floor works, incl. Delivered). */
+/**
+ * Every stage from the first floor stage (Falls/Kutchu) through Delivered -- a
+ * REPORTING grouping (it backs the dashboard's "In Production" count), not a
+ * permission tier. Deliberately defined by POSITION in the flow rather than by
+ * STAGE_CAPABILITY: the finalization tier split Quality Check / Alteration /
+ * Delivered off the production tier for permissions only, and deriving this
+ * from the tier would have silently dropped QC and Alteration from the
+ * in-production count.
+ */
 export const PRODUCTION_STAGE_STATUSES: GranularStatus[] = GRANULAR_STATUS_VALUES.filter(
-  (s) => STAGE_CAPABILITY[s] === "orders:status:production",
+  (s) => STAGE_ORDER[s] >= STAGE_ORDER.falls_kutchu,
 );
 
 /** Terminal/completed stages. Delivered is the only end state now. */

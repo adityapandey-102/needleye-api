@@ -1,0 +1,22 @@
+-- Drops the CHECK constraint on orders.product_category.
+--
+-- The product catalogue grew from 5 categories to 43 (six collections), and is
+-- expected to keep growing. The constraint listed the five original values
+-- (20260717000002_orders.sql, inline column check, so Postgres named it
+-- `orders_product_category_check`) and would reject every new category.
+--
+-- Rather than re-list 43 values -- and write another migration every time a
+-- category is added -- the database stops checking this column. Validation now
+-- lives in one place: the API's zod DTOs, built from PRODUCT_CATEGORY_VALUES
+-- (src/domain/product-categories.ts). This is safe because the API is the only
+-- writer to `orders` (service_role; no anon/authenticated insert/update grant).
+-- The trade-off -- the database no longer refuses a bad category on its own --
+-- was an explicit product decision.
+--
+-- Deliberately NOT done for production_status: stages change rarely and a bad
+-- value there corrupts the production flow, so that CHECK stays.
+--
+-- Loosens a rule only: every existing row stays valid, and the currently deployed
+-- app keeps working, so this is safe to apply before the new code deploys.
+
+alter table public.orders drop constraint if exists orders_product_category_check;

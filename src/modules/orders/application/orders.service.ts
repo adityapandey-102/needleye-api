@@ -3,7 +3,8 @@ import { BadRequestError, NotFoundError } from "../../../common/errors/app-error
 import { ERROR_CODES } from "../../../common/errors/error-codes";
 import { assertFieldsEditable, assertOwnershipForScopedEdit } from "../domain/order-edit.rules";
 import { assertTotalCoversLedger, derivePaymentStatus } from "../domain/order-ledger.rules";
-import { assertCanChangeStage } from "../domain/order-status.rules";
+import { assertCanChangeStage, assertCanSkipStages } from "../domain/order-status.rules";
+import { checkDeliveryDayCapacity, nearCapacityThreshold } from "../domain/delivery-capacity.rules";
 import { toOrderResponseDto } from "../api/order.presenter";
 import { toOrderStatusHistoryResponseDto } from "../api/order-status-history.presenter";
 import { toOrderStatsResponseDto } from "../api/order-stats.presenter";
@@ -21,7 +22,9 @@ import type {
   OrderListPage,
   NewOrderRecord,
   UpdateOrderRecord,
+  DueDateCapacityGuard,
 } from "./ports/orders-repository.port";
+import type { DeliveryLoadQuery, DeliveryLoadResponseDto } from "../api/dto/delivery-load.dto";
 import type { CreateOrderDto } from "../api/dto/create-order.dto";
 import type { UpdateOrderDto } from "../api/dto/update-order.dto";
 import type { OrderResponseDto } from "../api/dto/order.response.dto";
@@ -128,9 +131,54 @@ export class OrdersService {
     return toOrderResponseDto(any, "0.00", ctx.profile.role, await this.signImageUrls([any]), { viewOnly: true });
   }
 
+  /**
+   * GET /orders/delivery-load -- how many orders are due on each day in the
+   * window, shop-wide (not row-scoped: capacity is shop-wide and this is bare
+   * counts), plus the thresholds the calendar colours by.
+   */
+  async getDeliveryLoad(query: DeliveryLoadQuery): Promise<DeliveryLoadResponseDto> {
+    const capacity = env.DELIVERY_DAY_CAPACITY;
+    const days = await this.ordersRepository.countOrdersDueByDay({ from: query.from, to: query.to }, query.excludeOrderId);
+    return { capacity, nearCapacity: nearCapacityThreshold(capacity), days };
+  }
+
+  /**
+   * Builds the capacity guard handed to repository.create/update, which calls it
+   * under the per-date lock. Records the day's count in `outcome` when the
+   * booking is an override, so the caller can audit it AFTER the write commits
+   * (an audit row for a write that then rolled back would be a lie).
+   */
+  private deliveryCapacityGuard(
+    dueDate: string,
+    confirmedWithProductionManager: boolean,
+    outcome: { overriddenAt?: number },
+  ): DueDateCapacityGuard {
+    return ({ booked, previousDueDate }) => {
+      const { overridden } = checkDeliveryDayCapacity({
+        dueDate,
+        previousDueDate,
+        booked,
+        capacity: env.DELIVERY_DAY_CAPACITY,
+        confirmedWithProductionManager,
+      });
+      if (overridden) outcome.overriddenAt = booked;
+    };
+  }
+
+  private async auditDeliveryOverride(orderId: string, dueDate: string, booked: number): Promise<void> {
+    await this.audit.record({
+      action: AUDIT_ACTIONS.ORDER_DELIVERY_OVERRIDE,
+      entityType: AUDIT_ENTITIES.ORDER,
+      entityId: orderId,
+      metadata: { dueDate, bookedBefore: booked, capacity: env.DELIVERY_DAY_CAPACITY },
+    });
+  }
+
   async createOrder(ctx: AuthContext, dto: CreateOrderDto): Promise<OrderResponseDto> {
+    // The PM confirmation is a request flag, not an order field -- keep it out of the record.
+    const { confirmedWithProductionManager = false, ...fields } = dto;
     const record: NewOrderRecord = {
-      ...dto,
+      ...fields,
       bookingDate: dto.bookingDate ?? new Date().toISOString().slice(0, 10),
       nextPaymentDate: dto.nextPaymentDate ?? null,
       // Payment status is derived from the ledger, never chosen at creation. A
@@ -142,13 +190,20 @@ export class OrdersService {
       createdBy: ctx.authUserId,
       updatedBy: ctx.authUserId,
     };
-    const entity = await this.ordersRepository.create(record);
+    const capacity: { overriddenAt?: number } = {};
+    const entity = await this.ordersRepository.create(
+      record,
+      this.deliveryCapacityGuard(record.dueDate, confirmedWithProductionManager, capacity),
+    );
     await this.audit.record({
       action: AUDIT_ACTIONS.ORDER_CREATED,
       entityType: AUDIT_ENTITIES.ORDER,
       entityId: entity.id,
       metadata: { orderNumber: entity.orderNumber },
     });
+    if (capacity.overriddenAt !== undefined) {
+      await this.auditDeliveryOverride(entity.id, record.dueDate, capacity.overriddenAt);
+    }
     // A brand-new order has no ledger entries yet, but fetch for real rather
     // than assume 0 -- keeps this call site identical to every other one.
     const amountPaid = await this.ordersRepository.sumPaymentsForOrder(entity.id);
@@ -156,8 +211,10 @@ export class OrdersService {
   }
 
   async updateOrder(ctx: AuthContext, orderId: string, dto: UpdateOrderDto): Promise<OrderResponseDto> {
-    // `version` is the optimistic-lock token, not a field to write -- separate it out.
-    const { version: expectedVersion, ...fields } = dto;
+    // `version` is the optimistic-lock token and `confirmedWithProductionManager`
+    // a request flag -- neither is a field to write, so separate both out BEFORE
+    // the editable-fields check (which would reject them as unknown fields).
+    const { version: expectedVersion, confirmedWithProductionManager = false, ...fields } = dto;
     const submittedKeys = Object.keys(fields);
     if (submittedKeys.length === 0) throw new BadRequestError("No editable fields to update", ERROR_CODES.VALIDATION_NO_FIELDS);
 
@@ -178,13 +235,23 @@ export class OrdersService {
       assertTotalCoversLedger(fields.totalAmount, sum);
       record.paymentStatus = derivePaymentStatus(sum, fields.totalAmount);
     }
-    const entity = await this.ordersRepository.update(orderId, record, expectedVersion);
+    // Only a submitted due date can move the order onto a full day; the guard
+    // itself skips an unchanged date (the edit form resends every field).
+    const capacity: { overriddenAt?: number } = {};
+    const guard =
+      fields.dueDate !== undefined
+        ? this.deliveryCapacityGuard(fields.dueDate, confirmedWithProductionManager, capacity)
+        : undefined;
+    const entity = await this.ordersRepository.update(orderId, record, expectedVersion, guard);
     await this.audit.record({
       action: AUDIT_ACTIONS.ORDER_UPDATED,
       entityType: AUDIT_ENTITIES.ORDER,
       entityId: orderId,
       metadata: { fields: submittedKeys },
     });
+    if (capacity.overriddenAt !== undefined && fields.dueDate !== undefined) {
+      await this.auditDeliveryOverride(orderId, fields.dueDate, capacity.overriddenAt);
+    }
     const amountPaid = await this.ordersRepository.sumPaymentsForOrder(orderId);
     return toOrderResponseDto(entity, amountPaid, ctx.profile.role, await this.signImageUrls([entity]));
   }
@@ -193,14 +260,18 @@ export class OrdersService {
    * PATCH /orders/:id/status -- deliberately not gated by requireCapability
    * (the applicable capability depends on the *target* status, which isn't
    * known until the body is parsed), so assertCanChangeStage owns the role/tier
-   * decision here. Forward-only ordering, idempotency, and concurrency are
+   * decision for the TARGET stage here, before touching the database. Forward-
+   * only ordering, idempotency, concurrency, and the no-skipping rule are
    * enforced atomically inside repository.updateStatus (row-locked), which also
    * 404s a missing order -- so no separate existence read is needed here.
    */
   async updateStatus(ctx: AuthContext, orderId: string, status: GranularStatus): Promise<OrderResponseDto> {
-    assertCanChangeStage(ctx.profile.role, status);
+    const role = ctx.profile.role;
+    assertCanChangeStage(role, status);
 
-    const entity = await this.ordersRepository.updateStatus(orderId, status, ctx.authUserId);
+    const entity = await this.ordersRepository.updateStatus(orderId, status, ctx.authUserId, (current) =>
+      assertCanSkipStages(role, current, status),
+    );
     await this.audit.record({
       action: AUDIT_ACTIONS.ORDER_STATUS_CHANGED,
       entityType: AUDIT_ENTITIES.ORDER,

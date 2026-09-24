@@ -32,8 +32,10 @@ schedule.
 
 ```bash
 npm install
-npx supabase start
+npx supabase@2.117.0 start -x imgproxy,edge-runtime,logflare,vector
 # ⤷ prints ANON_KEY / SERVICE_ROLE_KEY
+# The version is pinned and four unused containers excluded -- see
+# "Local stack maintenance" below for why, and how to upgrade.
 
 cp .env.example .env
 # Fill in SUPABASE_URL (default http://127.0.0.1:54321 is already set) and
@@ -45,7 +47,7 @@ npm run dev
 # ⤷ http://localhost:4000, liveness at /health, readiness (DB-checked) at /health/ready, interactive API docs at /api-docs
 ```
 
-Stop the stack with `npx supabase stop` (data persists); `npx supabase db reset` wipes and re-applies all migrations from `supabase/migrations/`.
+Stop the stack with `npx supabase@2.117.0 stop` (data persists); `npx supabase@2.117.0 db reset` wipes and re-applies all migrations from `supabase/migrations/`. **Always include the version** -- see "Local stack maintenance".
 
 Or, once `.env` is filled in, **one command** does the whole local bring-up
 (start Postgres/Auth/Storage, apply any pending migrations, seed dev data,
@@ -57,6 +59,49 @@ up): `.\start-dev.ps1` (PowerShell). It starts Supabase, applies migrations,
 and opens the API and web dev servers each in their own window; `-Seed`
 also seeds demo data, `-Reset` wipes+re-applies the DB first. See the header
 comment in `start-dev.ps1` for details.
+
+### Local stack maintenance
+
+**The Supabase CLI version is pinned, everywhere, on purpose.** A bare
+`npx supabase` resolves whatever is newest on the registry that day, and each
+CLI release pins its *own* Docker image tags (postgres, gotrue, storage-api,
+studio, realtime, kong). A newer CLI therefore asks Docker for tags you don't
+have, so the whole multi-GB image set is downloaded again and the previous
+images are orphaned. Pinning means identical tags every run: Docker reuses
+what's on disk and downloads nothing.
+
+The pin lives in **one** place -- `$SupabaseCli` at the top of
+`../start-dev.ps1`. The commands in this README quote the same version; keep
+them in step when it changes.
+
+Four containers are excluded (`-x imgproxy,edge-runtime,logflare,vector`)
+because nothing here uses them: `storage.image_transformation` is off, there
+is no `supabase/functions/`, and `[analytics]` is disabled (`vector` only
+ships logs to it). Re-enable one in `config.toml` and drop it from the list.
+Note the names are *container* names, not config sections -- the analytics
+container is `logflare`; passing `analytics` makes the CLI warn and ignore it.
+`start -x bogus` prints the valid list.
+
+**Upgrading.** Don't do it on a schedule -- do it when something asks for it:
+hosted Supabase changes its Postgres major version (`config.toml`'s
+`major_version` must match the remote), you need a CLI feature you don't have,
+or you're starting a stretch of backend work after a long gap. "It's been a
+while" is not a reason.
+
+`.\start-dev.ps1` checks on each run and *offers* a newer CLI when one exists.
+Answer `n` (the default) and nothing changes. Answer `y` and it starts the
+stack on the new images, applies migrations, runs `test:unit` + `test:integration`
+against it, and rewrites the pin **only if they pass** -- a failure leaves the
+pin alone, so the next plain run is back on the known-good version and your old
+images are still on disk. `-NoUpdateCheck` skips the check entirely. Run
+`npm run test:rbac` afterwards too; it needs the API server up, so the script
+can't gate on it.
+
+> **Never `docker system prune -a`.** With `-a` Docker deletes every image not
+> used by a *running* container -- do that while the stack is stopped and the
+> entire Supabase image set goes, forcing exactly the multi-GB re-download this
+> pinning exists to prevent. Plain `docker image prune` (dangling layers only)
+> is safe, and is the right way to reclaim images superseded by an upgrade.
 
 `npm run lint` (ESLint, flat config in `eslint.config.mjs`, type-aware via
 `typescript-eslint`'s `recommendedTypeChecked`), `npm run typecheck`, and
@@ -70,6 +115,7 @@ more scripts are useful for local development:
 - **`npm run seed`** (`src/db/seed.ts`) -- populates ~40 orders spanning every production status, payment state (unpaid/advance/fully, with the status **derived** from the ledger it records), and due-date bucket, with real multi-step status history and a handful of reference images, plus the 5 designer / 5 master-tailor / 1 accountant staff accounts (the designer/master names are the prototype's own, for continuity). Safe to re-run -- staff are looked up by email first, so a second run reuses the same accounts instead of duplicating them; it never deletes anything.
 - **`npm run test:integration`** (`tests/integration/`, Vitest) -- repository↔database, service↔repository, authentication, and API-endpoint coverage against the real local Supabase stack (no mocking). Creates and tears down its own fixtures every run. See `tests/integration/README.md`.
 - **`npm run test:rbac`** (`tests/rbac-matrix.mjs`) -- a small, self-contained per-role 200/403 check against the running API: `orders:create`, `orders:edit:pricing_assignment`, `payments:read`/`payments:manage`, the status tiers (`orders:status:design`/`pm_received`/`production`), `users:manage`, row-scoping, and the unauthenticated case. Needs `SEED_OWNER_PASSWORD` set to an existing Owner/Manager's password; creates its own throwaway fixtures, so it never depends on `npm run seed` having been run first.
+- **`npm run test:perf`** (`scripts/perf/query-audit.ts`, local database only) -- the **query audit**. It captures the real SQL of every important repository call, re-runs it with `EXPLAIN ANALYZE` on 3 years of synthetic data (12k orders, 144k stage moves, 360k audit rows) inside a transaction it rolls back, and fails on a query over 150 ms, a large unexpected sequential scan, or an N+1. `--write` refreshes `docs/performance/query-audit.md`. Its fast sibling is the **query budget** (`tests/integration/query-budget.integration.test.ts`, part of `test:integration`): a page of 50 must cost the same number of queries as a page of 5, and page sizes are capped. Rules and reasons are in `docs/engineering-practices.md`; the latest audit is in `docs/performance/README.md`.
 
 ### Docker
 
@@ -121,8 +167,9 @@ codebase matters more than trimming a few files for the smaller modules.
 The remaining ADRs record decisions made after the conversion:
 `0004-operational-hardening.md` (request context, error codes, audit,
 rate limiting, optimistic locking), `0005-money-roles-status-flow-and-concurrency.md`
-(decimal money as strings, the two new roles, the 13-stage forward-only flow,
-concurrency safety), and `0006-production-deployment-and-database-privileges.md`
+(decimal money as strings, the two new roles, the forward-only stage flow --
+13 stages then, 14 since Dyeing -- concurrency safety; its 2026-09-24 amendment
+adds the finalization tier, the no-skip rule, and the Dyeing stage), and `0006-production-deployment-and-database-privileges.md`
 (the least-privilege runtime DB role, migration-vs-runtime credentials, the
 Session-mode pooler, `TRUST_PROXY`/`DB_POOL_MAX`/`API_PORT`, and why there are
 two Supabase keys).
@@ -170,8 +217,9 @@ src/
       storage-provider.ts            # StorageProvider interface -- see "Infrastructure & providers" below
       supabase-storage-provider.ts     # the (only) concrete implementation
   docs/openapi.ts               # loads openapi.yaml (repo root) at startup, served at GET /api-docs
+  docs/openapi.test.ts          # fails if openapi.yaml's ProductCategory / GranularStatus enums drift from the domain lists
   domain/                      # shared kernel: core business concepts used by MULTIPLE modules within this repo
-    roles.ts, capabilities.ts, order-status.ts, product-categories.ts, profile.ts
+    roles.ts, capabilities.ts, order-status.ts, product-categories.ts (43-category catalogue, 6 collections), profile.ts
     index.ts                     # barrel export
   modules/
     auth/                           # everything needleye-web needs to never touch Supabase directly -- see "Authentication" below
@@ -214,6 +262,18 @@ src/
         team-member.entity.ts                # TeamMemberEntity -- an intentionally empty domain-rules layer is honest for a pure lookup, not a failure of the pattern
       infrastructure/
         drizzle-team-members.repository.ts     # implements the port; reads `profiles` from modules/users/infrastructure/profile.schema.ts (see ADR 0003) -- no mapper file, the select already projects directly into entity shape
+    reports/                         # owner-only (reports:staff) team view: Working/Idle + the 7-day activity feed -- read-only
+      api/
+        reports.routes.ts                # controller -- composition root: new ReportsService(new DrizzleReportsRepository(), { timeZone: env.BUSINESS_TIMEZONE })
+        dto/reports.dto.ts                 # activity query schema (real date, page <= 100) + response shapes
+      application/
+        reports.service.ts                 # applies the rules; injectable clock so "today" is testable
+        ports/reports-repository.port.ts
+      domain/
+        staff-activity.rules.ts            # tracked roles, 45/30-day Working windows, shop-timezone "today", the 7-day window, payment.* exclusion
+        staff-activity.entity.ts
+      infrastructure/
+        drizzle-reports.repository.ts      # two raw-SQL reads over profiles / orders / order_status_history / audit_log (see ADR 0003)
     orders/                        # the largest module -- every layer earns its keep here, converted last
       api/
         orders.routes.ts                 # controller -- composition root: new OrdersService(new DrizzleOrdersRepository(), storageProvider)
@@ -230,7 +290,7 @@ src/
         order-status-history.entity.ts         # OrderStatusHistoryEntity -- one row in the status audit trail
         order-edit.rules.ts                    # assertFieldsEditable/assertOwnershipForScopedEdit -- the RBAC field-splitting + ownership invariants, framework-free
         order-ledger.rules.ts                    # derivePaymentStatus -- unpaid/advance_paid/fully_paid from the ledger sum, seen from the Orders side (a small, deliberate duplicate of Payments' own copy -- Domain layers don't import across modules, see ADR 0003)
-        order-status.rules.ts                      # assertCanChangeStage -- three-tier stage RBAC for PATCH /orders/:id/status (forward-only enforced in the repository), see "Order status history & Kanban" below
+        order-status.rules.ts                      # assertCanChangeStage (four-tier stage RBAC) + assertCanSkipStages (no jumping past a stage the role can't set) for PATCH /orders/:id/status -- forward-only + no-skip enforced under the repository's row lock, see "Order status history & Kanban" below
         order-visibility.rules.ts                    # canViewPaymentFields -- master_tailor's zero payment-visibility rule
       infrastructure/
         drizzle-orders.repository.ts               # implements the port; reads `profiles` (via order.relations.ts) from Users and `payments` from Payments (see ADR 0003)
@@ -593,15 +653,18 @@ _target_ status in the request body, which isn't known until it's parsed, so
 `OrdersService.updateStatus` delegates the authorization decision to
 `domain/order-status.rules.ts`'s `assertCanChangeStage(role, newStatus)` (same
 pattern `updateOrder` uses for its field-split check, via
-`assertFieldsEditable`). Each of the 13 stages maps to one of three capability
+`assertFieldsEditable`). Each of the 14 stages maps to one of four capability
 tiers via `STAGE_CAPABILITY` in `domain/order-status.ts` (see ADR 0005):
 
 - `orders:status:design` — Design Pending, Design Approved (owner / designer /
   production_manager)
 - `orders:status:pm_received` — Production Manager Received (owner /
   production_manager only)
-- `orders:status:production` — Falls/Kutchu … Delivered (owner / designer /
+- `orders:status:production` — Falls/Kutchu … Finishing (owner / designer /
   production_manager / worker / master_tailor)
+- `orders:status:finalization` — Quality Check / Trail, Alteration, Delivered
+  (owner / designer / production_manager — **not** master_tailor or worker:
+  these are sign-off stages, so the floor can't move an order into them)
 
 The check is a **pure tier check with no ownership/`"assigned"` restriction** —
 whoever's role can reach a stage may advance any order to it (the earlier
@@ -612,6 +675,130 @@ rejects any move to an equal-or-earlier stage with
 (no duplicate history row) and blocks reverts, and the row lock serialises two
 people advancing the same order at once (the loser gets the same 409) — see the
 concurrency integration test asserting `[200, 409]`.
+
+**No skipping past a gated stage.** A tier used to be enforced only for moving
+*into* a stage, never for jumping *over* it — so a designer could go Design
+Approved → Falls/Kutchu and skip Production Manager Received entirely, despite
+being unable to set it. `assertCanSkipStages(role, current, target)` now refuses
+a forward jump that passes over any stage the caller couldn't set
+(`403 ORDER_STATUS_TRANSITION_FORBIDDEN`). Ordinary skips still work — anyone who
+can reach Machine Work can also set Hand Work, so an order needing no hand work
+jumps straight past it. It needs the *current* stage, so it runs inside the same
+row-locked transaction as the forward-only check: the service passes it to
+`repository.updateStatus` as a guard, keeping the rule in the domain layer while
+enforcing it against the locked value rather than a possibly stale read.
+
+`PRODUCTION_STAGE_STATUSES` (which backs the dashboard's "In Production" count)
+is a *reporting* grouping defined by position — Falls/Kutchu through Delivered —
+not by permission tier. Deriving it from the tier would have silently dropped
+Quality Check and Alteration out of that count when the finalization tier was
+split off.
+
+### Product catalogue — validated in the API, not the database
+
+`domain/product-categories.ts` holds 43 categories in 6 collections (Upper
+Body, Full Body, Lower Body, Mens Wear, Kids Wear - Girls, Kids Wear - Boys),
+mirrored in needleye-web. The create/update DTOs build their zod enum from
+`PRODUCT_CATEGORY_VALUES`, and **that is the only validation**: migration
+`20260924000002` dropped the database CHECK on `orders.product_category`, so
+adding a category is a code change here and never a migration. Safe because the
+API is the sole writer to `orders` (service_role; `authenticated` has select
+only). Contrast `production_status`, whose CHECK is kept on purpose — stages
+change rarely and a bad value corrupts the production flow.
+
+Rules for editing the list: **never change or remove an existing `value`** —
+every order row stores it, so a rename orphans them (labels are display-only
+and can change freely). `value`s are correctly spelled even where a label keeps
+the business's own spelling ("Devided Skirt" → `divided_skirt`), so a label can
+be fixed without touching data. Mens Wear / Kids Wear values carry a `mens_` /
+`kids_` prefix, which is what keeps the repeated labels "Shirt" and "Pant"
+distinct. `src/docs/openapi.test.ts` fails if `openapi.yaml`'s `ProductCategory`
+(or `GranularStatus`) enum drifts from the code.
+
+### Delivery capacity — a soft daily cap with a recorded override
+
+The workshop can hand over about `DELIVERY_DAY_CAPACITY` orders a day (default
+10). Every order whose `due_date` is that day counts: any status, any payment
+state, delivered or not. The day is the booking unit, and nothing else is
+filtered.
+
+- **`GET /orders/delivery-load?from&to[&excludeOrderId]`** returns the count per
+  day (days with no orders are omitted), plus `capacity` and `nearCapacity`
+  (80%, rounded up). The web calendar colours days by these values. The range
+  is at most 200 days. `excludeOrderId` leaves out the order being edited, so it
+  doesn't count against its own day. Gated by `orders:create` (owner /
+  designer / PM), which covers every role that can set a due date.
+- **Booking a full day is refused, not blocked outright.** Create, and any edit
+  that *changes* `dueDate`, fails with 409 `DELIVERY_DAY_FULL` and details
+  `{dueDate, booked, capacity}`. It goes through only when the request carries
+  `confirmedWithProductionManager: true`. That flag is not an order field: it is
+  stripped before the DTO field checks. When it is used on a full day, the
+  service writes an `order.delivery_override` audit entry after commit
+  (`{dueDate, capacity, bookedBefore}`, actor = the caller). An edit that keeps
+  the same date is never re-checked, because the order already holds its slot.
+- **Race-safe, the same way as the status rules.** The check
+  (`delivery-capacity.rules.ts` → `checkDeliveryDayCapacity`) is handed to
+  `repository.create` / `update` as a guard. Inside the transaction, the
+  repository takes `pg_advisory_xact_lock(4201, hashtext(due_date))` for that
+  day (an edit also locks its own row `for update` first, to read its current
+  date), counts, runs the guard, then writes. Two bookings for the last slot
+  therefore serialise, and the second gets a 409. Different days never wait on
+  each other. `tests/integration/delivery-capacity.integration.test.ts` proves
+  it with a transaction that holds the day's lock. That test was checked
+  against a build with the lock removed, and it fails there.
+
+No migration: `due_date` was already indexed, and the lock is an advisory lock,
+not a table.
+
+### Owner reports — who is working, and what happened each day
+
+`modules/reports/` backs the web's `/reports` page. The whole module is
+gated by `reports:staff`, which only `owner_manager` has.
+
+- **`GET /reports/staff-activity`** lists every *active* designer, master
+  tailor, production manager and worker as `working` or `idle`. The owner and
+  accountant are never listed.
+  - A **designer** is Working while they have **created** an undelivered order
+    in the last **45** days.
+  - Everyone else is Working while they made the **most recent stage move** on
+    an undelivered order in the last **30** days. "Most recent" matters: when a
+    later stage move by someone else happens, the order passes to that person.
+    For each OPEN order it takes the single latest move
+    (`LATERAL … ORDER BY created_at DESC LIMIT 1` on
+    `order_status_history (order_id, created_at)`), so delivered orders'
+    history is never read.
+  - **Searched, filtered and paged in the database**: `?q=` (name, LIKE
+    wildcards escaped), `?role=`, `?status=`, `?limit=` (max 50) and
+    `?offset=`. It returns one page, `total`, and `counts` (Working/Idle over
+    the search + role filter, for the summary tiles). One query whatever the
+    page size; "last seen" is probed only for the rows on the page. The Staff
+    Report's person picker uses the same endpoint with `role=`.
+  - `openOrders` is how many orders qualify. `lastSeenAt` is their latest
+    audited action of any kind. The windows live in
+    `domain/staff-activity.rules.ts`, and the response echoes them so the UI
+    never hard-codes them.
+- **`GET /reports/activity-days`** returns today and the 6 days before it, in
+  the shop's timezone. It doesn't query the database.
+- **`GET /reports/activity?day&limit&offset`** returns one day of the audit
+  trail, newest first, paginated (at most 100 per page). Each event carries the
+  actor's name and role, plus the order number or account name.
+  - `payment.*` events are excluded: those are the Revenue & Ledger feed.
+  - A day outside the last 7 gets a 400. The web loads each day only when the
+    owner opens it.
+- **Days are shop days.** `BUSINESS_TIMEZONE` (default `Asia/Kolkata`) defines
+  midnight. The repository turns the day into a UTC range
+  (`(day::date)::timestamp at time zone tz` up to the next day), so the
+  `created_at` index is still used. A plain UTC day would run 05:30 to 05:30 in
+  India.
+
+Indexes (from the query audit, see `docs/performance/`): the partial
+`orders_open_created_idx` (open orders only) and
+`audit_log (actor_id, created_at desc)` in migration
+`20260925000001_reporting_indexes.sql`. The staff report's weekly "completed"
+count uses the partial `order_status_history_completed_idx`
+(`20260925000002_completed_events_index.sql`).
+`order.updated` audit metadata lists the fields the form *submitted*, not only
+the ones that changed, so the web feed just says "Edited order …".
 
 ### Dashboard stats & revenue report
 
@@ -712,7 +899,7 @@ server-side on the spot, returned once in the response. See the Flow Map's
 
 - **Password scheme** (`common/crypto/credentials.ts`'s `generatePassword`): first name + `-` + an 8-character random suffix from a 57-symbol alphabet (visually-ambiguous characters like `0`/`O` and `1`/`l`/`I` excluded), e.g. `Aditya-9kQ2Xf7q`. Readable enough to write down or read aloud, with real entropy (~47 bits) so knowing the person's name gives no head start guessing it.
 - **Who can regenerate whose password** (`UsersService.generatePassword`): Owner/Manager can always regenerate a `designer` or `master_tailor` account's password. For `owner_manager`/`accountant` accounts, it's only available until `profiles.last_login_at` is set (i.e. before their first real login) -- `AuthService.login` records that timestamp, and only a password-based login counts, not a silent token refresh. After that, they're expected to use `POST /auth/password-reset-request` like everyone self-managing their own account.
-- **QR login** (`master_tailor` and `worker` -- the two shop-floor roles, `QR_LOGIN_ROLES`): `POST /users/:id/qr-token` generates a high-entropy opaque token, stores only its SHA-256 hash (`qr_login_tokens` -- a table with no `anon`/`authenticated` grant at all, reachable only through this API's service-role client; see the migration comment for why it isn't just a column on `profiles`), and returns the raw token/URL once. Regenerating -- or deactivating the account -- immediately invalidates the previous one. `POST /auth/qr-login` verifies the hash, then mints a real session via Supabase's admin `generateLink` (magic-link type) immediately redeemed server-side via `verifyOtp` -- the link is never emailed, `generateLink` is used purely as an internal "issue a session for this user" primitive. See the Flow Map's QR diagrams.
+- **QR login** (`designer`, `master_tailor`, `production_manager` and `worker`, `QR_LOGIN_ROLES` -- never `owner_manager` or `accountant`: a printed card is a bearer credential, and those two roles hold the pricing/payment/staff powers; for everyone else it's an extra way in, their password login is unaffected): `POST /users/:id/qr-token` generates a high-entropy opaque token, stores only its SHA-256 hash (`qr_login_tokens` -- a table with no `anon`/`authenticated` grant at all, reachable only through this API's service-role client; see the migration comment for why it isn't just a column on `profiles`), and returns the raw token/URL once. Regenerating -- or deactivating the account -- immediately invalidates the previous one. `POST /auth/qr-login` verifies the hash, then mints a real session via Supabase's admin `generateLink` (magic-link type) immediately redeemed server-side via `verifyOtp` -- the link is never emailed, `generateLink` is used purely as an internal "issue a session for this user" primitive. See the Flow Map's QR diagrams.
 - **Listing & lifecycle**: `GET /users` is server-side searchable (name/email, case-insensitive) and offset-paginated (`{ users, total, limit, offset }`, `limit` clamped 1-100) -- the admin screen never loads every account at once. `GET /users/:id` backs the per-user detail page. Deactivation is reversible: `POST /users/:id/reactivate` flips `profiles.active` back on and lifts the Supabase Auth ban (`unbanUser`); a fresh QR must be re-issued since deactivation cleared the old one.
 - **Order QR**: unrelated to login -- needleye-web renders a QR (via `qrcode.react`) on each order's detail page that just links to that order's own (already auth-gated, already role-scoped) URL. Nothing new on this API's side beyond the read-side payment-field stripping below.
 
@@ -901,7 +1088,11 @@ sequenceDiagram
     end
 ```
 
-### Generate a Master Tailor's QR login, then use it
+### Generate a staff member's QR login card, then use it
+
+Cards can be issued to Designer, Master Tailor, Production Manager and Worker
+accounts. The sign-in half (`POST /auth/qr-login`) has no role check of its own
+-- it only redeems tokens this issuing step produced.
 
 ```mermaid
 sequenceDiagram
@@ -910,14 +1101,14 @@ sequenceDiagram
     participant Svc as UsersService / AuthService
     participant Repo as DrizzleUsersRepository / DrizzleAuthRepository
     participant SB as Supabase Auth
-    participant Master as Master Tailor's phone
+    participant Master as Staff member's phone
 
     Owner->>API: POST /users/:id/qr-token
     API->>Svc: generateQrToken(targetId)
     Svc->>Repo: findById(targetId)
-    alt role !== master_tailor
-        Svc-->>Owner: throws BadRequestError
-    else role === master_tailor
+    alt role is owner_manager or accountant
+        Svc-->>Owner: 400 USER_QR_ROLE_UNSUPPORTED
+    else designer / master_tailor / production_manager / worker
         Svc->>Repo: setQrToken(targetId, sha256(rawToken))
         API-->>Owner: 201 { token, loginUrl }
         Note over Owner: QR (encoding loginUrl) shown once -- print/display it now
@@ -1014,6 +1205,69 @@ sequenceDiagram
     end
 ```
 
+### Book an order's due date (delivery capacity)
+
+```mermaid
+sequenceDiagram
+    participant User as needleye-web (owner_manager / designer / production_manager)
+    participant API as api/orders.routes.ts
+    participant Svc as OrdersService
+    participant Rules as delivery-capacity.rules.ts
+    participant Repo as DrizzleOrdersRepository
+    participant DB as Postgres (transaction)
+    participant Audit as audit_log
+
+    User->>API: GET /orders/delivery-load?from=D&to=D (as the date is picked)
+    API-->>User: 200 { capacity, nearCapacity, days }  (the UI shows available / full)
+    User->>API: POST /orders { dueDate: D, ..., confirmedWithProductionManager? }
+    API->>Svc: createOrder(ctx, body)  (flag stripped from the order fields)
+    Svc->>Repo: create(data, guard)
+    Repo->>DB: BEGIN; pg_advisory_xact_lock(4201, hashtext(D))
+    Repo->>DB: SELECT count(*) FROM orders WHERE due_date = D
+    DB-->>Repo: booked
+    Repo->>Rules: guard({ booked, previousDueDate: null })
+    alt booked >= capacity and not confirmed
+        Rules-->>Repo: throws ConflictError (409 DELIVERY_DAY_FULL, {dueDate, booked, capacity})
+        Repo-->>User: 409 (rolled back) -> the web reopens the full-day dialog
+    else room left, or confirmed with the Production Manager
+        Repo->>DB: INSERT INTO orders ...; COMMIT (lock released)
+        opt the day was full (override used)
+            Svc->>Audit: order.delivery_override {dueDate, capacity, bookedBefore}
+        end
+        Svc-->>User: 201 { order }
+    end
+    Note over Repo,DB: PATCH /orders/:id is the same, plus SELECT due_date FOR UPDATE first; unchanged date = no check
+```
+
+### Owner reports (team status + lazily loaded daily activity)
+
+```mermaid
+sequenceDiagram
+    participant Owner as needleye-web /reports (owner_manager)
+    participant API as api/reports.routes.ts
+    participant Svc as ReportsService
+    participant Rules as staff-activity.rules.ts
+    participant Repo as DrizzleReportsRepository
+    participant DB as Postgres
+
+    Owner->>API: GET /reports/staff-activity?q=&role=&status=&limit=20&offset=0 (search debounced in the web)
+    API->>API: requireCapability("reports:staff") -- anyone else 403
+    API->>Svc: getStaffActivity()
+    Svc->>Repo: getStaffWorkload({ designerWindowDays: 45, floorWindowDays: 30 })
+    Repo->>DB: ONE query: staff (q/role filter) + open orders created (designers) + LATERAL latest move per open order (floor) + counts + page (limit/offset) + last-seen probe for the page rows
+    DB-->>Repo: rows
+    Svc->>Rules: staffStatus(openOrders) -> working / idle
+    API-->>Owner: 200 { windows, staff[] }
+
+    Owner->>API: GET /reports/activity-days
+    API-->>Owner: 200 { timeZone, today, days[7] }  (no DB; days are closed in the UI)
+    Owner->>API: GET /reports/activity?day=D  (only when the owner opens day D)
+    Svc->>Rules: assertActivityDay(D, today in BUSINESS_TIMEZONE) -- else 400
+    Svc->>Repo: getActivityDay(D, tz, exclude "payment.", limit, offset)
+    Repo->>DB: audit_log where created_at in [D 00:00, D+1 00:00) shop time, action not like 'payment.%'
+    API-->>Owner: 200 { events, total }  ("Show more" asks for the next offset)
+```
+
 ### Route map -- every endpoint, at a glance
 
 | Method & path                                 | Auth   | Capability                                             | Controller             | Service method                          | Repository method                                                                 |
@@ -1039,6 +1293,7 @@ sequenceDiagram
 | GET `/orders`                                 | bearer | `orders:read`                                          | orders.routes.ts       | `listOrders`                            | `findMany` (row-scoped; `?bucket=` dashboard filters)                             |
 | POST `/orders`                                | bearer | `orders:create`                                        | orders.routes.ts       | `createOrder`                           | `create`                                                                          |
 | GET `/orders/stats`                           | bearer | `orders:read`                                          | orders.routes.ts       | `getStats`                              | `getStats` (row-scoped; registered before `/:id`)                                 |
+| GET `/orders/delivery-load`                   | bearer | `orders:create`                                        | orders.routes.ts       | `getDeliveryLoad`                       | `countOrdersDueByDay` (shop-wide; registered before `/:id`)                       |
 | GET `/orders/revenue`                         | bearer | `reports:financial`                                    | orders.routes.ts       | `getMonthlyRevenue`                     | `getMonthlyRevenue` (registered before `/:id`)                                    |
 | GET `/orders/staff-report`                    | bearer | `reports:staff`                                        | orders.routes.ts       | `getStaffReport`                        | `getStaffReport` (one designer/master on demand; registered before `/:id`)        |
 | GET `/orders/ledger-events`                   | bearer | `reports:financial`                                    | orders.routes.ts       | `getLedgerEvents`                       | `getLedgerEvents` (payment audit trail; paginated; registered before `/:id`)      |
@@ -1052,6 +1307,9 @@ sequenceDiagram
 | POST `/orders/:orderId/payments`              | bearer | `payments:manage`                                      | payments.routes.ts     | `addPayment`                            | `findOrderContext`, `sumByOrderId`, `create`                                      |
 | PATCH `/orders/:orderId/payments/:paymentId`  | bearer | `payments:manage`                                      | payments.routes.ts     | `updatePayment`                         | `findOrderContext`, `findById`, `sumByOrderId`, `update`                          |
 | DELETE `/orders/:orderId/payments/:paymentId` | bearer | `payments:manage`                                      | payments.routes.ts     | `deletePayment`                         | `findOrderContext`, `findById`, `sumByOrderId`, `delete`                          |
+| GET `/reports/staff-activity`                | bearer | `reports:staff`                                        | reports.routes.ts      | `getStaffActivity`                      | `getStaffWorkload` (searched/filtered/paged in SQL, max 50; owner + accountant never listed) |
+| GET `/reports/activity-days`                 | bearer | `reports:staff`                                        | reports.routes.ts      | `getActivityDays`                       | -- (no DB; shop-timezone day list)                                                |
+| GET `/reports/activity`                      | bearer | `reports:staff`                                        | reports.routes.ts      | `getActivityDay`                        | `getActivityDay` (one shop day of audit_log, payment.* excluded, paginated)     |
 | GET `/team-members`                           | bearer | -- (any authenticated role)                            | team-members.routes.ts | `listActive`                            | `findActive`                                                                      |
 
 `PATCH /orders/:id` isn't gated by a single capability at the router level --
@@ -1087,7 +1345,11 @@ wherever needleye-web is running/deployed), `WEB_APP_URL` (used only to
 build the link inside password-reset emails), `LOG_LEVEL` (`fatal` `error`
 `warn` `info` `debug` `trace`, default `info`), `ACCOUNTING_CYCLE_START_DAY`
 (day of month the monthly-revenue accounting period begins, 1-28, default 1 =
-calendar months -- backs `GET /orders/revenue`).
+calendar months -- backs `GET /orders/revenue`), `DELIVERY_DAY_CAPACITY`
+(orders that can be due on one day before booking it needs the Production
+Manager's OK, default 10 -- see "Delivery capacity"), `BUSINESS_TIMEZONE`
+(the shop's IANA timezone, default `Asia/Kolkata` -- where each day of the
+owner's activity feed starts and ends; see "Owner reports").
 
 ## Deployment
 

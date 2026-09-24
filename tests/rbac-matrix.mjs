@@ -6,11 +6,15 @@
  * a replacement for the unit/integration suites.
  *
  * Covers all SIX roles and the post-ADR-0005 rules:
- *   - three status tiers (design / pm_received / production), gated by ROLE
- *     ONLY -- the old "must be assigned to the order" rule is gone;
+ *   - four status tiers (design / pm_received / production / finalization),
+ *     gated by ROLE ONLY -- the old "must be assigned to the order" rule is gone;
  *   - forward-only status flow (backward or repeated stage -> 409);
+ *   - no skipping: a forward jump can't pass over a stage the role couldn't
+ *     set itself (e.g. designer Design Approved -> Falls/Kutchu over PM Received);
  *   - Production Manager = designer-like but sees/edits EVERY order;
- *   - Worker = production-tier status changes, nothing else;
+ *   - Worker = production-tier status changes, nothing else (not QC /
+ *     Alteration / Delivered -- those are finalization-tier, and neither is
+ *     the Master Tailor's);
  *   - an authenticated outsider may VIEW one order read-only (payments stripped).
  *
  * Creates its own fixtures (fresh staff accounts + orders) every run, so it
@@ -70,6 +74,11 @@ async function setStatus(orderId, status, token) {
 
 async function main() {
   const stamp = Date.now();
+  // Every run books its orders on its OWN far-future due date. This script never
+  // deletes what it creates, so a fixed date (it used to be 2026-12-31) piles up
+  // across runs and trips the delivery-day capacity limit (409 DELIVERY_DAY_FULL)
+  // -- which would fail checks that have nothing to do with capacity.
+  const dueDate = new Date(Date.UTC(2032, 0, 1) + (stamp % 3650) * 86_400_000).toISOString().slice(0, 10);
   const ownerToken = await login(OWNER_EMAIL, OWNER_PASSWORD);
 
   const designerA = await createStaff(ownerToken, "designer", "RBAC Designer A", stamp);
@@ -98,7 +107,7 @@ async function main() {
         customerName: "RBAC Matrix Test",
         phone: "9123456780",
         billNumber: `BILL-RBAC-${stamp}`,
-        dueDate: "2026-12-31",
+        dueDate,
         designerId: designerA.id,
         masterTailorId: masterA.id,
         productCategory: "saree",
@@ -125,12 +134,20 @@ async function main() {
   check("GET /users as production_manager -> 403", (await req("/users", {}, pmToken)).status, 403);
   check("GET /users as worker -> 403", (await req("/users", {}, workerToken)).status, 403);
 
+  console.log("\n--- QR login card issuance (designer / master / PM / worker -- not accountant) ---");
+  const issueQr = async (userId) => (await req(`/users/${userId}/qr-token`, { method: "POST" }, ownerToken)).status;
+  check("POST /users/:id/qr-token for a designer -> 201", await issueQr(designerA.id), 201);
+  check("POST /users/:id/qr-token for a production_manager -> 201", await issueQr(productionManager.id), 201);
+  check("POST /users/:id/qr-token for a master_tailor -> 201", await issueQr(masterA.id), 201);
+  check("POST /users/:id/qr-token for a worker -> 201", await issueQr(worker.id), 201);
+  check("POST /users/:id/qr-token for an accountant -> 400", await issueQr(accountant.id), 400);
+
   console.log("\n--- orders:create ---");
   const createBody = JSON.stringify({
     customerName: "Create Check",
     phone: "9123456781",
     billNumber: `BILL-CREATE-${stamp}`,
-    dueDate: "2026-12-31",
+    dueDate,
     designerId: designerA.id,
     masterTailorId: masterA.id,
     productCategory: "saree",
@@ -144,6 +161,14 @@ async function main() {
   check("POST /orders as master_tailor -> 403", (await req("/orders", { method: "POST", body: createBody }, masterAToken)).status, 403);
   check("POST /orders as accountant -> 403", (await req("/orders", { method: "POST", body: createBody }, accountantToken)).status, 403);
   check("POST /orders as worker -> 403", (await req("/orders", { method: "POST", body: createBody }, workerToken)).status, 403);
+
+  console.log("\n--- delivery-day load (the roles that pick due dates: owner / designer / PM) ---");
+  const loadPath = `/orders/delivery-load?from=${dueDate}&to=${dueDate}`;
+  check("GET /orders/delivery-load as owner_manager -> 200", (await req(loadPath, {}, ownerToken)).status, 200);
+  check("GET /orders/delivery-load as designer -> 200", (await req(loadPath, {}, designerAToken)).status, 200);
+  check("GET /orders/delivery-load as production_manager -> 200", (await req(loadPath, {}, pmToken)).status, 200);
+  check("GET /orders/delivery-load as master_tailor -> 403", (await req(loadPath, {}, masterAToken)).status, 403);
+  check("GET /orders/delivery-load as accountant -> 403", (await req(loadPath, {}, accountantToken)).status, 403);
 
   console.log("\n--- orders:edit:pricing_assignment (owner_manager only) ---");
   const pricingPatch = JSON.stringify({ totalAmount: "9999.00" });
@@ -209,6 +234,15 @@ async function main() {
   check("PATCH status -> design_approved as worker -> 403", await setStatus(orderId, "design_approved", workerToken), 403);
   check("PATCH status -> design_approved as designer -> 200", await setStatus(orderId, "design_approved", designerAToken), 200);
 
+  console.log("\n--- no skipping past a stage the role can't set ---");
+  // The order is at Design Approved. A designer CAN set Falls/Kutchu, but not
+  // PM Received, which sits between -- so the jump must be refused, not allowed.
+  check(
+    "PATCH status -> falls_kutchu as designer (would skip PM Received) -> 403",
+    await setStatus(orderId, "falls_kutchu", designerAToken),
+    403,
+  );
+
   console.log("\n--- status tier: pm_received (owner / production_manager ONLY) ---");
   check("PATCH status -> production_manager_received as designer -> 403", await setStatus(orderId, "production_manager_received", designerAToken), 403);
   check("PATCH status -> production_manager_received as master_tailor -> 403", await setStatus(orderId, "production_manager_received", masterAToken), 403);
@@ -222,6 +256,18 @@ async function main() {
   check("PATCH status -> stitching as worker -> 200", await setStatus(orderId, "stitching", workerToken), 200);
   check("PATCH status -> stitching again (same stage) -> 409 (idempotent by rejection)", await setStatus(orderId, "stitching", designerAToken), 409);
   check("PATCH status -> finishing as accountant -> 403", await setStatus(orderId, "finishing", accountantToken), 403);
+
+  console.log("\n--- status tier: finalization (owner / designer / PM -- not the floor) ---");
+  // The order is at Stitching.
+  check("PATCH status -> quality_check as master_tailor -> 403", await setStatus(orderId, "quality_check", masterAToken), 403);
+  check("PATCH status -> quality_check as worker -> 403", await setStatus(orderId, "quality_check", workerToken), 403);
+  check("PATCH status -> delivered as master_tailor -> 403", await setStatus(orderId, "delivered", masterAToken), 403);
+  check("PATCH status -> quality_check as designer -> 200", await setStatus(orderId, "quality_check", designerAToken), 200);
+  check(
+    "PATCH status -> delivered as production_manager -> 200 (may skip Alteration: PM can set it)",
+    await setStatus(orderId, "delivered", pmToken),
+    200,
+  );
 
   console.log("\n--- dashboard + reports ---");
   check("GET /orders/stats as owner_manager -> 200", (await req("/orders/stats", {}, ownerToken)).status, 200);
@@ -239,6 +285,25 @@ async function main() {
   check(
     "GET /orders/staff-report as accountant -> 403 (financial != staff reporting)",
     (await req(`/orders/staff-report?staffId=${designerA.id}&month=2026-07`, {}, accountantToken)).status,
+    403,
+  );
+
+  // Owner Reports (Batch E): the whole /reports module is owner_manager only.
+  check("GET /reports/staff-activity as owner_manager -> 200", (await req("/reports/staff-activity", {}, ownerToken)).status, 200);
+  check("GET /reports/activity-days as owner_manager -> 200", (await req("/reports/activity-days", {}, ownerToken)).status, 200);
+  for (const [role, token] of [
+    ["accountant", accountantToken],
+    ["designer", designerAToken],
+    ["master_tailor", masterAToken],
+    ["production_manager", pmToken],
+    ["worker", workerToken],
+  ]) {
+    check(`GET /reports/staff-activity as ${role} -> 403`, (await req("/reports/staff-activity", {}, token)).status, 403);
+  }
+  const activityDay = new Date().toISOString().slice(0, 10);
+  check(
+    "GET /reports/activity as accountant -> 403",
+    (await req(`/reports/activity?day=${activityDay}`, {}, accountantToken)).status,
     403,
   );
 

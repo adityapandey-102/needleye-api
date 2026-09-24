@@ -3,6 +3,9 @@ import request from "supertest";
 import { createApp } from "../../src/app";
 import { authProvider } from "../../src/common/auth/supabase-auth-provider";
 import { createFixtureUser, deleteFixtureUser, deleteFixtureOrder, closeDb } from "./helpers";
+import { db } from "../../src/common/database/drizzle-client";
+import { orderStatusHistory } from "../../src/modules/orders/infrastructure/order-status-history.schema";
+import { DrizzleOrdersRepository } from "../../src/modules/orders/infrastructure/drizzle-orders.repository";
 
 /**
  * Integration coverage for the user-management and financial-reporting
@@ -170,6 +173,45 @@ describe("Users & reports (integration)", () => {
     expect(body.weekly.length).toBeGreaterThanOrEqual(4);
     expect(body.weekly.length).toBeLessThanOrEqual(6);
     expect(body.weekly[0]!.weekStart < body.weekly[body.weekly.length - 1]!.weekStart).toBe(true);
+  });
+
+  it("counts the staff report's weekly booked / completed correctly (first delivery only, bookings in the window only)", async () => {
+    const designer = await createFixtureUser("designer", "Weekly Designer");
+    const master = await createFixtureUser("master_tailor", "Weekly Master");
+    createdUserIds.push(designer.id, master.id);
+    const repo = new DrizzleOrdersRepository();
+    const make = async (bookingDate: string) => {
+      const o = await repo.create({
+        customerName: "Weekly", phone: "9000000000", billNumber: `WK-${Date.now()}-${Math.random()}`,
+        bookingDate, dueDate: "2039-01-01", nextPaymentDate: null, designerId: designer.id, masterTailorId: master.id,
+        productCategory: "saree", orderDetails: "weekly", handWork: false, machineWork: false, purchaseRequired: false,
+        paymentStatus: "unpaid", totalAmount: "100.00", productionStatus: "design_pending",
+        designerInstructions: null, specialNotes: null, createdBy: designer.id, updatedBy: designer.id,
+      });
+      createdOrderIds.push(o.id);
+      return o.id;
+    };
+    const deliverAt = async (orderId: string, at: string) => {
+      await db.insert(orderStatusHistory).values({ orderId, status: "delivered", label: "Delivered", changedBy: designer.id, createdAt: new Date(at) });
+    };
+    // July 2026's weeks start on Mondays Jun 29, Jul 6, 13, 20, 27.
+    const a = await make("2026-07-01"); // booked wk Jun 29, delivered wk Jul 13
+    await deliverAt(a, "2026-07-15T10:00:00Z");
+    const b = await make("2026-07-08"); // booked wk Jul 6; FIRST delivery was in June -> not a July completion
+    await deliverAt(b, "2026-06-20T10:00:00Z");
+    await deliverAt(b, "2026-07-16T10:00:00Z");
+    const c = await make("2026-06-10"); // booked before the window (not counted), delivered wk Jul 20
+    await deliverAt(c, "2026-07-21T10:00:00Z");
+    await make("2026-07-28"); // booked wk Jul 27, not delivered
+
+    const report = await repo.getStaffReport(designer.id, { from: "2026-07-01", to: "2026-07-31" });
+    expect(report?.weekly).toEqual([
+      { weekStart: "2026-06-29", booked: 1, completed: 0 },
+      { weekStart: "2026-07-06", booked: 1, completed: 0 },
+      { weekStart: "2026-07-13", booked: 0, completed: 1 },
+      { weekStart: "2026-07-20", booked: 0, completed: 1 },
+      { weekStart: "2026-07-27", booked: 1, completed: 0 },
+    ]);
   });
 
   it("returns the payment-ledger activity feed (created/updated/deleted) to owner_manager but forbids a designer", async () => {

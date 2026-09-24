@@ -52,8 +52,20 @@ describe("capabilities matrix", () => {
       expect(getCapabilityScope(role, "orders:status:production")).toBe(true);
     }
     expect(getCapabilityScope("accountant", "orders:status:production")).toBe(false);
+    // Finalization tier: owner / designer / PM only -- not the floor, not accountant.
+    for (const role of ["owner_manager", "designer", "production_manager"] as Role[]) {
+      expect(getCapabilityScope(role, "orders:status:finalization")).toBe(true);
+    }
+    for (const role of ["master_tailor", "worker", "accountant"] as Role[]) {
+      expect(getCapabilityScope(role, "orders:status:finalization")).toBe(false);
+    }
     // Status is never "assigned"-scoped.
-    for (const cap of ["orders:status:design", "orders:status:pm_received", "orders:status:production"] as const) {
+    for (const cap of [
+      "orders:status:design",
+      "orders:status:pm_received",
+      "orders:status:production",
+      "orders:status:finalization",
+    ] as const) {
       for (const role of ROLES) {
         expect(getCapabilityScope(role, cap)).not.toBe("assigned");
       }

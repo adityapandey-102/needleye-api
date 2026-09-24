@@ -32,10 +32,34 @@ describe("order status vocabularies", () => {
     const design = GRANULAR_STATUS_VALUES.filter((s) => STAGE_CAPABILITY[s] === "orders:status:design");
     const pmReceived = GRANULAR_STATUS_VALUES.filter((s) => STAGE_CAPABILITY[s] === "orders:status:pm_received");
     const production = GRANULAR_STATUS_VALUES.filter((s) => STAGE_CAPABILITY[s] === "orders:status:production");
-    expect(design.length + pmReceived.length + production.length).toBe(GRANULAR_STATUS_VALUES.length);
+    const finalization = GRANULAR_STATUS_VALUES.filter((s) => STAGE_CAPABILITY[s] === "orders:status:finalization");
+    expect(design.length + pmReceived.length + production.length + finalization.length).toBe(
+      GRANULAR_STATUS_VALUES.length,
+    );
     expect(design).toEqual(DESIGN_STAGE_STATUSES);
-    expect(production).toEqual(PRODUCTION_STAGE_STATUSES);
     expect(pmReceived).toEqual(["production_manager_received"]);
+    expect(finalization).toEqual(["quality_check", "alteration", "delivered"]);
+  });
+
+  it("places Dyeing between Fabric Purchased and Cutting, in the production tier", () => {
+    expect(GRANULAR_STATUS_VALUES).toHaveLength(14);
+    expect(stageIndex("dyeing")).toBe(stageIndex("fabric_purchased") + 1);
+    expect(stageIndex("cutting")).toBe(stageIndex("dyeing") + 1);
+    expect(STAGE_CAPABILITY.dyeing).toBe("orders:status:production");
+    expect(granularLabel("dyeing")).toBe("Dyeing");
+    expect(PRODUCTION_STAGE_STATUSES).toContain("dyeing");
+  });
+
+  it("keeps the in-production REPORTING grouping independent of the permission tiers", () => {
+    // PRODUCTION_STAGE_STATUSES backs the dashboard's "In Production" count. The
+    // finalization tier split QC / Alteration / Delivered off the production tier
+    // for PERMISSIONS only -- the reporting grouping must still span Falls/Kutchu
+    // through Delivered, or QC and Alteration silently drop out of that count.
+    expect(PRODUCTION_STAGE_STATUSES[0]).toBe("falls_kutchu");
+    expect(PRODUCTION_STAGE_STATUSES.at(-1)).toBe("delivered");
+    expect(PRODUCTION_STAGE_STATUSES).toContain("quality_check");
+    expect(PRODUCTION_STAGE_STATUSES).toContain("alteration");
+    expect(PRODUCTION_STAGE_STATUSES).not.toContain("production_manager_received");
   });
 
   it("orders the flow strictly forward (each stage's index is greater than the previous)", () => {

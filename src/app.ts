@@ -14,6 +14,7 @@ import { usersRouter } from "./modules/users/api/users.routes";
 import { ordersRouter } from "./modules/orders/api/orders.routes";
 import { paymentsRouter } from "./modules/payments/api/payments.routes";
 import { teamMembersRouter } from "./modules/team-members/api/team-members.routes";
+import { reportsRouter } from "./modules/reports/api/reports.routes";
 import { errorHandler, notFoundHandler } from "./common/middleware/error.middleware";
 import { openApiDocument } from "./docs/openapi";
 
@@ -106,6 +107,7 @@ export function createApp() {
   apiV1.use("/orders/:orderId/payments", paymentsRouter);
   apiV1.use("/orders", ordersRouter);
   apiV1.use("/team-members", teamMembersRouter);
+  apiV1.use("/reports", reportsRouter);
   app.use("/api/v1", apiV1);
 
   app.use(notFoundHandler);

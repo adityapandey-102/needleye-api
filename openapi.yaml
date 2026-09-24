@@ -28,6 +28,8 @@ tags:
     description: Order CRUD, field-level RBAC, image uploads.
   - name: Payments
     description: Per-order payment ledger. owner_manager/accountant see and manage every order's ledger; designer only their own assigned orders; master_tailor has zero access, enforced at every layer (router capability gate, RLS, and the response never includes payment fields at all).
+  - name: Reports
+    description: Owner/Manager-only view of the team -- who is Working vs Idle, and the last 7 days of staff activity from the audit trail (payments excluded).
   - name: Team Members
     description: Lightweight designer/master-tailor lookup, backs selects and filters.
 
@@ -260,7 +262,7 @@ paths:
   /auth/qr-login:
     post:
       tags: [Auth]
-      summary: Sign in via a Master Tailor's QR code
+      summary: Sign in via a staff QR login card
       description: |
         Public -- the token comes from the `?token=` query param on the
         scanned QR's URL (`${WEB_APP_URL}/qr-login?token=...`). Internally
@@ -268,7 +270,9 @@ paths:
         real session via Supabase's admin `generateLink` + `verifyOtp`
         (the magic link is never emailed, just redeemed server-side
         immediately) -- see the README's Flow Map. Only ever issued for
-        `master_tailor` accounts; deactivating an account or regenerating
+        `designer`, `master_tailor`, `production_manager` and `worker`
+        accounts (never owner/accountant), so this endpoint needs no role
+        check of its own; deactivating an account or regenerating
         its QR immediately invalidates the old token.
       security: []
       requestBody:
@@ -390,10 +394,14 @@ paths:
   /users/{id}/qr-token:
     post:
       tags: [Users]
-      summary: Generate (or regenerate) a Master Tailor's QR login code
+      summary: Generate (or regenerate) a staff member's QR login card
       description: |
-        Owner/Manager only, and only for `master_tailor` accounts (400 for
-        any other role). Only the token's SHA-256 hash is stored
+        Owner/Manager only, and only for `designer`, `master_tailor`,
+        `production_manager` and `worker` accounts -- 400 for `owner_manager`
+        and `accountant`, whose pricing/payment/staff powers aren't worth
+        exposing to a lost or photographed card. The QR card is an extra way
+        in; the account's password login is unaffected. Only the token's
+        SHA-256 hash is stored
         (`qr_login_tokens`, a table with no anon/authenticated grant at
         all -- unreachable except through this API's service-role client).
         The raw token/URL is returned once; regenerating immediately
@@ -411,7 +419,7 @@ paths:
                   token: { type: string }
                   loginUrl: { type: string, example: "http://localhost:3000/qr-login?token=..." }
         "400":
-          description: The target account is not a master_tailor
+          description: "`USER_QR_ROLE_UNSUPPORTED` -- the target account is an owner_manager or accountant"
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -572,7 +580,16 @@ paths:
     post:
       tags: [Orders]
       summary: Create an order
-      description: Owner/Manager and Designer only (`orders:create`).
+      description: |
+        Owner/Manager, Designer and Production Manager (`orders:create`).
+
+        **Delivery-day capacity.** If `DELIVERY_DAY_CAPACITY` (default 10)
+        orders are already due on `dueDate`, the create is refused with 409
+        `DELIVERY_DAY_FULL` unless `confirmedWithProductionManager: true` is
+        sent -- in which case it's booked and audited as
+        `order.delivery_override`. The check and the insert run under a
+        per-date lock, so two people booking a day's last slot at once can't
+        both get it. See `GET /orders/delivery-load`.
       requestBody:
         required: true
         content:
@@ -586,6 +603,45 @@ paths:
               schema:
                 type: object
                 properties: { order: { $ref: "#/components/schemas/Order" } }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: >-
+            `DELIVERY_DAY_FULL` -- the due date is at capacity and
+            `confirmedWithProductionManager` wasn't sent. `details` carries
+            `{ dueDate, booked, capacity }`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /orders/delivery-load:
+    get:
+      tags: [Orders]
+      summary: Orders due per day -- for the delivery calendar and availability check
+      description: |
+        How many orders are due on each day in `[from, to]`, SHOP-WIDE: not
+        row-scoped, because delivery capacity is shop-wide and this returns only
+        counts, never order details. Days with no orders are omitted (read a
+        missing day as 0). `capacity` / `nearCapacity` come from the server so
+        clients never hard-code them: a day at or above `capacity` is full
+        (red), at or above `nearCapacity` is filling up (amber), otherwise open.
+        Gated on `orders:create` -- the roles that pick due dates. A malformed
+        or over-long range is a 400 rather than silently defaulted.
+      parameters:
+        - { name: from, in: query, required: true, schema: { type: string, format: date } }
+        - { name: to, in: query, required: true, description: "Inclusive; at most 200 days after `from`.", schema: { type: string, format: date } }
+        - { name: excludeOrderId, in: query, required: false, description: "Leave one order out of the counts -- the order being edited, so it doesn't count against its own day.", schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Per-day counts plus thresholds
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeliveryLoad" }
+        "400":
+          description: Not a real date, `to` before `from`, or a span over 200 days
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           $ref: "#/components/responses/Forbidden"
 
@@ -764,6 +820,12 @@ paths:
         rejected (400 `ORDER_TOTAL_BELOW_PAID`) if the new total would fall
         below what's already been recorded in the ledger (which would leave the
         order "overpaid") -- the mirror of the payment-side overpayment guard.
+
+        Moving `dueDate` onto a day already at capacity is refused with 409
+        `DELIVERY_DAY_FULL` unless `confirmedWithProductionManager: true` is
+        sent (then audited as `order.delivery_override`). Resending the order's
+        CURRENT due date is never checked -- clients send every field on edit,
+        and an order already on a full day must stay editable.
       parameters:
         - $ref: "#/components/parameters/OrderId"
       requestBody:
@@ -788,22 +850,47 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: >-
+            `ORDER_MODIFIED` -- `version` no longer matches (someone else edited
+            first); or `DELIVERY_DAY_FULL` -- the new due date is at capacity and
+            `confirmedWithProductionManager` wasn't sent.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /orders/{id}/status:
     patch:
       tags: [Orders]
       summary: Change an order's production status
       description: |
-        Stage-ownership RBAC, not the flat `orders:edit:*` capabilities:
-        moving into a design-stage status (design_pending/design_approved/
-        fabric_purchased) requires `orders:status:design_stages`; moving into
-        any other (production-stage) status requires
-        `orders:status:production_stages`. Deliberately not gated by a
-        `requireCapability` middleware call -- which capability applies
-        depends on the *target* status in the request body, so the check
-        happens entirely inside the service/domain layer
-        (assertCanTransitionStatus). Also appends one row to this order's
-        status history, in the same DB transaction as the status update.
+        Tiered stage RBAC, not the flat `orders:edit:*` capabilities. Each stage
+        belongs to one capability tier, and the caller's ROLE alone decides
+        whether they may move an order into it -- assignment is never
+        considered (whoever receives the garment on the floor advances it):
+
+        | Tier | Stages | Roles |
+        |---|---|---|
+        | `orders:status:design` | Design Pending, Design Approved | owner, designer, PM |
+        | `orders:status:pm_received` | Production Manager Received | owner, PM |
+        | `orders:status:production` | Falls/Kutchu ... Finishing | owner, designer, PM, master tailor, worker |
+        | `orders:status:finalization` | Quality Check / Trail, Alteration, Delivered | owner, designer, PM |
+
+        **No skipping past a gated stage.** A forward jump may pass over
+        intermediate stages only if the caller could have set each of them --
+        so a designer can't go Design Approved -> Falls/Kutchu over PM Received,
+        but anyone can skip Hand Work on an order that doesn't need it.
+
+        **Forward-only.** Moving to the current or an earlier stage is a 409.
+        The order row is locked for the whole check-and-write, so two people
+        advancing the same order at once serialise (the loser gets the 409),
+        and the forward-only + no-skip checks run against the locked stage.
+
+        Deliberately not gated by a `requireCapability` middleware call -- the
+        capability depends on the *target* status in the body -- so the
+        decision lives in the domain layer (`order-status.rules.ts`:
+        `assertCanChangeStage` + `assertCanSkipStages`). Appends one row to the
+        order's status history in the same transaction as the update.
       parameters:
         - $ref: "#/components/parameters/OrderId"
       requestBody:
@@ -820,12 +907,21 @@ paths:
                 type: object
                 properties: { order: { $ref: "#/components/schemas/Order" } }
         "403":
-          description: Role has no access to this stage at all, or the order isn't assigned to this caller
+          description: >-
+            `ORDER_STATUS_TRANSITION_FORBIDDEN` -- the caller's role can't set the
+            target stage, or the move would skip over a stage it can't set.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: >-
+            `ORDER_STATUS_NOT_FORWARD` -- the target is the order's current stage
+            or an earlier one (also what the loser of a concurrent advance gets).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /orders/{id}/history:
     get:
@@ -1025,6 +1121,95 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/TeamMember" }
 
+  /reports/staff-activity:
+    get:
+      tags: [Reports]
+      summary: Working / Idle staff -- searched, filtered and paged in the database
+      description: |
+        Owner/Manager only (`reports:staff`). The owner and accountant are never
+        listed. A **designer** is `working` while they have *created* an
+        undelivered order in the last `windows.designerDays` (45) days; a
+        **master tailor, production manager or worker** while they made the
+        *most recent* stage move on an undelivered order in the last
+        `windows.floorDays` (30) days. `counts` (the summary tiles) cover the
+        search + role filters but ignore `status`; `total` counts every filter.
+        Ordered Working first, then role, then most orders in hand, then name.
+        Also backs the Staff Report's person picker (`role=designer` /
+        `master_tailor`). One query per page, whatever its size.
+      parameters:
+        - { name: q, in: query, required: false, description: "Name contains (case-insensitive; % and _ are literal). Max 100 chars.", schema: { type: string, maxLength: 100 } }
+        - { name: role, in: query, required: false, schema: { type: string, enum: [designer, master_tailor, production_manager, worker] } }
+        - { name: status, in: query, required: false, schema: { type: string, enum: [working, idle] } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: One page of staff, plus totals
+          content:
+            application/json:
+              schema: { : "#/components/schemas/StaffActivity" }
+        "400":
+          description: A limit over 50, an unknown role/status, or a search over 100 characters
+          content:
+            application/json:
+              schema: { : "#/components/schemas/Error" }
+        "401":
+          : "#/components/responses/Unauthorized"
+        "403":
+          : "#/components/responses/Forbidden"
+
+  /reports/activity-days:
+    get:
+      tags: [Reports]
+      summary: The 7 days the activity feed covers
+      description: |
+        Owner/Manager only. Today and the 6 days before it, newest first,
+        computed in the shop's timezone (`BUSINESS_TIMEZONE`, default
+        Asia/Kolkata). No data: the client loads each day on demand with
+        `GET /reports/activity`.
+      responses:
+        "200":
+          description: The day list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [timeZone, today, days]
+                properties:
+                  timeZone: { type: string, example: Asia/Kolkata }
+                  today: { type: string, format: date }
+                  days: { type: array, items: { type: string, format: date }, minItems: 7, maxItems: 7 }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /reports/activity:
+    get:
+      tags: [Reports]
+      summary: One day of staff activity from the audit trail (payments excluded)
+      description: |
+        Owner/Manager only. Every audited action on `day` (midnight to midnight
+        in the shop's timezone), newest first, paginated. `payment.*` events are
+        left out: those are the Revenue & Ledger feed. A day outside the last 7
+        is a 400. Each event carries the actor's name and role, plus the order's
+        number (order events) or the account's name (user events).
+      parameters:
+        - { name: day, in: query, required: true, schema: { type: string, format: date } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: A page of that day's events, plus the day's total
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActivityDay" }
+        "400":
+          description: Not a real date, or not one of the last 7 days
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1119,16 +1304,18 @@ components:
     GranularStatus:
       type: string
       description: >
-        The 13-stage, forward-only production flow. `orders.production_status`
+        The 14-stage, forward-only production flow. `orders.production_status`
         always stores one of these. Moving into a stage is gated by role tier
-        (design / pm_received / production) -- not by assignment -- and can only
-        move forward (see PATCH /orders/{id}/status).
+        (design / pm_received / production / finalization) -- not by
+        assignment -- can only move forward, and can't skip past a stage the
+        role couldn't set (see PATCH /orders/{id}/status).
       enum:
         - design_pending
         - design_approved
         - production_manager_received
         - falls_kutchu
         - fabric_purchased
+        - dyeing
         - cutting
         - stitching
         - hand_work
@@ -1140,7 +1327,64 @@ components:
 
     ProductCategory:
       type: string
-      enum: [designer_blouse, saree, bridal_lehenga, custom_ethnic_wear, boutique_fashion]
+      description: >
+        The product catalogue -- 43 stored values in 6 collections (Upper Body,
+        Full Body, Lower Body, Mens Wear, Kids Wear - Girls, Kids Wear - Boys);
+        labels and collections live in `src/domain/product-categories.ts`. This
+        is a stored VALUE, never a display label ("saree", not "Saree"). Mens
+        Wear and Kids Wear values carry a `mens_` / `kids_` prefix, which is how
+        the two labels that appear twice stay distinct (`shirt` vs `mens_shirt`,
+        `pant` vs `mens_pant`). Validated by the API only -- the database has no
+        CHECK on this column since migration 20260924000002.
+      enum:
+        # Upper Body
+        - saree_blouse
+        - work_blouse
+        - crop_top_blouse
+        - corset
+        - shirt
+        - designer_blouse
+        - hw_blouse_skirt
+        - short_kurta
+        - pakistani_kurta
+        # Full Body
+        - anarkali
+        - gown
+        - jumpsuit
+        - bodycon
+        - drape_gown
+        - bridal_lehenga
+        - saree
+        - custom_ethnic_wear
+        - boutique_fashion
+        # Lower Body
+        - skirt
+        - half_saree
+        - divided_skirt
+        - palazzo
+        - pant
+        - sharara
+        - pakistani_pant
+        - drape_skirt
+        - mermaid_skirt
+        - petticoat
+        # Mens Wear
+        - mens_shirt
+        - mens_pant
+        - mens_shalwar
+        - mens_blazer
+        - mens_waist_coat
+        - mens_bandi
+        - mens_three_piece_set
+        - mens_dhoti
+        - mens_kurta
+        - mens_prince_coat
+        - mens_panchay
+        - mens_shalya
+        - mens_indo_western
+        # Kids Wear
+        - kids_girls_custom
+        - kids_boys_custom
 
     PaymentStatus:
       type: string
@@ -1455,6 +1699,13 @@ components:
         productionStatus: { $ref: "#/components/schemas/GranularStatus" }
         designerInstructions: { type: string }
         specialNotes: { type: string }
+        confirmedWithProductionManager:
+          type: boolean
+          description: >-
+            Not stored on the order. The creator's acknowledgement that the due
+            date's day is full and the Production Manager agreed to take it
+            anyway -- required to book a full day (else 409 DELIVERY_DAY_FULL),
+            and audited as order.delivery_override when used.
 
     UpdateOrderRequest:
       type: object
@@ -1486,3 +1737,80 @@ components:
         designerInstructions: { type: string }
         specialNotes: { type: string }
         version: { type: integer, minimum: 0, description: "Optimistic-lock token: the `version` the order was loaded with. If it no longer matches (someone else edited first), the update is rejected with 409 ORDER_MODIFIED. Optional; omit to update unconditionally." }
+        confirmedWithProductionManager:
+          type: boolean
+          description: "Same as on CreateOrderRequest: required to MOVE the order onto a full delivery day; audited when used. Not stored."
+
+    StaffActivity:
+      type: object
+      required: [windows, counts, staff, total, limit, offset]
+      properties:
+        counts:
+          type: object
+          required: [working, idle]
+          description: Working / Idle across the search + role filters (ignores status).
+          properties:
+            working: { type: integer }
+            idle: { type: integer }
+        total: { type: integer, description: Rows matching every filter. }
+        limit: { type: integer }
+        offset: { type: integer }
+        windows:
+          type: object
+          required: [designerDays, floorDays]
+          properties:
+            designerDays: { type: integer, example: 45 }
+            floorDays: { type: integer, example: 30 }
+        staff:
+          type: array
+          items:
+            type: object
+            required: [id, fullName, role, status, openOrders, lastWorkAt, lastSeenAt]
+            properties:
+              id: { type: string, format: uuid }
+              fullName: { type: string }
+              role: { type: string, enum: [designer, master_tailor, production_manager, worker] }
+              status: { type: string, enum: [working, idle] }
+              openOrders: { type: integer, minimum: 0 }
+              lastWorkAt: { type: string, format: date-time, nullable: true, description: "Latest qualifying event (order created / stage move)." }
+              lastSeenAt: { type: string, format: date-time, nullable: true, description: "Latest audited action of any kind." }
+    ActivityDay:
+      type: object
+      required: [day, timeZone, events, total, limit, offset]
+      properties:
+        day: { type: string, format: date }
+        timeZone: { type: string, example: Asia/Kolkata }
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+        events:
+          type: array
+          items:
+            type: object
+            required: [id, action, entityType, at]
+            properties:
+              id: { type: string, format: uuid }
+              action: { type: string, example: order.status_changed, description: "Dotted audit code; never payment.*." }
+              entityType: { type: string, example: order }
+              entityId: { type: string, nullable: true }
+              at: { type: string, format: date-time }
+              actorName: { type: string, nullable: true }
+              actorRole: { type: string, nullable: true }
+              orderNumber: { type: string, nullable: true }
+              targetName: { type: string, nullable: true, description: "For user events: the account acted on." }
+              metadata: { type: object, nullable: true, additionalProperties: true }
+    DeliveryLoad:
+      type: object
+      required: [capacity, nearCapacity, days]
+      properties:
+        capacity: { type: integer, example: 10, description: "DELIVERY_DAY_CAPACITY -- a day at or above this is full." }
+        nearCapacity: { type: integer, example: 8, description: "80% of capacity, rounded up -- a day at or above this is filling up." }
+        days:
+          type: array
+          description: Only days with at least one order, ascending. A missing day means 0.
+          items:
+            type: object
+            required: [date, count]
+            properties:
+              date: { type: string, format: date }
+              count: { type: integer, minimum: 1 }

@@ -39,6 +39,28 @@ const envSchema = z.object({
   TRUST_PROXY: z.string().default("loopback"),
   /** Day-of-month the monthly accounting/revenue cycle starts (1 = calendar month; e.g. 7 = 7th → next 7th). */
   ACCOUNTING_CYCLE_START_DAY: z.coerce.number().int().min(1).max(28).default(1),
+  /**
+   * How many orders may share one delivery (due) date before the day counts as
+   * full. Booking onto a full day needs the creator's explicit "confirmed with
+   * the Production Manager", which is audited. See delivery-capacity.rules.ts.
+   */
+  DELIVERY_DAY_CAPACITY: z.coerce.number().int().min(1).default(10),
+  /**
+   * The shop's IANA timezone -- where a "day" starts and ends for day-based
+   * reports (the owner's daily activity feed). Timestamps are stored in UTC;
+   * without this, a UTC day would run 05:30-05:30 in India.
+   */
+  BUSINESS_TIMEZONE: z
+    .string()
+    .default("Asia/Kolkata")
+    .refine((tz) => {
+      try {
+        new Intl.DateTimeFormat("en", { timeZone: tz });
+        return true;
+      } catch {
+        return false;
+      }
+    }, "Must be an IANA timezone, e.g. Asia/Kolkata"),
 });
 
 const parsed = envSchema.safeParse(process.env);

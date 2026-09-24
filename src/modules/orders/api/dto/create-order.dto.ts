@@ -31,6 +31,13 @@ export const createOrderDtoSchema = z.object({
   }),
   designerInstructions: z.string().trim().optional(),
   specialNotes: z.string().trim().optional(),
+  /**
+   * Not an order field -- the creator's acknowledgement that the due date's day
+   * is full (DELIVERY_DAY_CAPACITY reached) and the Production Manager agreed to
+   * take it anyway. Required to book a full day (else 409 DELIVERY_DAY_FULL);
+   * using it is audited as order.delivery_override. Never stored on the order.
+   */
+  confirmedWithProductionManager: z.boolean().optional(),
 });
 
 export type CreateOrderDto = z.infer<typeof createOrderDtoSchema>;

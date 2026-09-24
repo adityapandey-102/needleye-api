@@ -11,7 +11,8 @@ export const CAPABILITIES = [
   // physically receives the garment scans it and advances the stage).
   "orders:status:design", //          Design Pending, Design Approved
   "orders:status:pm_received", //     Production Manager Received
-  "orders:status:production", //      Falls/Kutchu ... Delivered
+  "orders:status:production", //      Falls/Kutchu ... Finishing
+  "orders:status:finalization", //    Quality Check / Trail, Alteration, Delivered
   "payments:manage",
   "payments:read",
   "reports:financial",
@@ -28,9 +29,9 @@ export type Capability = (typeof CAPABILITIES)[number];
  * `false` -> never allowed.
  *
  * Kept as a flat lookup table on purpose (not a generic policy engine) --
- * six roles, twelve capabilities, all known up front.
+ * six roles, thirteen capabilities, all known up front.
  *
- * NOTE: the three `orders:status:*` capabilities never use "assigned" -- stage
+ * NOTE: the four `orders:status:*` capabilities never use "assigned" -- stage
  * changes are gated purely by role tier, by design.
  */
 type CapabilityScope = boolean | "assigned";
@@ -91,7 +92,7 @@ export const CAPABILITY_MATRIX: Record<Capability, Record<Role, CapabilityScope>
     production_manager: true,
     worker: false,
   },
-  // Production tier: Falls/Kutchu ... Delivered -> owner / designer / PM /
+  // Production tier: Falls/Kutchu ... Finishing -> owner / designer / PM /
   // master / worker (everyone on the floor; not the accountant).
   "orders:status:production": {
     owner_manager: true,
@@ -100,6 +101,18 @@ export const CAPABILITY_MATRIX: Record<Capability, Record<Role, CapabilityScope>
     accountant: false,
     production_manager: true,
     worker: true,
+  },
+  // Finalization tier: Quality Check / Trail, Alteration, Delivered -> owner /
+  // designer / PM only. These are sign-off stages (the customer trial, any
+  // rework it triggers, handing the garment over), so the floor -- master
+  // tailor, worker -- can no longer move an order into them.
+  "orders:status:finalization": {
+    owner_manager: true,
+    designer: true,
+    master_tailor: false,
+    accountant: false,
+    production_manager: true,
+    worker: false,
   },
   // Designer manages payments on their own orders -- they collect money from
   // the client at booking. Master Tailor / Worker / PM have no payment access.

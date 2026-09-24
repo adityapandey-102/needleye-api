@@ -300,12 +300,25 @@ describe("API endpoints (integration)", () => {
     const ledger = await request(app).get(`/api/v1/orders/${orderId}/payments`).set("Authorization", auth);
     expect(ledger.status).toBe(403);
 
-    // ...but CAN advance its production stage even though it isn't assigned to
-    // them -- the new shop-floor model: whoever receives the garment advances it
-    // (a designer is in the production tier). Forward-only from design_pending.
-    const patch = await request(app).patch(`/api/v1/orders/${orderId}/status`).set("Authorization", auth).send({ status: "cutting" });
+    // ...but CAN advance its stage even though it isn't assigned to them -- the
+    // shop-floor model: whoever receives the garment advances it. A designer is
+    // in the design tier, so Design Pending -> Design Approved is theirs to make.
+    const patch = await request(app)
+      .patch(`/api/v1/orders/${orderId}/status`)
+      .set("Authorization", auth)
+      .send({ status: "design_approved" });
     expect(patch.status).toBe(200);
-    expect((patch.body as { order: { productionStatus: string } }).order.productionStatus).toBe("cutting");
+    expect((patch.body as { order: { productionStatus: string } }).order.productionStatus).toBe("design_approved");
+
+    // ...but can't jump from there to Cutting: that passes over Production
+    // Manager Received, a stage a designer can't set. (This test previously
+    // asserted that jump SUCCEEDED -- it was the skip gap, now closed.)
+    const skip = await request(app).patch(`/api/v1/orders/${orderId}/status`).set("Authorization", auth).send({ status: "cutting" });
+    expect(skip.status).toBe(403);
+    expect((skip.body as { code: string }).code).toBe("ORDER_STATUS_TRANSITION_FORBIDDEN");
+    // Rolled back -- the order is still at Design Approved, no stray history row.
+    const after = await request(app).get(`/api/v1/orders/${orderId}`).set("Authorization", auth);
+    expect((after.body as { order: { productionStatus: string } }).order.productionStatus).toBe("design_approved");
   });
 
   it("enforces forward-only, idempotent, concurrency-safe status changes", async () => {

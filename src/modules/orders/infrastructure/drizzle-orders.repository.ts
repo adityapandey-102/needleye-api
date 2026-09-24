@@ -1,4 +1,4 @@
-import { and, desc, eq, ilike, inArray, ne, notInArray, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, ilike, inArray, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import { db } from "../../../common/database/drizzle-client";
 import { orders } from "./order.schema";
 import { orderImages } from "./order-image.schema";
@@ -9,7 +9,7 @@ import { payments } from "../../payments/infrastructure/payments.schema";
 // Cross-module Infrastructure-only read: `profiles` is owned by the Users
 // module's schema. See docs/adr/0003-per-module-schema-ownership.md.
 import { profiles } from "../../users/infrastructure/profile.schema";
-import { ConflictError, InternalError, NotFoundError } from "../../../common/errors/app-error";
+import { AppError, ConflictError, InternalError, NotFoundError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
 import { outstanding, toMoneyString } from "../../../common/money/money";
 import {
@@ -39,7 +39,32 @@ import type {
   StaffReportRaw,
   StaffWeeklyPoint,
   LedgerEventsResult,
+  DueDateCapacityGuard,
 } from "../application/ports/orders-repository.port";
+
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
+ * Namespace for the per-date advisory lock (first key of the two-int form), so
+ * it can never collide with any other advisory lock this app might take later.
+ */
+export const DELIVERY_DAY_LOCK_NAMESPACE = 4201;
+
+/**
+ * Serialises every create/edit that lands on `dueDate` for the rest of the
+ * transaction, then counts the orders already there (optionally leaving one
+ * out). Without the lock, two people booking a day's last slot at the same
+ * moment would both read "9 of 10" and both succeed -> 11. A transaction-scoped
+ * advisory lock is released automatically at commit/rollback.
+ */
+async function lockDayAndCount(tx: Tx, dueDate: string, excludeOrderId?: string): Promise<number> {
+  await tx.execute(sql`select pg_advisory_xact_lock(${DELIVERY_DAY_LOCK_NAMESPACE}::int, hashtext(${dueDate}::text))`);
+  const [row] = await tx
+    .select({ n: sql<number>`count(*)::int` })
+    .from(orders)
+    .where(excludeOrderId ? and(eq(orders.dueDate, dueDate), ne(orders.id, excludeOrderId)) : eq(orders.dueDate, dueDate));
+  return row?.n ?? 0;
+}
 
 /** The granular values a Kanban card sits on once it reaches the "ready"/"delivered" canonical columns -- see domain/order-status.ts. */
 const COMPLETED_STATUSES = COMPLETED_CANONICAL_STAGES.map((stage) => CANONICAL_TO_GRANULAR[stage]);
@@ -302,30 +327,57 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
 
     // 3. Weekly throughput for the month window, zero-filled and continuous.
     //    generate_series builds every Monday from the week of `from` to the week
-    //    of `to`; two correlated subqueries count orders booked (created_at) and
-    //    completed (earliest ready/delivered history event) in that week. One
-    //    query, ~4-6 rows out (a month's weeks).
+    //    of `to`. Orders booked and orders completed (earliest ready/delivered
+    //    history event) are each counted in ONE grouped pass over this
+    //    person's orders, then joined onto the weeks -- not one correlated
+    //    subquery per week (which re-read their whole history once per week).
+    //    ~4-6 rows out (a month's weeks).
     let weekly: StaffWeeklyPoint[];
     try {
       const res = await db.execute<{ week_start: string; booked: number; completed: number }>(sql`
+        with weeks as (
+          select w.week_start
+          from generate_series(
+            date_trunc('week', ${range.from}::date),
+            date_trunc('week', ${range.to}::date),
+            interval '1 week'
+          ) as w(week_start)
+        ),
+        bounds as (select min(week_start) as lo, max(week_start) + interval '1 week' as hi from weeks),
+        booked as (
+          select date_trunc('week', o.booking_date) as week_start, count(*)::int as n
+          from orders o, bounds b
+          where o.${sql.raw(staffColumnName)} = ${staffId}
+            and o.booking_date >= b.lo and o.booking_date < b.hi
+          group by 1
+        ),
+        -- An order counts in the week of its FIRST completion: take the
+        -- completion events inside the window (partial index
+        -- order_status_history_completed_idx), keep this person's orders, and
+        -- drop any event that has an earlier completion for the same order.
+        completed as (
+          select date_trunc('week', h.created_at) as week_start, count(*)::int as n
+          from bounds b
+          join order_status_history h
+            on h.status in (${sql.raw(COMPLETED_STATUS_SQL_LIST)})
+           and h.created_at >= b.lo and h.created_at < b.hi
+          join orders o on o.id = h.order_id
+          where o.${sql.raw(staffColumnName)} = ${staffId}
+            and not exists (
+              select 1 from order_status_history e
+              where e.order_id = h.order_id
+                and e.status in (${sql.raw(COMPLETED_STATUS_SQL_LIST)})
+                and e.created_at < h.created_at
+            )
+          group by 1
+        )
         select
           to_char(w.week_start, 'YYYY-MM-DD') as week_start,
-          (select count(*)::int from orders o2
-             where o2.${sql.raw(staffColumnName)} = ${staffId}
-               and date_trunc('week', o2.booking_date) = w.week_start) as booked,
-          (select count(*)::int from (
-             select h.order_id, min(h.created_at) as done_at
-             from order_status_history h
-             join orders o3 on o3.id = h.order_id
-             where o3.${sql.raw(staffColumnName)} = ${staffId}
-               and h.status in (${sql.raw(COMPLETED_STATUS_SQL_LIST)})
-             group by h.order_id
-           ) c where date_trunc('week', c.done_at) = w.week_start) as completed
-        from generate_series(
-          date_trunc('week', ${range.from}::date),
-          date_trunc('week', ${range.to}::date),
-          interval '1 week'
-        ) as w(week_start)
+          coalesce(bk.n, 0) as booked,
+          coalesce(cp.n, 0) as completed
+        from weeks w
+        left join booked bk on bk.week_start = w.week_start
+        left join completed cp on cp.week_start = w.week_start
         order by w.week_start asc
       `);
       const rows = (res.rows ?? (res as unknown as { week_start: string; booked: number; completed: number }[]));
@@ -449,10 +501,31 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     return { ...row, totalAmount: toMoneyString(row.totalAmount) };
   }
 
-  async create(data: NewOrderRecord): Promise<OrderEntity> {
+  async countOrdersDueByDay(
+    range: { from: string; to: string },
+    excludeOrderId?: string,
+  ): Promise<{ date: string; count: number }[]> {
+    const inRange = and(gte(orders.dueDate, range.from), lte(orders.dueDate, range.to));
+    try {
+      const rows = await db
+        .select({ date: orders.dueDate, count: sql<number>`count(*)::int` })
+        .from(orders)
+        .where(excludeOrderId ? and(inRange, ne(orders.id, excludeOrderId)) : inRange)
+        .groupBy(orders.dueDate)
+        .orderBy(orders.dueDate);
+      return rows;
+    } catch (error) {
+      throw new InternalError("Failed to load delivery load", error);
+    }
+  }
+
+  async create(data: NewOrderRecord, assertDueDateCapacity?: DueDateCapacityGuard): Promise<OrderEntity> {
     let insertedId: string;
     try {
       insertedId = await db.transaction(async (tx) => {
+        if (assertDueDateCapacity) {
+          assertDueDateCapacity({ booked: await lockDayAndCount(tx, data.dueDate), previousDueDate: null });
+        }
         const [inserted] = await tx
           .insert(orders)
           .values({
@@ -497,6 +570,9 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         return inserted.id;
       });
     } catch (error) {
+      // Preserve domain errors (e.g. 409 DELIVERY_DAY_FULL from the capacity
+      // guard); wrap only the unexpected.
+      if (error instanceof AppError) throw error;
       throw new InternalError("Failed to create order", error);
     }
 
@@ -505,7 +581,12 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     return entity;
   }
 
-  async update(id: string, data: UpdateOrderRecord, expectedVersion?: number): Promise<OrderEntity> {
+  async update(
+    id: string,
+    data: UpdateOrderRecord,
+    expectedVersion?: number,
+    assertDueDateCapacity?: DueDateCapacityGuard,
+  ): Promise<OrderEntity> {
     // updated_at is deliberately not touched: orders_set_updated_at (a
     // BEFORE UPDATE trigger) already keeps it current. `version` is always
     // bumped so the next reader/editor sees a moved-on value (optimistic lock).
@@ -520,12 +601,34 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
 
     let updated: { id: string }[];
     try {
-      updated = await db
-        .update(orders)
-        .set({ ...record, version: sql`${orders.version} + 1` })
-        .where(where)
-        .returning({ id: orders.id });
+      updated = await db.transaction(async (tx) => {
+        const newDueDate = data.dueDate;
+        if (assertDueDateCapacity && newDueDate !== undefined) {
+          // Lock the order row to read its CURRENT due date (the rule skips an
+          // edit that doesn't move it), then the day lock + count, excluding
+          // this order so it doesn't count against itself. A missing row falls
+          // through to the update below, which matches nothing -> 404.
+          const [current] = await tx
+            .select({ dueDate: orders.dueDate })
+            .from(orders)
+            .where(eq(orders.id, id))
+            .for("update");
+          if (current) {
+            assertDueDateCapacity({
+              booked: await lockDayAndCount(tx, newDueDate, id),
+              previousDueDate: current.dueDate,
+            });
+          }
+        }
+        return tx
+          .update(orders)
+          .set({ ...record, version: sql`${orders.version} + 1` })
+          .where(where)
+          .returning({ id: orders.id });
+      });
     } catch (error) {
+      // Preserve domain errors (e.g. 409 DELIVERY_DAY_FULL); wrap the unexpected.
+      if (error instanceof AppError) throw error;
       throw new InternalError("Failed to save order", error);
     }
 
@@ -543,7 +646,12 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     return entity;
   }
 
-  async updateStatus(id: string, status: GranularStatus, changedBy: string): Promise<OrderEntity> {
+  async updateStatus(
+    id: string,
+    status: GranularStatus,
+    changedBy: string,
+    assertTransition?: (current: GranularStatus) => void,
+  ): Promise<OrderEntity> {
     try {
       await db.transaction(async (tx) => {
         // Lock the order row for the duration of the transaction. Two staff
@@ -570,6 +678,12 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
           );
         }
 
+        // Caller-supplied transition rule (e.g. no skipping past a stage the
+        // role can't set). Run HERE, against the locked `current`, rather than in
+        // the service: a check made before the lock could see a stale stage. The
+        // rule itself stays in the domain layer -- this only enforces it atomically.
+        assertTransition?.(current);
+
         // updated_at is deliberately not touched here either -- same trigger as update().
         await tx.update(orders).set({ productionStatus: status, updatedBy: changedBy }).where(eq(orders.id, id));
         await tx.insert(orderStatusHistory).values({
@@ -580,8 +694,9 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         });
       });
     } catch (error) {
-      // Preserve the meaningful domain errors; wrap anything unexpected.
-      if (error instanceof NotFoundError || error instanceof ConflictError) throw error;
+      // Preserve every meaningful domain error (404 missing, 409 not-forward,
+      // 403 from assertTransition); wrap only the unexpected as a 500.
+      if (error instanceof AppError) throw error;
       throw new InternalError("Failed to update order status", error);
     }
 

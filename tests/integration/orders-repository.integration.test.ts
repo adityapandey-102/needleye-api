@@ -90,6 +90,34 @@ describe("DrizzleOrdersRepository (integration)", () => {
     expect(history[0]?.status).toBe("design_approved"); // most recent first
   });
 
+  it("the database accepts the new catalogue categories (migration 20260924000002 drops the CHECK)", async () => {
+    // A new womenswear category, a prefixed men's one, and a kids' one. Without
+    // the migration, the original 5-value CHECK rejects all three with a 23514.
+    for (const productCategory of ["anarkali", "mens_shirt", "kids_boys_custom"] as const) {
+      const entity = await repo.create(baseOrder({ productCategory }));
+      createdOrderIds.push(entity.id);
+      expect(entity.productCategory).toBe(productCategory);
+    }
+  });
+
+  it("the database accepts the Dyeing stage in both CHECK constraints (migration 20260924000001)", async () => {
+    const entity = await repo.create(baseOrder());
+    createdOrderIds.push(entity.id);
+
+    // Fabric Purchased -> Dyeing -> Cutting: the new stage in its place in the
+    // flow. updateStatus writes BOTH orders.production_status and an
+    // order_status_history row, so a success here proves both constraints allow
+    // 'dyeing' -- without the migration this throws a 23514 check violation.
+    await repo.updateStatus(entity.id, "fabric_purchased", designer.id);
+    const dyed = await repo.updateStatus(entity.id, "dyeing", designer.id);
+    expect(dyed.productionStatus).toBe("dyeing");
+    await repo.updateStatus(entity.id, "cutting", designer.id);
+
+    const history = await repo.listStatusHistory(entity.id);
+    expect(history.map((h) => h.status).slice(0, 3)).toEqual(["cutting", "dyeing", "fabric_purchased"]);
+    expect(history.find((h) => h.status === "dyeing")?.label).toBe("Dyeing");
+  });
+
   it("rolls back the whole transaction if the status update violates a DB constraint", async () => {
     const entity = await repo.create(baseOrder());
     createdOrderIds.push(entity.id);

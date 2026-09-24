@@ -28,8 +28,15 @@ import { DrizzlePaymentsRepository } from "../modules/payments/infrastructure/dr
 import { authProvider } from "../common/auth/supabase-auth-provider";
 import { storageProvider } from "../common/storage/supabase-storage-provider";
 import { generatePassword } from "../common/crypto/credentials";
-import { GRANULAR_STATUSES, DESIGN_STAGE_STATUSES, type GranularStatus } from "../domain/order-status";
-import { PRODUCT_CATEGORIES, PAYMENT_METHODS, type ProductCategory, type PaymentStatus } from "../domain/product-categories";
+import { GRANULAR_STATUSES, DESIGN_STAGE_STATUSES, STAGE_CAPABILITY, type GranularStatus } from "../domain/order-status";
+import {
+  PRODUCT_CATEGORIES,
+  PAYMENT_METHODS,
+  productCategoryGroup,
+  type ProductCategory,
+  type ProductCategoryGroup,
+  type PaymentStatus,
+} from "../domain/product-categories";
 import { derivePaymentStatus } from "../modules/orders/domain/order-ledger.rules";
 import { toMoneyString } from "../common/money/money";
 import type { Role } from "../domain/roles";
@@ -63,7 +70,12 @@ const CUSTOMERS = [
   "Suresh Iyer", "Pallavi Joshi", "Harsh Vardhan", "Geeta Krishnan", "Naveen Reddy",
 ] as const;
 
-const ORDER_DETAILS: Record<ProductCategory, string[]> = {
+/**
+ * Hand-written details for the five original categories; every other one of the
+ * 43 falls back to its collection's (GROUP_DETAILS) -- writing three lines for
+ * each of 43 categories would be seed data for its own sake.
+ */
+const CATEGORY_DETAILS: Partial<Record<ProductCategory, string[]>> = {
   designer_blouse: [
     "Embroidered silk blouse with mirror work on sleeves.",
     "Zardozi work blouse, boat neck, matching the client's own saree.",
@@ -91,6 +103,41 @@ const ORDER_DETAILS: Record<ProductCategory, string[]> = {
   ],
 };
 
+const GROUP_DETAILS: Record<ProductCategoryGroup, string[]> = {
+  upper_body: [
+    "Princess-cut blouse, padded, back hook closure, matching the client's saree.",
+    "Short kurta with thread work on the yoke, three-quarter sleeves.",
+    "Corset-style bodice, boning at the seams, fitted to measurements.",
+  ],
+  full_body: [
+    "Floor-length anarkali, heavy flare, gota work on the border.",
+    "Evening gown with drape detailing, lining included.",
+    "Jumpsuit in crepe, belted waist, custom fitting.",
+  ],
+  lower_body: [
+    "Sharara with layered frills, matching dupatta piping.",
+    "Mermaid skirt, satin lining, fitted through the knee.",
+    "Palazzo with side slits, elasticated waist.",
+  ],
+  mens_wear: [
+    "Bandhgala prince coat, embroidered collar, wedding function.",
+    "Kurta with matching shalwar, cotton silk, minimal thread work.",
+    "Three-piece suit, notch lapel, fitted to measurements.",
+  ],
+  kids_girls: [
+    "Girl's lehenga set, age 8, light sequin work.",
+    "Frock with layered net, birthday party wear.",
+  ],
+  kids_boys: [
+    "Boy's kurta pyjama set, age 6, festive wear.",
+    "Mini sherwani for a family wedding, age 10.",
+  ],
+};
+
+function orderDetailsFor(category: ProductCategory): string[] {
+  return CATEGORY_DETAILS[category] ?? GROUP_DETAILS[productCategoryGroup(category) ?? "full_body"];
+}
+
 function daysFromToday(offset: number): string {
   const d = new Date();
   d.setDate(d.getDate() + offset);
@@ -101,19 +148,26 @@ function pick<T>(arr: readonly T[], i: number): T {
   return arr[i % arr.length]!;
 }
 
+/** Price ranges for the original five; everything else falls back to its collection's range. */
+const CATEGORY_AMOUNT_RANGE: Partial<Record<ProductCategory, [number, number]>> = {
+  bridal_lehenga: [8000, 25000],
+  custom_ethnic_wear: [4000, 12000],
+  saree: [3000, 8000],
+  boutique_fashion: [3000, 10000],
+  designer_blouse: [2000, 4500],
+};
+
+const GROUP_AMOUNT_RANGE: Record<ProductCategoryGroup, [number, number]> = {
+  upper_body: [1500, 5000],
+  full_body: [4000, 15000],
+  lower_body: [1500, 6000],
+  mens_wear: [2500, 12000],
+  kids_girls: [1500, 5000],
+  kids_boys: [1500, 5000],
+};
+
 function categoryAmountRange(category: ProductCategory): [number, number] {
-  switch (category) {
-    case "bridal_lehenga":
-      return [8000, 25000];
-    case "custom_ethnic_wear":
-      return [4000, 12000];
-    case "saree":
-      return [3000, 8000];
-    case "boutique_fashion":
-      return [3000, 10000];
-    case "designer_blouse":
-      return [2000, 4500];
-  }
+  return CATEGORY_AMOUNT_RANGE[category] ?? GROUP_AMOUNT_RANGE[productCategoryGroup(category) ?? "full_body"];
 }
 
 async function findOrCreateStaff(email: string, fullName: string, role: Role): Promise<{ id: string; password: string | null }> {
@@ -130,7 +184,13 @@ async function advanceStatus(orderId: string, targetStatus: GranularStatus, desi
   const targetIndex = GRANULAR_STATUSES.findIndex((s) => s.value === targetStatus);
   for (let i = 1; i <= targetIndex; i++) {
     const status = GRANULAR_STATUSES[i]!.value;
-    const changedBy = DESIGN_STAGE_STATUSES.includes(status) ? designerId : masterTailorId;
+    // Attribute each step to someone whose role could really have made it: the
+    // design stages AND the finalization stages (QC / Alteration / Delivered --
+    // closed to the floor) to the designer, the floor stages to the master
+    // tailor. Reports that read changed_by (e.g. who's working) rely on this.
+    const byDesigner =
+      DESIGN_STAGE_STATUSES.includes(status) || STAGE_CAPABILITY[status] === "orders:status:finalization";
+    const changedBy = byDesigner ? designerId : masterTailorId;
     await ordersRepository.updateStatus(orderId, status, changedBy);
   }
 }
@@ -261,7 +321,7 @@ async function main() {
       designerId: designer.id,
       masterTailorId: master.id,
       productCategory: category,
-      orderDetails: pick(ORDER_DETAILS[category], i),
+      orderDetails: pick(orderDetailsFor(category), i),
       handWork: i % 3 === 0,
       machineWork: i % 4 === 0,
       purchaseRequired: i % 5 === 0,

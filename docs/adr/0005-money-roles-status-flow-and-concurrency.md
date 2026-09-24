@@ -175,3 +175,76 @@ workflow gaps surfaced by real use:
   calls to the wrong server (HTML back → "Unexpected token '<'"). Using
   `http://localhost:54321` (IPv6 → Docker/Kong) sidesteps it; documented in
   `.env.example`. The DB (`:54322`, direct) was unaffected.
+
+## Amendment (2026-09-24): a fourth status tier, no skipping, wider QR login, Dyeing
+
+Supersedes the tier table in §3, the stage count in §4, and the `QR_LOGIN_ROLES` line in §6. Nothing
+else in this ADR changes.
+
+- **Fourth tier, `orders:status:finalization`** — Quality Check / Trail,
+  Alteration, Delivered move off the production tier into their own, gated to
+  owner / designer / production_manager. These are sign-off stages (the
+  customer trial, the rework it triggers, the hand-over), and the business did
+  not want the floor — master_tailor, worker — making them. The production tier
+  now spans Falls/Kutchu … Finishing.
+- **No skipping past a gated stage.** §3's tiers were enforced only for moving
+  *into* a stage, never for jumping *over* one, and §4's forward-only rule
+  allows forward jumps. Together that let a designer go Design Approved →
+  Falls/Kutchu, skipping Production Manager Received — the one stage meant to
+  record the PM taking custody — despite being unable to set it. New domain rule
+  `assertCanSkipStages(role, current, target)`: a jump may pass over a stage
+  only if the caller could have set it. Legitimate skips (an order needing no
+  hand work) still work. It needs the current stage, so like §5's forward-only
+  check it runs inside the row-locked transaction: the service hands it to
+  `repository.updateStatus` as a guard callback, so the rule stays in the
+  domain layer while being enforced against the locked value. Refusal is a 403
+  `ORDER_STATUS_TRANSITION_FORBIDDEN` (no new error code).
+- **The reporting grouping is decoupled from the tiers.**
+  `PRODUCTION_STAGE_STATUSES` — which backs the dashboard's "In Production"
+  count — was derived from the production tier. Splitting finalization off would
+  have silently dropped Quality Check and Alteration from that count, so it is
+  now defined by position (Falls/Kutchu through Delivered) instead.
+- **QR login cards for designer and production_manager too.**
+  `QR_LOGIN_ROLES = ["designer", "master_tailor", "production_manager",
+  "worker"]`. `owner_manager` and `accountant` stay excluded: a printed card is
+  a bearer credential, and those roles hold the pricing, payment, and
+  staff-management powers. The card is an additional way in — password login is
+  unaffected for every role.
+- **A 14th stage, Dyeing** (`dyeing`), between Fabric Purchased and Cutting, in
+  the production tier like its neighbours. Migration
+  `20260924000001_order_status_dyeing.sql` widens both CHECK constraints
+  (`orders.production_status`, `order_status_history.status`) — the stage
+  CHECKs are kept on purpose, unlike the product-category one: stages change
+  rarely and a bad value there corrupts the production flow. The widened
+  constraint is a strict superset, so it is safe to apply before the code
+  deploys. The "Fabric Purchased" label is deliberately unchanged.
+
+## Amendment (2026-09-24): delivery capacity — a per-day advisory lock
+
+Adds to §5 (concurrency). Nothing earlier changes.
+
+- **Decision.** A day can hold `DELIVERY_DAY_CAPACITY` due orders (default 10;
+  all statuses count). Booking past that is a *soft* stop: 409
+  `DELIVERY_DAY_FULL` unless the request says the Production Manager agreed
+  (`confirmedWithProductionManager: true`), and every such override is audited
+  (`order.delivery_override`). It's a soft stop because the business decides case by case whether
+  the floor can absorb one more. A hard cap would push staff to fake the due
+  date, and that hides the real load.
+- **Why an advisory lock, not a row lock or a counter table.** §5 serialises
+  writers with a row lock on the order, but a day's capacity isn't one row.
+  Two new orders for the same day share nothing to lock. The alternatives
+  were a `delivery_days` counter table, which needs a migration plus a
+  trigger or dual writes that must never drift, or SERIALIZABLE isolation, which
+  means retry loops on every order write. Instead, the create/update
+  transaction takes `pg_advisory_xact_lock(4201, hashtext(due_date))`, then
+  counts, checks and writes. Same-day bookings queue behind each other for a few
+  milliseconds; different days don't interact. The lock is released
+  automatically at commit or rollback, and nothing is stored. The namespace
+  `4201` is exported from the repository (`DELIVERY_DAY_LOCK_NAMESPACE`) so no
+  other feature reuses it by accident.
+- **The rule stays in the domain layer.** It is the same guard-callback pattern
+  as `assertTransition` / `assertCanSkipStages`: the repository supplies the
+  locked facts `{booked, previousDueDate}` and the domain rule decides. An edit
+  that keeps its date is not re-checked, because the order already holds its
+  slot and re-checking would lock every order on an over-full day out of
+  ordinary edits.

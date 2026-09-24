@@ -79,12 +79,14 @@ for the authoritative list and what each one is for:
 - [ ] `CORS_ALLOWED_ORIGIN` -- the exact deployed `needleye-web` origin (e.g. `https://needleye.example.com`). A mismatch here is the single most common cutover bug: the API deploys fine, then every browser request silently fails CORS while curl/Postman work perfectly, because they don't send an `Origin` header.
 - [ ] `WEB_APP_URL` -- same origin as above; only used to build the link inside password-reset emails.
 - [ ] **`API_PORT`** -- ⚠️ the app listens on `API_PORT` (`src/index.ts`), but most platforms inject **`PORT`**. On Railway set `API_PORT=${{PORT}}` (Railway's variable-reference syntax); on any platform that only sets `PORT`, either do the same or configure the service's target port to match a fixed `API_PORT`. Getting this wrong means the platform health-checks a port nothing is listening on.
-- [ ] **`TRUST_PROXY`** -- ⚠️ set to the **number of proxies in front of the app** (`1` on Railway/Render/Fly, which put exactly one edge proxy in front). The default is `loopback`, which is right for local dev but **wrong in production**: the platform forwards `X-Forwarded-For` from a non-loopback address, Express won't trust it, and `express-rate-limit` throws `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR` while the limiter keys on the proxy's IP instead of the real client's. Never `true` (that lets any client spoof its IP).
+- [ ] **`TRUST_PROXY`** -- ⚠️ set to the **number of proxies in front of the app**. **On Railway this is `2`, not `1`**: Railway's edge appends a rotating internal hop, so `X-Forwarded-For` arrives as `<client>, <internal hop>`. With `1`, every request is keyed on that rotating hop, so the rate limiter never trips (verified against production logs; `npm run test:ratelimit` catches it). Count the hops for other platforms the same way. The default is `loopback`, which is right for local dev but **wrong in production**: the platform forwards `X-Forwarded-For` from a non-loopback address, Express won't trust it, and `express-rate-limit` throws `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR` while the limiter keys on the proxy's IP instead of the real client's. Never `true` (that lets any client spoof its IP).
 - [ ] `DB_POOL_MAX` -- max Postgres connections for this instance's pool (default 10). The main concurrency lever: 10 suits ~20-30 concurrent users, ~20-30 suits 60+. Keep it comfortably under the database's connection limit; with the Session pooler (above) there is plenty of headroom.
 - [ ] `LOG_LEVEL` -- `info` is a reasonable prod default.
 - [ ] `SLOW_QUERY_MS` -- optional; queries slower than this (default 250ms) are logged at WARN.
 - [ ] `AUTH_RATE_LIMIT_WINDOW_MS` / `AUTH_RATE_LIMIT_MAX` -- optional; auth brute-force limits (default 15min / 30 attempts per IP). Depends on `TRUST_PROXY` being set correctly (above) to key on the real client IP.
 - [ ] `ACCOUNTING_CYCLE_START_DAY` -- optional; day of month the revenue cycle starts (1 = calendar months).
+- [ ] `DELIVERY_DAY_CAPACITY` -- optional; orders that can be due on one day before booking another needs the Production Manager's OK (default 10). The web calendar reads it from the API, so changing it needs no web redeploy.
+- [ ] `BUSINESS_TIMEZONE` -- optional; the shop's IANA timezone (default `Asia/Kolkata`). It sets where each day of the owner's activity feed (/reports) starts and ends. Leave it unset for India.
 - [ ] `NODE_ENV=production`.
 
 Deploy `needleye-api`. Confirm `GET /health` responds before continuing.
@@ -133,9 +135,12 @@ non-zero if anything returns the wrong status code. It covers `orders:create`,
 `reports:staff`, row-scoping, the unauthenticated case, and the post-ADR-0005
 rules specifically:
 
-- the **three status tiers** (`orders:status:design` / `:pm_received` /
-  `:production`), which are gated by **role only** -- the old "must be assigned
-  to the order" rule is gone;
+- the **four status tiers** (`orders:status:design` / `:pm_received` /
+  `:production` / `:finalization`), which are gated by **role only** -- the old
+  "must be assigned to the order" rule is gone; master_tailor and worker can no
+  longer move an order into QC / Alteration / Delivered;
+- the **no-skip** rule (a jump past a stage the role can't set -- e.g. designer
+  Design Approved -> Falls/Kutchu -- returns `403 ORDER_STATUS_TRANSITION_FORBIDDEN`);
 - the **forward-only** flow (moving backwards, or re-applying the current stage,
   returns `409 ORDER_STATUS_NOT_FORWARD`);
 - **Production Manager** editing an order that isn't theirs (allowed) but never

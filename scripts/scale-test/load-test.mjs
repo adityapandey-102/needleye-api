@@ -64,7 +64,11 @@ async function worker(token, orderIds, stopAt) {
             customerName: "LoadTest " + Date.now(),
             phone: "9000000000",
             billNumber: "LT-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7),
-            dueDate: "2026-12-31",
+            // Spread across ~2 years: one fixed date would hit the delivery-day
+            // capacity after 10 writes and turn the rest into 409 "errors".
+            dueDate: new Date(Date.UTC(2032, 0, 1) + Math.floor(Math.random() * 730) * 86_400_000)
+              .toISOString()
+              .slice(0, 10),
             designerId: undefined,
             masterTailorId: undefined,
             productCategory: "saree",

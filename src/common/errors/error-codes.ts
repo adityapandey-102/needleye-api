@@ -43,6 +43,8 @@ export const ERROR_CODES = {
   ORDER_TOTAL_BELOW_PAID: "ORDER_TOTAL_BELOW_PAID",
   /** Optimistic-lock conflict: the order was modified by someone else since it was loaded. */
   ORDER_MODIFIED: "ORDER_MODIFIED",
+  /** The chosen delivery date is at capacity and the caller didn't confirm the override with the Production Manager. */
+  DELIVERY_DAY_FULL: "DELIVERY_DAY_FULL",
 
   // -- Images -----------------------------------------------------------------
   IMAGE_INVALID_SLOT: "IMAGE_INVALID_SLOT",

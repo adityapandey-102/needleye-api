@@ -9,6 +9,7 @@ import { validateBody } from "../../../common/http/validate.middleware";
 import { createOrderDtoSchema, type CreateOrderDto } from "./dto/create-order.dto";
 import { updateOrderDtoSchema, type UpdateOrderDto } from "./dto/update-order.dto";
 import { updateOrderStatusDtoSchema, type UpdateOrderStatusDto } from "./dto/update-order-status.dto";
+import { deliveryLoadQuerySchema } from "./dto/delivery-load.dto";
 import { validateImageUpload } from "./orders.validation";
 import { OrdersService } from "../application/orders.service";
 import { DrizzleOrdersRepository } from "../infrastructure/drizzle-orders.repository";
@@ -121,6 +122,22 @@ ordersRouter.get(
     if (from > to) from = defaultFrom <= to ? defaultFrom : to;
     const events = await ordersService.getLedgerEvents({ from, to }, parseOrdersPage(req.query));
     res.json(events);
+  }),
+);
+
+// Delivery-day load for the order form's availability check + calendar.
+// Registered before "/:id" so "delivery-load" isn't matched as an order id.
+// Gated on orders:create -- exactly the roles that pick due dates (owner,
+// designer, PM); shop-wide counts only, never order details.
+ordersRouter.get(
+  "/delivery-load",
+  requireCapability("orders:create"),
+  asyncHandler(async (req, res) => {
+    // Strict: a malformed range is a 400 (ZodError -> error middleware), never
+    // a silent fallback -- a garbled date quietly becoming "today" would show
+    // the wrong day's load.
+    const query = deliveryLoadQuerySchema.parse(req.query);
+    res.json(await ordersService.getDeliveryLoad(query));
   }),
 );
 

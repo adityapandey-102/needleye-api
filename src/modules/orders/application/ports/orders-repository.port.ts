@@ -2,6 +2,19 @@ import type { GranularStatus, PaymentStatus, ProductCategory, Role } from "../..
 import type { OrderEntity } from "../../domain/order.entity";
 import type { OrderStatusHistoryEntity } from "../../domain/order-status-history.entity";
 
+/**
+ * What the delivery-capacity rule needs, read under the per-date lock:
+ * `booked` = orders already on the due date (excluding the one being edited),
+ * `previousDueDate` = that order's current date on an edit, null on create.
+ */
+export interface DueDateCapacityFacts {
+  booked: number;
+  previousDueDate: string | null;
+}
+
+/** Throws to veto a write; see OrdersRepositoryPort.create/update. */
+export type DueDateCapacityGuard = (facts: DueDateCapacityFacts) => void;
+
 /** Who is asking -- used to apply row-level visibility, mirroring the orders_select_scoped RLS policy. */
 export interface RowScope {
   role: Role;
@@ -192,15 +205,49 @@ export interface OrdersRepositoryPort {
   /** Paginated payment-ledger audit events (created/updated/deleted) in a date range, newest first -- backs the ledger-activity history. */
   getLedgerEvents(range: { from: string; to: string }, page: OrderListPage): Promise<LedgerEventsResult>;
   findBasicById(id: string): Promise<OrderBasicInfo | null>;
-  create(data: NewOrderRecord): Promise<OrderEntity>;
+  /**
+   * Orders per due date in [from, to] (inclusive, only days with at least one),
+   * across EVERY order -- deliberately NOT row-scoped: delivery capacity is
+   * shop-wide, and the result is bare counts, never order details, so a designer
+   * seeing other designers' totals leaks nothing. `excludeOrderId` leaves one
+   * order out (the one being edited, so it doesn't count against itself).
+   */
+  countOrdersDueByDay(range: { from: string; to: string }, excludeOrderId?: string): Promise<{ date: string; count: number }[]>;
+  /**
+   * Inserts the order + its first status-history row in one transaction.
+   * `assertDueDateCapacity`, when given, runs inside that transaction AFTER a
+   * per-date lock is taken, with how many orders already sit on the due date --
+   * so two people booking the last slot at once serialise, and the second sees
+   * the first. It throws to veto the insert.
+   */
+  create(data: NewOrderRecord, assertDueDateCapacity?: DueDateCapacityGuard): Promise<OrderEntity>;
   /**
    * Updates the order and bumps its `version`. If `expectedVersion` is given,
    * the write is guarded on it (optimistic lock) and throws ORDER_MODIFIED
    * when the stored version has moved on -- i.e. someone else edited it first.
+   * `assertDueDateCapacity` (only meaningful when `data.dueDate` is set) runs
+   * under the per-date lock with the day's count EXCLUDING this order and the
+   * order's current due date -- see create().
    */
-  update(id: string, data: UpdateOrderRecord, expectedVersion?: number): Promise<OrderEntity>;
-  /** Updates production_status and appends one order_status_history row, atomically (one DB transaction). */
-  updateStatus(id: string, status: GranularStatus, changedBy: string): Promise<OrderEntity>;
+  update(
+    id: string,
+    data: UpdateOrderRecord,
+    expectedVersion?: number,
+    assertDueDateCapacity?: DueDateCapacityGuard,
+  ): Promise<OrderEntity>;
+  /**
+   * Updates production_status and appends one order_status_history row,
+   * atomically (one DB transaction, order row locked). Enforces forward-only.
+   * `assertTransition`, when given, is called with the LOCKED current status
+   * before anything is written -- it throws to veto the move (e.g. the
+   * no-skipping-past-a-gated-stage rule), rolling the transaction back.
+   */
+  updateStatus(
+    id: string,
+    status: GranularStatus,
+    changedBy: string,
+    assertTransition?: (current: GranularStatus) => void,
+  ): Promise<OrderEntity>;
   listStatusHistory(orderId: string): Promise<OrderStatusHistoryEntity[]>;
   upsertImage(data: NewImageRecord): Promise<void>;
   findImage(orderId: string, slot: number): Promise<OrderImageInfo | null>;

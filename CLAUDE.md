@@ -1,6 +1,6 @@
 # Project Scale & Engineering Strategy
 
-Internal Line-of-Business (LOB) app. ~100 users, ~300 orders/month, single
+Internal Line-of-Business (LOB) app. ~150 users, ~500 orders/month, single
 organization, business-critical data. Accuracy, maintainability, and
 reliability matter far more than extreme scalability. **Do not overengineer.**
 Always prefer the simplest solution that satisfies the current requirement
@@ -44,6 +44,12 @@ Appropriate for realistic concurrent usage at this scale -- not
 enterprise-scale load testing. Every query gets reviewed for N+1s, duplicate
 queries, unnecessary joins, excessive round trips, unnecessary columns. No
 premature optimization.
+
+The concrete rules (pagination caps, no N+1, indexing, bounded-by-live-set
+queries) and the reasons for them are in `docs/engineering-practices.md` --
+follow them. Checks: `tests/integration/query-budget.integration.test.ts`
+(runs with `test:integration`) and `npm run test:perf` (query audit at
+3-year volume, rolled back). Add every new list/search/report query to both.
 
 ## Monitoring & logging
 
