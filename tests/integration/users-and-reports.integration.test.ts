@@ -124,6 +124,23 @@ describe("Users & reports (integration)", () => {
     expect(Array.isArray((res.body as { orders: unknown[] }).orders)).toBe(true);
   });
 
+  it("GET /orders?createdFrom= (Kanban window): a real date pages normally; a bad one is a 400", async () => {
+    const token = await ownerToken();
+    const auth = `Bearer ${token}`;
+    const ok = await request(app).get("/api/v1/orders?createdFrom=2026-01-01&limit=50").set("Authorization", auth);
+    expect(ok.status).toBe(200);
+    const body = ok.body as { orders: unknown[]; total: number; limit: number };
+    expect(body.limit).toBe(50);
+    expect(body.orders.length).toBeLessThanOrEqual(50);
+    for (const bad of ["2026-02-31", "yesterday", "2026-1-1"]) {
+      const res = await request(app).get(`/api/v1/orders?createdFrom=${bad}`).set("Authorization", auth);
+      expect(res.status, bad).toBe(400);
+      const due = await request(app).get(`/api/v1/orders?dueOn=${bad}`).set("Authorization", auth);
+      expect(due.status, `dueOn=${bad}`).toBe(400);
+    }
+    expect((await request(app).get("/api/v1/orders?dueOn=2026-10-08").set("Authorization", auth)).status).toBe(200);
+  });
+
   it("returns a revenue report over a year range to owner_manager but forbids a designer", async () => {
     const token = await ownerToken();
     const ownerRes = await request(app)

@@ -72,11 +72,12 @@ calendar months and activity days load only when opened.
 
 ## Recommendations (not done: each is a trade-off to decide)
 
-1. **Order lists sign photo URLs they never show.** `GET /orders` signs every
-   order's image URLs in one batched call to storage per list request, but the
-   list and board screens don't show photos. Dropping them from list
-   responses would save one storage round trip per list load (tens of ms). It
-   changes the API contract, so it's a small, separate change.
+1. ~~**Order lists sign photo URLs they never show.**~~ **Done, 25 Sep 2026.**
+   `GET /orders` no longer loads image rows or signs their URLs (list items
+   are `OrderListItem`, i.e. an `Order` without `images`). That saves an image
+   query and one storage round trip per list load. `GET /orders/{id}` still
+   returns signed image URLs. The query-budget test checks that list rows
+   carry no images.
 2. **Order search**: at 12k orders the planner prefers one scan (15 ms) over
    the trigram indexes. As the table grows, it switches to the indexes by
    itself. Nothing to do; the audit will show if that changes.

@@ -14,11 +14,20 @@ import { validateImageUpload } from "./orders.validation";
 import { OrdersService } from "../application/orders.service";
 import { DrizzleOrdersRepository } from "../infrastructure/drizzle-orders.repository";
 import { storageProvider } from "../../../common/storage/supabase-storage-provider";
+import { businessToday, monthStartMonthsBack } from "../../../common/time/business-date";
+import { env } from "../../../config/env";
 
 /** Composition root for the Orders module -- wires the concrete (Infrastructure) adapter into the Application service. */
 const ordersService = new OrdersService(new DrizzleOrdersRepository(), storageProvider);
 
 export const ordersRouter = Router();
+
+/** YYYY-MM-DD that is a real calendar date (rejects 2026-02-31). */
+function isRealIsoDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const d = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
+}
 const upload = multer({ limits: { fileSize: 10 * 1024 * 1024 } });
 
 /** Pagination bounds for GET /orders -- keep the default list response bounded, cap how much one request can pull. */
@@ -39,7 +48,16 @@ ordersRouter.get(
   "/",
   requireCapability("orders:read"),
   asyncHandler(async (req, res) => {
-    const { search, status, designerId, masterTailorId, bucket } = req.query;
+    const { search, status, designerId, masterTailorId, bucket, createdFrom, dueOn } = req.query;
+    // Optional lower bound on the creation day (the Kanban's 2-month window). A
+    // malformed date is a 400, never silently ignored (that would show everything).
+    if (createdFrom !== undefined && !(typeof createdFrom === "string" && isRealIsoDate(createdFrom))) {
+      throw new BadRequestError("createdFrom must be a real date (YYYY-MM-DD)", ERROR_CODES.VALIDATION_ERROR);
+    }
+    // Optional exact due day (the delivery calendar's "orders on this day" list).
+    if (dueOn !== undefined && !(typeof dueOn === "string" && isRealIsoDate(dueOn))) {
+      throw new BadRequestError("dueOn must be a real date (YYYY-MM-DD)", ERROR_CODES.VALIDATION_ERROR);
+    }
     const result = await ordersService.listOrders(
       { profile: req.profile!, authUserId: req.authUserId! },
       {
@@ -48,6 +66,8 @@ ordersRouter.get(
         designerId: typeof designerId === "string" ? designerId : undefined,
         masterTailorId: typeof masterTailorId === "string" ? masterTailorId : undefined,
         bucket: typeof bucket === "string" ? bucket : undefined,
+        createdFrom: typeof createdFrom === "string" ? createdFrom : undefined,
+        dueOn: typeof dueOn === "string" ? dueOn : undefined,
       },
       parseOrdersPage(req.query),
     );
@@ -73,11 +93,12 @@ ordersRouter.get(
   "/revenue",
   requireCapability("reports:financial"),
   asyncHandler(async (req, res) => {
-    const today = new Date();
+    // Defaults are the SHOP's dates (business timezone), not UTC's -- see common/time/business-date.ts.
+    const today = businessToday(new Date(), env.BUSINESS_TIMEZONE);
     const toRaw = req.query.to;
     const fromRaw = req.query.from;
-    const to = typeof toRaw === "string" && ISO_DATE.test(toRaw) ? toRaw : today.toISOString().slice(0, 10);
-    const defaultFrom = new Date(today.getFullYear(), today.getMonth() - 11, 1).toISOString().slice(0, 10);
+    const to = typeof toRaw === "string" && ISO_DATE.test(toRaw) ? toRaw : today;
+    const defaultFrom = monthStartMonthsBack(today, 11);
     let from = typeof fromRaw === "string" && ISO_DATE.test(fromRaw) ? fromRaw : defaultFrom;
     // Guard against an inverted range (from after to).
     if (from > to) from = defaultFrom <= to ? defaultFrom : to;
@@ -113,11 +134,12 @@ ordersRouter.get(
   "/ledger-events",
   requireCapability("reports:financial"),
   asyncHandler(async (req, res) => {
-    const today = new Date();
+    // Defaults are the SHOP's dates (business timezone), not UTC's -- see common/time/business-date.ts.
+    const today = businessToday(new Date(), env.BUSINESS_TIMEZONE);
     const toRaw = req.query.to;
     const fromRaw = req.query.from;
-    const to = typeof toRaw === "string" && ISO_DATE.test(toRaw) ? toRaw : today.toISOString().slice(0, 10);
-    const defaultFrom = new Date(today.getFullYear(), today.getMonth() - 11, 1).toISOString().slice(0, 10);
+    const to = typeof toRaw === "string" && ISO_DATE.test(toRaw) ? toRaw : today;
+    const defaultFrom = monthStartMonthsBack(today, 11);
     let from = typeof fromRaw === "string" && ISO_DATE.test(fromRaw) ? fromRaw : defaultFrom;
     if (from > to) from = defaultFrom <= to ? defaultFrom : to;
     const events = await ordersService.getLedgerEvents({ from, to }, parseOrdersPage(req.query));

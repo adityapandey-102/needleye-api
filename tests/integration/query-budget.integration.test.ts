@@ -64,6 +64,12 @@ describe("query budget: no N+1, bounded pages (integration)", () => {
     });
   }
 
+  it("order list rows carry no images (no image query, no storage signing)", async () => {
+    const res = await request(app).get("/api/v1/orders?limit=5").set("Authorization", auth);
+    const rows = (res.body as { orders: Record<string, unknown>[] }).orders;
+    for (const row of rows) expect(row).not.toHaveProperty("images");
+  });
+
   it("list page sizes are capped (an over-large limit is clamped or refused, never honoured)", async () => {
     const orders = await request(app).get("/api/v1/orders?limit=100000").set("Authorization", auth);
     expect((orders.body as { limit: number }).limit).toBeLessThanOrEqual(100);

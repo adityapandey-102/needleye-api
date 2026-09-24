@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DrizzleOrdersRepository } from "../../src/modules/orders/infrastructure/drizzle-orders.repository";
+import { sql } from "drizzle-orm";
+import { db } from "../../src/common/database/drizzle-client";
 import { ConflictError } from "../../src/common/errors/app-error";
 import { ERROR_CODES } from "../../src/common/errors/error-codes";
 import { createFixtureUser, deleteFixtureOrder, deleteFixtureUser, closeDb } from "./helpers";
@@ -76,6 +78,67 @@ describe("DrizzleOrdersRepository (integration)", () => {
     createdOrderIds.push(first.id, second.id);
 
     expect(first.orderNumber).not.toBe(second.orderNumber);
+  });
+
+  it("order numbers past 999 keep every digit: ORD-YYYY-1234, not a truncated, colliding -123 (migration 20260925000003)", async () => {
+    // Inside a transaction that is always rolled back, so the real counter is untouched.
+    const rollback = new Error("rollback");
+    let numbers: string[] = [];
+    await db
+      .transaction(async (tx) => {
+        await tx.execute(sql`
+          insert into order_counters (year, next_seq) values (extract(year from now())::int, 1234)
+          on conflict (year) do update set next_seq = 1234`);
+        for (let i = 0; i < 2; i++) {
+          const res = await tx.execute<{ order_number: string }>(sql`
+            insert into orders (order_number, customer_name, phone, bill_number, due_date, designer_id, master_tailor_id,
+                                product_category, order_details, payment_status)
+            values ('', 'Numbering', '9000000000', ${`NUM-${Date.now()}-${i}`}, '2039-01-01', ${designer.id}, ${masterTailor.id},
+                    'saree', 'numbering', 'unpaid')
+            returning order_number`);
+          numbers.push(res.rows[0]!.order_number);
+        }
+        throw rollback;
+      })
+      .catch((e: unknown) => {
+        if (e !== rollback) throw e;
+      });
+    const year = new Date().getFullYear();
+    expect(numbers).toEqual([`ORD-${year}-1234`, `ORD-${year}-1235`]);
+    numbers = [];
+  });
+
+  it("createdFrom keeps only orders created on or after that shop day (the Kanban's 2-month window), and the total agrees", async () => {
+    const recent = await repo.create(baseOrder());
+    const old = await repo.create(baseOrder());
+    createdOrderIds.push(recent.id, old.id);
+    // Push one order 70 days into the past.
+    await db.execute(sql`update orders set created_at = now() - interval '70 days' where id = ${old.id}`);
+
+    const sixtyDaysAgo = new Date(Date.now() - 60 * 86_400_000).toISOString().slice(0, 10);
+    const scope = { role: "designer" as const, userId: designer.id };
+    const filters = { createdFrom: sixtyDaysAgo };
+    const page = await repo.findMany(scope, filters, { limit: 50, offset: 0 });
+    const ids = page.map((o) => o.id);
+    expect(ids).toContain(recent.id);
+    expect(ids).not.toContain(old.id);
+    expect(await repo.countMany(scope, filters)).toBe(page.length);
+    // Without the window both are there.
+    const all = (await repo.findMany(scope, {}, { limit: 50, offset: 0 })).map((o) => o.id);
+    expect(all).toEqual(expect.arrayContaining([recent.id, old.id]));
+  });
+
+  it("dueOn lists exactly the orders due that day (the delivery calendar's day list), and the total agrees", async () => {
+    const day = "2038-03-17";
+    const onDay = await repo.create(baseOrder({ dueDate: day }));
+    const dayAfter = await repo.create(baseOrder({ dueDate: "2038-03-18" }));
+    createdOrderIds.push(onDay.id, dayAfter.id);
+    const scope = { role: "owner_manager" as const, userId: designer.id };
+    const page = await repo.findMany(scope, { dueOn: day }, { limit: 50, offset: 0 });
+    expect(page.map((o) => o.id)).toContain(onDay.id);
+    expect(page.map((o) => o.id)).not.toContain(dayAfter.id);
+    expect(page.every((o) => o.dueDate === day)).toBe(true);
+    expect(await repo.countMany(scope, { dueOn: day })).toBe(page.length);
   });
 
   it("updateStatus writes the order row and a new history row together", async () => {

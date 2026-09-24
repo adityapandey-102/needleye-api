@@ -5,7 +5,7 @@ import { assertFieldsEditable, assertOwnershipForScopedEdit } from "../domain/or
 import { assertTotalCoversLedger, derivePaymentStatus } from "../domain/order-ledger.rules";
 import { assertCanChangeStage, assertCanSkipStages } from "../domain/order-status.rules";
 import { checkDeliveryDayCapacity, nearCapacityThreshold } from "../domain/delivery-capacity.rules";
-import { toOrderResponseDto } from "../api/order.presenter";
+import { toOrderListItemDto, toOrderResponseDto } from "../api/order.presenter";
 import { toOrderStatusHistoryResponseDto } from "../api/order-status-history.presenter";
 import { toOrderStatsResponseDto } from "../api/order-stats.presenter";
 import { AUDIT_ACTIONS, AUDIT_ENTITIES } from "../../../common/audit/audit-actions";
@@ -27,13 +27,14 @@ import type {
 import type { DeliveryLoadQuery, DeliveryLoadResponseDto } from "../api/dto/delivery-load.dto";
 import type { CreateOrderDto } from "../api/dto/create-order.dto";
 import type { UpdateOrderDto } from "../api/dto/update-order.dto";
-import type { OrderResponseDto } from "../api/dto/order.response.dto";
+import type { OrderListItemResponseDto, OrderResponseDto } from "../api/dto/order.response.dto";
 import type { OrderStatusHistoryResponseDto } from "../api/dto/order-status-history.response.dto";
 import type { OrderStatsResponseDto } from "../api/dto/order-stats.response.dto";
 import type { RevenueResponseDto } from "../api/dto/revenue.response.dto";
 import type { StaffReportResponseDto } from "../api/dto/staff-report.response.dto";
 import type { LedgerEventsResponseDto, LedgerEventDto, LedgerAmountSnapshot } from "../api/dto/ledger-events.response.dto";
 import type { LedgerEventRaw } from "./ports/orders-repository.port";
+import { businessToday } from "../../../common/time/business-date";
 
 interface AuthContext {
   profile: Profile;
@@ -70,7 +71,7 @@ function toLedgerEventDto(raw: LedgerEventRaw): LedgerEventDto {
 
 /** A page of orders plus the total matching the filters, so the client can render a pager. */
 export interface OrderListResult {
-  orders: OrderResponseDto[];
+  orders: OrderListItemResponseDto[];
   total: number;
   limit: number;
   offset: number;
@@ -107,11 +108,10 @@ export class OrdersService {
       this.ordersRepository.findMany(scope, filters, page),
       this.ordersRepository.countMany(scope, filters),
     ]);
-    const [sums, signedUrls] = await Promise.all([
-      this.ordersRepository.sumPaymentsForOrders(entities.map((e) => e.id)),
-      this.signImageUrls(entities),
-    ]);
-    const orders = entities.map((entity) => toOrderResponseDto(entity, sums[entity.id] ?? "0.00", ctx.profile.role, signedUrls));
+    // No image signing here: list rows carry no images (see toOrderListItemDto),
+    // which saves a round trip to storage on every list load.
+    const sums = await this.ordersRepository.sumPaymentsForOrders(entities.map((e) => e.id));
+    const orders = entities.map((entity) => toOrderListItemDto(entity, sums[entity.id] ?? "0.00", ctx.profile.role));
     return { orders, total, limit: page.limit, offset: page.offset };
   }
 
@@ -179,7 +179,7 @@ export class OrdersService {
     const { confirmedWithProductionManager = false, ...fields } = dto;
     const record: NewOrderRecord = {
       ...fields,
-      bookingDate: dto.bookingDate ?? new Date().toISOString().slice(0, 10),
+      bookingDate: dto.bookingDate ?? businessToday(new Date(), env.BUSINESS_TIMEZONE),
       nextPaymentDate: dto.nextPaymentDate ?? null,
       // Payment status is derived from the ledger, never chosen at creation. A
       // new order starts unpaid; if the creator records an advance (a separate

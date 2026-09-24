@@ -1,5 +1,5 @@
 /**
- * The product catalogue: 43 categories in 6 collections. Mirror of
+ * The product catalogue: 47 categories in 6 collections. Mirror of
  * needleye-web's lib/domain/constants/productCategories.ts -- kept identical.
  *
  * This list is the ONLY validation of `orders.product_category` (the create/
@@ -12,13 +12,13 @@
  *     stores; renaming one orphans those orders. Change the `label` freely --
  *     labels are display-only.
  *   - `value`s are internal and correctly spelled even where the `label` keeps
- *     the business's own spelling ("Devided Skirt" -> `divided_skirt`), so a
+ *     the business's own spelling ("Plazo" -> `palazzo`), so a
  *     label can be corrected later without touching stored data.
  *
  * Womenswear (the core trade) uses plain values; Mens Wear and Kids Wear values
- * carry a `mens_` / `kids_` prefix. That keeps the two labels that appear twice
- * -- "Shirt" (Upper Body, Mens Wear) and "Pant" (Lower Body, Mens Wear) --
- * distinct, and stops any future womenswear addition colliding with a men's one.
+ * carry a `mens_` / `kids_` prefix. That keeps the three labels that appear
+ * twice -- "Shirt" (Upper Body, Mens Wear), "Pant" and "Skirt" (Lower Body,
+ * Mens Wear) -- distinct, and stops any future womenswear addition colliding with a men's one.
  * The first five entries' values predate the catalogue and are unchanged.
  */
 export const PRODUCT_CATEGORY_GROUPS = [
@@ -43,6 +43,7 @@ export const PRODUCT_CATEGORIES = [
   { value: "hw_blouse_skirt", label: "HW Blouse Skirt", group: "upper_body" },
   { value: "short_kurta", label: "Short Kurta", group: "upper_body" },
   { value: "pakistani_kurta", label: "Pakistani Kurta", group: "upper_body" },
+  { value: "custom_upper_body", label: "Custom Upper Body", group: "upper_body" },
   // Full Body
   { value: "anarkali", label: "Anarkali", group: "full_body" },
   { value: "gown", label: "Gown", group: "full_body" },
@@ -56,7 +57,7 @@ export const PRODUCT_CATEGORIES = [
   // Lower Body
   { value: "skirt", label: "Skirt", group: "lower_body" },
   { value: "half_saree", label: "Half Saree", group: "lower_body" },
-  { value: "divided_skirt", label: "Devided Skirt", group: "lower_body" },
+  { value: "divided_skirt", label: "Divided Skirt", group: "lower_body" },
   { value: "palazzo", label: "Plazo", group: "lower_body" },
   { value: "pant", label: "Pant", group: "lower_body" },
   { value: "sharara", label: "Sharara", group: "lower_body" },
@@ -64,9 +65,11 @@ export const PRODUCT_CATEGORIES = [
   { value: "drape_skirt", label: "Drape Skirt", group: "lower_body" },
   { value: "mermaid_skirt", label: "Mermaid Skirt", group: "lower_body" },
   { value: "petticoat", label: "Peticoat", group: "lower_body" },
+  { value: "custom_lower_body", label: "Custom Lower Body", group: "lower_body" },
   // Mens Wear
   { value: "mens_shirt", label: "Shirt", group: "mens_wear" },
   { value: "mens_pant", label: "Pant", group: "mens_wear" },
+  { value: "mens_skirt", label: "Skirt", group: "mens_wear" },
   { value: "mens_shalwar", label: "Shalwar", group: "mens_wear" },
   { value: "mens_blazer", label: "Blazer", group: "mens_wear" },
   { value: "mens_waist_coat", label: "Waist Coat", group: "mens_wear" },
@@ -78,6 +81,7 @@ export const PRODUCT_CATEGORIES = [
   { value: "mens_panchay", label: "Panchay", group: "mens_wear" },
   { value: "mens_shalya", label: "Shalya", group: "mens_wear" },
   { value: "mens_indo_western", label: "Indo Western", group: "mens_wear" },
+  { value: "mens_custom", label: "Custom Mens Wear", group: "mens_wear" },
   // Kids Wear
   { value: "kids_girls_custom", label: "Custom Kid Wear-Girls", group: "kids_girls" },
   { value: "kids_boys_custom", label: "Custom Kid Wear-Boys", group: "kids_boys" },

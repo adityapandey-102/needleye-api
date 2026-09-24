@@ -10,6 +10,8 @@ import type { PaymentsRepositoryPort, UpdatePaymentRecord } from "./ports/paymen
 import type { CreatePaymentDto } from "../api/dto/create-payment.dto";
 import type { UpdatePaymentDto } from "../api/dto/update-payment.dto";
 import type { PaymentResponseDto } from "../api/dto/payment.response.dto";
+import { businessToday } from "../../../common/time/business-date";
+import { env } from "../../../config/env";
 
 interface AuthContext {
   profile: Profile;
@@ -50,7 +52,8 @@ export class PaymentsService {
         orderId,
         amount: dto.amount,
         method: dto.method,
-        paidAt: dto.paidAt ?? new Date().toISOString().slice(0, 10),
+        // The shop's today, not UTC's: a payment at 00:30 IST on the 1st belongs to the new month.
+        paidAt: dto.paidAt ?? businessToday(new Date(), env.BUSINESS_TIMEZONE),
         recordedBy: ctx.authUserId,
         notes: dto.notes || null,
       },

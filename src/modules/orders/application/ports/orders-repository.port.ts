@@ -28,6 +28,13 @@ export interface OrderListFilters {
   masterTailorId?: string;
   /** Dashboard/list filter: active | production | completed | ready | delivered | pending_payment | payment_overdue | payment_upcoming | overdue | urgent | this_month. */
   bucket?: string;
+  /**
+   * Only orders created on or after this shop day (YYYY-MM-DD, business
+   * timezone). The Kanban board uses it to show just the last 2 months.
+   */
+  createdFrom?: string;
+  /** Only orders DUE on this day (YYYY-MM-DD) -- the delivery calendar's day list. */
+  dueOn?: string;
 }
 
 /** Offset pagination for the orders list -- keeps the default list response bounded regardless of how many orders exist. */
@@ -185,6 +192,7 @@ export interface LedgerEventsResult {
 
 /** Persistence contract for the Orders module -- pure data access, no business rules. */
 export interface OrdersRepositoryPort {
+  /** One page of orders. Images are NOT loaded (entities have `images: []`) -- lists never show them. */
   findMany(scope: RowScope, filters: OrderListFilters, page: OrderListPage): Promise<OrderEntity[]>;
   /** Total orders matching the same scope+filters as findMany, ignoring pagination -- backs the list's total count. */
   countMany(scope: RowScope, filters: OrderListFilters): Promise<number>;

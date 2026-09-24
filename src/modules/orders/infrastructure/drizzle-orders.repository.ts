@@ -12,6 +12,7 @@ import { profiles } from "../../users/infrastructure/profile.schema";
 import { AppError, ConflictError, InternalError, NotFoundError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
 import { outstanding, toMoneyString } from "../../../common/money/money";
+import { containsPattern } from "../../../common/database/like-pattern";
 import {
   CANONICAL_TO_GRANULAR,
   COMPLETED_CANONICAL_STAGES,
@@ -24,6 +25,7 @@ import { OrderMapper, type OrderQueryResult } from "./order.mapper";
 import { OrderStatusHistoryMapper, type OrderStatusHistoryRow } from "./order-status-history.mapper";
 import type { OrderEntity } from "../domain/order.entity";
 import type { OrderStatusHistoryEntity } from "../domain/order-status-history.entity";
+import { env } from "../../../config/env";
 import type {
   OrdersRepositoryPort,
   RowScope,
@@ -89,13 +91,22 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     const conditions = [this.rowScopeCondition(scope)];
 
     if (filters.search?.trim()) {
-      const term = `%${filters.search.trim()}%`;
+      const term = containsPattern(filters.search.trim());
       conditions.push(or(ilike(orders.customerName, term), ilike(orders.billNumber, term), ilike(orders.orderNumber, term)));
     }
     if (filters.status) conditions.push(eq(orders.productionStatus, filters.status as OrderEntity["productionStatus"]));
     if (filters.designerId) conditions.push(eq(orders.designerId, filters.designerId));
     if (filters.masterTailorId) conditions.push(eq(orders.masterTailorId, filters.masterTailorId));
     conditions.push(this.bucketCondition(filters.bucket));
+    // One delivery day's orders (orders_due_date_idx).
+    if (filters.dueOn) conditions.push(eq(orders.dueDate, filters.dueOn));
+    if (filters.createdFrom) {
+      // Midnight of that day in the SHOP's timezone, as an instant -- a plain
+      // range on created_at, so orders_created_at_idx applies.
+      conditions.push(
+        sql`${orders.createdAt} >= ((${filters.createdFrom}::date)::timestamp at time zone ${env.BUSINESS_TIMEZONE})`,
+      );
+    }
 
     return and(...conditions);
   }
@@ -135,13 +146,16 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
 
   async findMany(scope: RowScope, filters: OrderListFilters, page: OrderListPage): Promise<OrderEntity[]> {
     try {
-      // One round trip for every order plus its designer/masterTailor/images --
-      // not N+1 -- via Drizzle's relational query API (see order.relations.ts).
+      // One round trip for every order plus its designer/masterTailor -- not
+      // N+1 -- via Drizzle's relational query API (see order.relations.ts).
+      // Images are deliberately NOT loaded: no list screen shows them, and each
+      // one would also need a signed URL from storage. Entities come back with
+      // images: [] -- a single order (findById) still loads them.
       // limit/offset keep this bounded regardless of total order count.
       const rows = await db.query.orders.findMany({
         where: this.listConditions(scope, filters),
         orderBy: [desc(orders.createdAt)],
-        with: { designer: true, masterTailor: true, images: true },
+        with: { designer: true, masterTailor: true },
         limit: page.limit,
         offset: page.offset,
       });

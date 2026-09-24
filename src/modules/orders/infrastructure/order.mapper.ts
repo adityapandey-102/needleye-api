@@ -30,7 +30,8 @@ export type OrderQueryResult = {
   updatedAt: Date;
   designer: { fullName: string } | null;
   masterTailor: { fullName: string } | null;
-  images: Array<{
+  /** Absent when the query didn't load images (order lists). */
+  images?: Array<{
     id: string;
     slot: number;
     storagePath: string;
@@ -68,7 +69,7 @@ export const OrderMapper = {
       designerInstructions: row.designerInstructions,
       specialNotes: row.specialNotes,
       version: row.version,
-      images: row.images
+      images: (row.images ?? [])
         .sort((a, b) => a.slot - b.slot)
         .map((img) => ({
           id: img.id,

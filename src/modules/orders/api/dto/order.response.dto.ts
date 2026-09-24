@@ -53,3 +53,10 @@ export interface OrderResponseDto {
   createdAt: string;
   updatedAt: string;
 }
+
+/**
+ * One row of GET /orders: an order WITHOUT `images`. No list screen shows
+ * photos, and each photo would need a signed URL from storage, so lists skip
+ * them. GET /orders/:id returns the full order with signed image URLs.
+ */
+export type OrderListItemResponseDto = Omit<OrderResponseDto, "images">;

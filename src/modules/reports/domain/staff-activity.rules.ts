@@ -35,11 +35,8 @@ export function staffStatus(openOrders: number): StaffStatus {
 /** The daily activity feed reaches back this many days, today included. */
 export const ACTIVITY_LOOKBACK_DAYS = 7;
 
-/** Today's date (YYYY-MM-DD) in the shop's timezone. */
-export function businessToday(now: Date, timeZone: string): string {
-  // en-CA formats as YYYY-MM-DD.
-  return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
-}
+/** Today's date (YYYY-MM-DD) in the shop's timezone -- the shared helper. */
+export { businessToday } from "../../../common/time/business-date";
 
 /** The days the activity feed offers, newest first: today and the 6 before it. */
 export function activityDays(today: string): string[] {

@@ -8,10 +8,10 @@ import {
 } from "./product-categories";
 
 describe("product catalogue", () => {
-  it("has 43 categories across 6 collections, every value unique", () => {
-    expect(PRODUCT_CATEGORIES).toHaveLength(43);
+  it("has 47 categories across 6 collections, every value unique", () => {
+    expect(PRODUCT_CATEGORIES).toHaveLength(47);
     expect(PRODUCT_CATEGORY_GROUPS).toHaveLength(6);
-    expect(new Set(PRODUCT_CATEGORY_VALUES).size).toBe(43);
+    expect(new Set(PRODUCT_CATEGORY_VALUES).size).toBe(47);
   });
 
   it("puts every category in a real collection, and leaves no collection empty", () => {
@@ -40,7 +40,7 @@ describe("product catalogue", () => {
   });
 
   it("shows the business's own spelling but stores a correctly spelled value", () => {
-    expect(productCategoryLabel("divided_skirt")).toBe("Devided Skirt");
+    expect(productCategoryLabel("divided_skirt")).toBe("Divided Skirt");
     expect(productCategoryLabel("palazzo")).toBe("Plazo");
     expect(productCategoryLabel("petticoat")).toBe("Peticoat");
   });

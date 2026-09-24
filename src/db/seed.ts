@@ -73,7 +73,7 @@ const CUSTOMERS = [
 /**
  * Hand-written details for the five original categories; every other one of the
  * 43 falls back to its collection's (GROUP_DETAILS) -- writing three lines for
- * each of 43 categories would be seed data for its own sake.
+ * each of 47 categories would be seed data for its own sake.
  */
 const CATEGORY_DETAILS: Partial<Record<ProductCategory, string[]>> = {
   designer_blouse: [

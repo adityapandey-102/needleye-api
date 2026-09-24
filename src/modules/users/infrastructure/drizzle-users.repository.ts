@@ -1,4 +1,5 @@
 import { and, eq, ilike, or, sql, type SQL } from "drizzle-orm";
+import { containsPattern } from "../../../common/database/like-pattern";
 import { db } from "../../../common/database/drizzle-client";
 import { profiles } from "./profile.schema";
 // Cross-module Infrastructure-only read/write: `qr_login_tokens` is owned by
@@ -36,7 +37,7 @@ export class DrizzleUsersRepository implements UsersRepositoryPort {
   /** Name-or-email case-insensitive search, shared by findMany and countMany so page and total agree. */
   private searchCondition(filters: UserListFilters): SQL | undefined {
     if (!filters.search?.trim()) return undefined;
-    const term = `%${filters.search.trim()}%`;
+    const term = containsPattern(filters.search.trim());
     return or(ilike(profiles.fullName, term), ilike(profiles.email, term));
   }
 

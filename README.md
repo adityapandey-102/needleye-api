@@ -696,7 +696,7 @@ split off.
 
 ### Product catalogue — validated in the API, not the database
 
-`domain/product-categories.ts` holds 43 categories in 6 collections (Upper
+`domain/product-categories.ts` holds 47 categories in 6 collections (Upper
 Body, Full Body, Lower Body, Mens Wear, Kids Wear - Girls, Kids Wear - Boys),
 mirrored in needleye-web. The create/update DTOs build their zod enum from
 `PRODUCT_CATEGORY_VALUES`, and **that is the only validation**: migration
@@ -709,10 +709,10 @@ change rarely and a bad value corrupts the production flow.
 Rules for editing the list: **never change or remove an existing `value`** —
 every order row stores it, so a rename orphans them (labels are display-only
 and can change freely). `value`s are correctly spelled even where a label keeps
-the business's own spelling ("Devided Skirt" → `divided_skirt`), so a label can
+the business's own spelling ("Plazo" → `palazzo`), so a label can
 be fixed without touching data. Mens Wear / Kids Wear values carry a `mens_` /
-`kids_` prefix, which is what keeps the repeated labels "Shirt" and "Pant"
-distinct. `src/docs/openapi.test.ts` fails if `openapi.yaml`'s `ProductCategory`
+`kids_` prefix, which is what keeps the repeated labels "Shirt", "Pant" and "Skirt"
+distinct (the web shows them as e.g. "Shirt (Mens Wear)" outside the picker). `src/docs/openapi.test.ts` fails if `openapi.yaml`'s `ProductCategory`
 (or `GranularStatus`) enum drifts from the code.
 
 ### Delivery capacity — a soft daily cap with a recorded override
@@ -1290,7 +1290,7 @@ sequenceDiagram
 | PATCH `/users/:id`                            | bearer | `users:manage`                                         | users.routes.ts        | `updateUser`                            | `updateProfile`                                                                   |
 | POST `/users/:id/deactivate`                  | bearer | `users:manage`                                         | users.routes.ts        | `deactivateUser`                        | `updateProfile`, `banAuthUser`, `clearQrToken`                                    |
 | POST `/users/:id/reactivate`                  | bearer | `users:manage`                                         | users.routes.ts        | `reactivateUser`                        | `findById`, `updateProfile`, `unbanAuthUser`                                      |
-| GET `/orders`                                 | bearer | `orders:read`                                          | orders.routes.ts       | `listOrders`                            | `findMany` (row-scoped; `?bucket=` dashboard filters)                             |
+| GET `/orders`                                 | bearer | `orders:read`                                          | orders.routes.ts       | `listOrders`                            | `findMany` (row-scoped; `?bucket=` filters; `?createdFrom=` Kanban window; `?dueOn=` one day; no images) |
 | POST `/orders`                                | bearer | `orders:create`                                        | orders.routes.ts       | `createOrder`                           | `create`                                                                          |
 | GET `/orders/stats`                           | bearer | `orders:read`                                          | orders.routes.ts       | `getStats`                              | `getStats` (row-scoped; registered before `/:id`)                                 |
 | GET `/orders/delivery-load`                   | bearer | `orders:create`                                        | orders.routes.ts       | `getDeliveryLoad`                       | `countOrdersDueByDay` (shop-wide; registered before `/:id`)                       |

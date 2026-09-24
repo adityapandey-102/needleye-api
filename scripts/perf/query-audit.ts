@@ -140,6 +140,15 @@ async function main() {
     { name: "orders bucket: overdue", run: () => orders.findMany(owner, { bucket: "overdue" }, { limit: 20, offset: 0 }) },
     { name: "orders bucket: pending_payment", run: () => orders.findMany(owner, { bucket: "pending_payment" }, { limit: 20, offset: 0 }) },
     {
+      name: "orders kanban (last 2 months, page of 50)",
+      run: () =>
+        orders.findMany(owner, { createdFrom: new Date(Date.now() - 61 * 86_400_000).toISOString().slice(0, 10) }, { limit: 50, offset: 0 }),
+    },
+    {
+      name: "orders kanban count (last 2 months)",
+      run: () => orders.countMany(owner, { createdFrom: new Date(Date.now() - 61 * 86_400_000).toISOString().slice(0, 10) }),
+    },
+    {
       name: "orders list (designer's own)",
       run: () => orders.findMany(designer, {}, { limit: 20, offset: 0 }),
     },
@@ -319,6 +328,11 @@ async function explain(
     `explain (analyze, buffers, format json) ${inlined}`,
   );
   const top = res.rows[0]!["QUERY PLAN"][0];
+  // DUMP=<query name prefix> prints that query's SQL and plan -- for investigating a slow one.
+  if (process.env.DUMP && name.startsWith(process.env.DUMP)) {
+    const keys = ["Node Type", "Relation Name", "Index Name", "Actual Rows", "Actual Total Time", "Heap Fetches", "Filter", "Index Cond", "Plans"];
+    console.log("SQL:", inlined.slice(0, 600), "\nPLAN:", JSON.stringify(top.Plan, keys, 1).slice(0, 2500));
+  }
   const seqScans: string[] = [];
   const walk = (n: PlanNode) => {
     if (n["Node Type"] === "Seq Scan" && n["Relation Name"] && BIG_TABLES.has(n["Relation Name"])) {

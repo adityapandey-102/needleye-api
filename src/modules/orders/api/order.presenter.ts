@@ -2,7 +2,7 @@ import { canViewPaymentFields } from "../domain/order-visibility.rules";
 import { outstanding, toMoneyString } from "../../../common/money/money";
 import type { Role } from "../../../domain";
 import type { OrderEntity } from "../domain/order.entity";
-import type { OrderResponseDto } from "./dto/order.response.dto";
+import type { OrderListItemResponseDto, OrderResponseDto } from "./dto/order.response.dto";
 
 /**
  * Domain entity -> API response DTO: attaches each image's signed URL and
@@ -40,4 +40,10 @@ export function toOrderResponseDto(
 
   const { paymentStatus: _paymentStatus, totalAmount: _totalAmount, amountPaid: _amountPaid, outstanding: _outstanding, ...rest } = dto;
   return rest;
+}
+
+/** A row of an order LIST: the same payment-field rules, but no images (and so no signed URLs to fetch). */
+export function toOrderListItemDto(entity: OrderEntity, amountPaid: string, role: Role): OrderListItemResponseDto {
+  const { images: _images, ...item } = toOrderResponseDto(entity, amountPaid, role, new Map());
+  return item;
 }

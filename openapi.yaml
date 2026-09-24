@@ -557,6 +557,21 @@ paths:
           in: query
           description: Number of orders to skip. Defaults to 0.
           schema: { type: integer, minimum: 0, default: 0 }
+        - name: createdFrom
+          in: query
+          description: >
+            Only orders created on or after this day (midnight in the shop's
+            timezone, BUSINESS_TIMEZONE). The web's Kanban board sends today
+            minus 2 months with limit=50 to page through the recent board. A
+            date that isn't real (e.g. 2026-02-31) is a 400.
+          schema: { type: string, format: date }
+        - name: dueOn
+          in: query
+          description: >
+            Only orders DUE on this day -- the delivery calendar's list of one
+            day's deliveries (owner / production manager dashboard). Row-scoped
+            like the rest of the list. A date that isn't real is a 400.
+          schema: { type: string, format: date }
       responses:
         "200":
           description: A page of orders visible to the caller, plus the total count
@@ -568,7 +583,7 @@ paths:
                 properties:
                   orders:
                     type: array
-                    items: { $ref: "#/components/schemas/Order" }
+                    items: { $ref: "#/components/schemas/OrderListItem" }
                   total:
                     type: integer
                     description: Total orders matching the filters, ignoring pagination.
@@ -1328,13 +1343,13 @@ components:
     ProductCategory:
       type: string
       description: >
-        The product catalogue -- 43 stored values in 6 collections (Upper Body,
+        The product catalogue -- 47 stored values in 6 collections (Upper Body,
         Full Body, Lower Body, Mens Wear, Kids Wear - Girls, Kids Wear - Boys);
         labels and collections live in `src/domain/product-categories.ts`. This
         is a stored VALUE, never a display label ("saree", not "Saree"). Mens
         Wear and Kids Wear values carry a `mens_` / `kids_` prefix, which is how
-        the two labels that appear twice stay distinct (`shirt` vs `mens_shirt`,
-        `pant` vs `mens_pant`). Validated by the API only -- the database has no
+        the labels that appear twice stay distinct (`shirt` vs `mens_shirt`,
+        `pant` vs `mens_pant`, `skirt` vs `mens_skirt`). Validated by the API only -- the database has no
         CHECK on this column since migration 20260924000002.
       enum:
         # Upper Body
@@ -1347,6 +1362,7 @@ components:
         - hw_blouse_skirt
         - short_kurta
         - pakistani_kurta
+        - custom_upper_body
         # Full Body
         - anarkali
         - gown
@@ -1368,9 +1384,11 @@ components:
         - drape_skirt
         - mermaid_skirt
         - petticoat
+        - custom_lower_body
         # Mens Wear
         - mens_shirt
         - mens_pant
+        - mens_skirt
         - mens_shalwar
         - mens_blazer
         - mens_waist_coat
@@ -1382,6 +1400,7 @@ components:
         - mens_panchay
         - mens_shalya
         - mens_indo_western
+        - mens_custom
         # Kids Wear
         - kids_girls_custom
         - kids_boys_custom
@@ -1502,6 +1521,14 @@ components:
         uploadedBy: { type: string, format: uuid, nullable: true }
         createdAt: { type: string, format: date-time }
 
+    OrderListItem:
+      description: |
+        A row of `GET /orders`: every `Order` field **except `images`**. No
+        list screen shows photos, and each photo would need a signed URL from
+        storage, so lists skip them entirely (no image query, no storage call).
+        `GET /orders/{id}` returns the full order with signed image URLs.
+      allOf:
+        - { $ref: "#/components/schemas/Order" }
     Order:
       type: object
       properties:
