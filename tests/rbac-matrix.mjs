@@ -170,14 +170,32 @@ async function main() {
   check("GET /orders/delivery-load as master_tailor -> 403", (await req(loadPath, {}, masterAToken)).status, 403);
   check("GET /orders/delivery-load as accountant -> 403", (await req(loadPath, {}, accountantToken)).status, 403);
 
-  console.log("\n--- orders:edit:pricing_assignment (owner_manager only) ---");
+  console.log("\n--- orders:edit:total (owner_manager any order; designer only their own) ---");
   const pricingPatch = JSON.stringify({ totalAmount: "9999.00" });
   check("PATCH /orders/:id {totalAmount} as owner_manager -> 200", (await req(`/orders/${orderId}`, { method: "PATCH", body: pricingPatch }, ownerToken)).status, 200);
-  check("PATCH /orders/:id {totalAmount} as assigned designer -> 403", (await req(`/orders/${orderId}`, { method: "PATCH", body: pricingPatch }, designerAToken)).status, 403);
+  check(
+    "PATCH /orders/:id {totalAmount} as assigned designer -> 200",
+    (await req(`/orders/${orderId}`, { method: "PATCH", body: JSON.stringify({ totalAmount: "8888.00" }) }, designerAToken)).status,
+    200,
+  );
+  check("PATCH /orders/:id {totalAmount} as unassigned designer -> 403", (await req(`/orders/${orderId}`, { method: "PATCH", body: pricingPatch }, designerBToken)).status, 403);
   check("PATCH /orders/:id {totalAmount} as master_tailor -> 403", (await req(`/orders/${orderId}`, { method: "PATCH", body: pricingPatch }, masterAToken)).status, 403);
+  check("PATCH /orders/:id {totalAmount} as accountant -> 403", (await req(`/orders/${orderId}`, { method: "PATCH", body: pricingPatch }, accountantToken)).status, 403);
   check(
     "PATCH /orders/:id {totalAmount} as production_manager -> 403 (PM edits info, never pricing)",
     (await req(`/orders/${orderId}`, { method: "PATCH", body: pricingPatch }, pmToken)).status,
+    403,
+  );
+
+  console.log("\n--- orders:edit:pricing_assignment (reassigning designer / master: owner_manager only) ---");
+  check(
+    "PATCH /orders/:id {masterTailorId} as assigned designer -> 403",
+    (await req(`/orders/${orderId}`, { method: "PATCH", body: JSON.stringify({ masterTailorId: masterB.id }) }, designerAToken)).status,
+    403,
+  );
+  check(
+    "PATCH /orders/:id {designerId} as assigned designer -> 403",
+    (await req(`/orders/${orderId}`, { method: "PATCH", body: JSON.stringify({ designerId: designerB.id }) }, designerAToken)).status,
     403,
   );
 

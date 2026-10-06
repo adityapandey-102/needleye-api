@@ -130,7 +130,7 @@ npm run test:rbac
 `tests/rbac-matrix.mjs` creates its own throwaway staff accounts (**all six
 roles**) plus throwaway orders, runs 53 checks over plain HTTP, and exits
 non-zero if anything returns the wrong status code. It covers `orders:create`,
-`orders:edit:pricing_assignment` vs `customer_product_fields`,
+`orders:edit:pricing_assignment` vs `orders:edit:total` vs `customer_product_fields`,
 `payments:read`/`payments:manage`, `users:manage`, `reports:financial` vs
 `reports:staff`, row-scoping, the unauthenticated case, and the post-ADR-0005
 rules specifically:

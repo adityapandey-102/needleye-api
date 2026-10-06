@@ -28,13 +28,16 @@ export function assertTotalCoversLedger(newTotalAmount: MoneyLike, paymentsSum: 
  * Derives an order's payment status from its ledger -- the single source of
  * truth now that the status is never chosen by hand. `unpaid` (nothing
  * recorded) -> `advance_paid` (some, less than the total) -> `fully_paid`
- * (recorded sum reaches the total). A zero-total order is `unpaid`. Pure +
- * decimal-exact, so it's identical wherever it runs.
+ * (recorded sum reaches the total). A zero-total order is `fully_paid`: there
+ * is nothing to collect (free work -- promotions, friends, design contests).
+ * Editing the total up later re-derives it to `unpaid`. Pure + decimal-exact,
+ * so it's identical wherever it runs.
  */
 export function derivePaymentStatus(paymentsSum: MoneyLike, totalAmount: MoneyLike): PaymentStatus {
   const paid = money(paymentsSum);
   const total = money(totalAmount);
-  if (total.lessThanOrEqualTo(0) || paid.lessThanOrEqualTo(0)) return "unpaid";
+  if (total.lessThanOrEqualTo(0)) return "fully_paid";
+  if (paid.lessThanOrEqualTo(0)) return "unpaid";
   if (paid.greaterThanOrEqualTo(total)) return "fully_paid";
   return "advance_paid";
 }

@@ -51,7 +51,12 @@ describe("derivePaymentStatus", () => {
     expect(derivePaymentStatus("0.30", "0.30")).toBe("fully_paid");
   });
 
-  it("treats a zero-total order as unpaid", () => {
-    expect(derivePaymentStatus(0, 0)).toBe("unpaid");
+  it("treats a zero-total order (free work) as fully_paid -- nothing to collect", () => {
+    expect(derivePaymentStatus(0, 0)).toBe("fully_paid");
+    expect(derivePaymentStatus("0.00", "0.00")).toBe("fully_paid");
+  });
+
+  it("goes back to unpaid when a zero total is edited up with an empty ledger", () => {
+    expect(derivePaymentStatus("0.00", "4500.00")).toBe("unpaid");
   });
 });

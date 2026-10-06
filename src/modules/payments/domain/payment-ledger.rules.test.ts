@@ -10,6 +10,10 @@ describe("derivePaymentStatus", () => {
     expect(derivePaymentStatus("5000.00", "5000.00")).toBe("fully_paid");
   });
 
+  it("treats a zero-total order as fully_paid (same rule as Orders)", () => {
+    expect(derivePaymentStatus("0.00", "0.00")).toBe("fully_paid");
+  });
+
   it("computes exactly on decimal amounts (no binary float drift)", () => {
     // 0.10 + 0.20 must equal 0.30 exactly -- decimal.js, not IEEE-754.
     expect(derivePaymentStatus("0.30", "0.30")).toBe("fully_paid");

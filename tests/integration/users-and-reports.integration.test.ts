@@ -313,6 +313,58 @@ describe("Users & reports (integration)", () => {
     expect(forbidden.status).toBe(403);
   });
 
+  it("a ₹0 order (free work) is fully_paid and stays out of Pending Payments; editing the total re-derives it", async () => {
+    const owner = await createFixtureUser("owner_manager", "Free Work Owner");
+    const master = await createFixtureUser("master_tailor", "Free Work Master");
+    createdUserIds.push(owner.id, master.id);
+    const session = await authProvider.signInWithPassword(owner.email, owner.password);
+    const auth = `Bearer ${session.accessToken}`;
+    const bill = `FREE-${Date.now()}`;
+
+    const createRes = await request(app)
+      .post("/api/v1/orders")
+      .set("Authorization", auth)
+      .send({
+        customerName: "Free Work Customer",
+        phone: "9000000031",
+        billNumber: bill,
+        dueDate: "2039-01-02",
+        designerId: owner.id,
+        masterTailorId: master.id,
+        productCategory: "saree",
+        orderDetails: "Promotion piece",
+        totalAmount: 0,
+        nextPaymentDate: "2026-01-01", // a past date must not drag it into Overdue
+        productionStatus: "design_pending",
+      });
+    expect(createRes.status).toBe(201);
+    const created = (createRes.body as { order: { id: string; paymentStatus: string } }).order;
+    createdOrderIds.push(created.id);
+    expect(created.paymentStatus).toBe("fully_paid");
+
+    const inBucket = async (bucket: string) => {
+      const res = await request(app).get(`/api/v1/orders?bucket=${bucket}&search=${bill}`).set("Authorization", auth);
+      expect(res.status).toBe(200);
+      return (res.body as { orders: { id: string }[] }).orders.some((o) => o.id === created.id);
+    };
+    for (const bucket of ["pending_payment", "payment_overdue", "payment_upcoming"]) {
+      expect(await inBucket(bucket), bucket).toBe(false);
+    }
+
+    // The price is decided later: the owner edits the total -> nothing collected yet -> unpaid, and it shows up.
+    const priced = await request(app).patch(`/api/v1/orders/${created.id}`).set("Authorization", auth).send({ totalAmount: 4500 });
+    expect(priced.status).toBe(200);
+    expect((priced.body as { order: { paymentStatus: string } }).order.paymentStatus).toBe("unpaid");
+    expect(await inBucket("pending_payment")).toBe(true);
+    expect(await inBucket("payment_overdue")).toBe(true);
+
+    // Set back to ₹0 (e.g. it became a contest piece) -> fully_paid again.
+    const free = await request(app).patch(`/api/v1/orders/${created.id}`).set("Authorization", auth).send({ totalAmount: 0 });
+    expect(free.status).toBe(200);
+    expect((free.body as { order: { paymentStatus: string } }).order.paymentStatus).toBe("fully_paid");
+    expect(await inBucket("pending_payment")).toBe(false);
+  });
+
   it("requires staffId, 404s a non-staff id, and forbids non-owner roles on the staff report", async () => {
     const token = await ownerToken();
     // Missing staffId -> 400.

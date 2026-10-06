@@ -5,6 +5,7 @@ export const CAPABILITIES = [
   "orders:read",
   "orders:edit:customer_product_fields",
   "orders:edit:pricing_assignment",
+  "orders:edit:total",
   // Production-flow stage tiers (see order-status.ts STAGE_CAPABILITY). Which
   // roles may move an order INTO a stage depends only on the stage's tier --
   // NOT on whether the order is assigned to them (the shop-floor model: whoever
@@ -29,7 +30,7 @@ export type Capability = (typeof CAPABILITIES)[number];
  * `false` -> never allowed.
  *
  * Kept as a flat lookup table on purpose (not a generic policy engine) --
- * six roles, thirteen capabilities, all known up front.
+ * six roles, fourteen capabilities, all known up front.
  *
  * NOTE: the four `orders:status:*` capabilities never use "assigned" -- stage
  * changes are gated purely by role tier, by design.
@@ -66,9 +67,21 @@ export const CAPABILITY_MATRIX: Record<Capability, Record<Role, CapabilityScope>
     production_manager: true,
     worker: false,
   },
+  // Reassigning the designer / master tailor: owner only.
   "orders:edit:pricing_assignment": {
     owner_manager: true,
     designer: false,
+    master_tailor: false,
+    accountant: false,
+    production_manager: false,
+    worker: false,
+  },
+  // The order total: owner on any order, and the designer on their OWN orders
+  // (they agree the price with the customer -- often only after booking, e.g.
+  // a ₹0 order priced later).
+  "orders:edit:total": {
+    owner_manager: true,
+    designer: "assigned",
     master_tailor: false,
     accountant: false,
     production_manager: false,

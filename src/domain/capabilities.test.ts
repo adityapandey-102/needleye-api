@@ -31,9 +31,17 @@ describe("capabilities matrix", () => {
     expect(hasCapability("designer", "payments:manage")).toBe(true);
   });
 
-  it("restricts pricing/assignment edits to owner_manager only", () => {
+  it("restricts reassigning designer/master tailor to owner_manager only", () => {
     for (const role of ["designer", "master_tailor", "accountant", "production_manager", "worker"] as Role[]) {
       expect(getCapabilityScope(role, "orders:edit:pricing_assignment")).toBe(false);
+    }
+  });
+
+  it("lets owner_manager change any order's total, and a designer only their own", () => {
+    expect(getCapabilityScope("owner_manager", "orders:edit:total")).toBe(true);
+    expect(getCapabilityScope("designer", "orders:edit:total")).toBe("assigned");
+    for (const role of ["master_tailor", "accountant", "production_manager", "worker"] as Role[]) {
+      expect(getCapabilityScope(role, "orders:edit:total")).toBe(false);
     }
   });
 

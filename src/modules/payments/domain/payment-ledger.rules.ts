@@ -9,12 +9,14 @@ import type { PaymentStatus } from "../../../domain";
  * small, deliberate copy of Orders' own derivePaymentStatus: Domain layers
  * don't import across modules (see docs/adr/0003-per-module-schema-ownership.md),
  * so this invariant gets its own copy here. `unpaid` -> `advance_paid` ->
- * `fully_paid`. Decimal-exact.
+ * `fully_paid`; a zero-total order is `fully_paid` (nothing to collect).
+ * Decimal-exact.
  */
 export function derivePaymentStatus(paymentsSum: MoneyLike, totalAmount: MoneyLike): PaymentStatus {
   const paid = money(paymentsSum);
   const total = money(totalAmount);
-  if (total.lessThanOrEqualTo(0) || paid.lessThanOrEqualTo(0)) return "unpaid";
+  if (total.lessThanOrEqualTo(0)) return "fully_paid";
+  if (paid.lessThanOrEqualTo(0)) return "unpaid";
   if (paid.greaterThanOrEqualTo(total)) return "fully_paid";
   return "advance_paid";
 }

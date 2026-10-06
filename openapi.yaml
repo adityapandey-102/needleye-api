@@ -823,11 +823,13 @@ paths:
       summary: Edit an order
       description: |
         The core field-level RBAC: customer/product fields
-        (`orders:edit:customer_product_fields`) and pricing/assignment fields
-        (`totalAmount`, `designerId`, `masterTailorId`, gated by
-        `orders:edit:pricing_assignment`) are checked *independently* -- a
-        Designer can edit their own order's notes but gets 403 touching
-        `totalAmount`. `productionStatus` is accepted by the request schema
+        (`orders:edit:customer_product_fields`), the total (`totalAmount`,
+        `orders:edit:total` -- owner on any order, a Designer on their own)
+        and reassignment (`designerId`, `masterTailorId`, gated by
+        `orders:edit:pricing_assignment`, owner only) are checked
+        *independently* -- a Designer can edit their own order's notes and
+        total but gets 403 reassigning its designer or master tailor. A
+        total of 0 (free work) derives `fully_paid`. `productionStatus` is accepted by the request schema
         but silently stripped by the controller before it reaches the service
         -- status changes go through `PATCH /orders/{id}/status` instead,
         which enforces design-stage vs production-stage RBAC. Changing
@@ -1407,7 +1409,7 @@ components:
 
     PaymentStatus:
       type: string
-      description: DERIVED from the ledger (sum of payments vs order total), never submitted. unpaid -> advance_paid -> fully_paid.
+      description: DERIVED from the ledger (sum of payments vs order total), never submitted. unpaid -> advance_paid -> fully_paid. A 0 total (free work) is fully_paid.
       enum: [unpaid, advance_paid, fully_paid]
 
     PaymentMethod:

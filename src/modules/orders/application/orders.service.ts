@@ -182,9 +182,10 @@ export class OrdersService {
       bookingDate: dto.bookingDate ?? businessToday(new Date(), env.BUSINESS_TIMEZONE),
       nextPaymentDate: dto.nextPaymentDate ?? null,
       // Payment status is derived from the ledger, never chosen at creation. A
-      // new order starts unpaid; if the creator records an advance (a separate
-      // ledger call right after), that write recomputes and syncs the status.
-      paymentStatus: "unpaid",
+      // new order has an empty ledger: unpaid, or fully_paid when the total is
+      // 0 (free work). If the creator records an advance (a separate ledger
+      // call right after), that write recomputes and syncs the status.
+      paymentStatus: derivePaymentStatus("0.00", fields.totalAmount),
       designerInstructions: dto.designerInstructions || null,
       specialNotes: dto.specialNotes || null,
       createdBy: ctx.authUserId,

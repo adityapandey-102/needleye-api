@@ -114,7 +114,7 @@ more scripts are useful for local development:
 
 - **`npm run seed`** (`src/db/seed.ts`) -- populates ~40 orders spanning every production status, payment state (unpaid/advance/fully, with the status **derived** from the ledger it records), and due-date bucket, with real multi-step status history and a handful of reference images, plus the 5 designer / 5 master-tailor / 1 accountant staff accounts (the designer/master names are the prototype's own, for continuity). Safe to re-run -- staff are looked up by email first, so a second run reuses the same accounts instead of duplicating them; it never deletes anything.
 - **`npm run test:integration`** (`tests/integration/`, Vitest) -- repository↔database, service↔repository, authentication, and API-endpoint coverage against the real local Supabase stack (no mocking). Creates and tears down its own fixtures every run. See `tests/integration/README.md`.
-- **`npm run test:rbac`** (`tests/rbac-matrix.mjs`) -- a small, self-contained per-role 200/403 check against the running API: `orders:create`, `orders:edit:pricing_assignment`, `payments:read`/`payments:manage`, the status tiers (`orders:status:design`/`pm_received`/`production`), `users:manage`, row-scoping, and the unauthenticated case. Needs `SEED_OWNER_PASSWORD` set to an existing Owner/Manager's password; creates its own throwaway fixtures, so it never depends on `npm run seed` having been run first.
+- **`npm run test:rbac`** (`tests/rbac-matrix.mjs`) -- a small, self-contained per-role 200/403 check against the running API: `orders:create`, `orders:edit:total`, `orders:edit:pricing_assignment`, `payments:read`/`payments:manage`, the status tiers (`orders:status:design`/`pm_received`/`production`), `users:manage`, row-scoping, and the unauthenticated case. Needs `SEED_OWNER_PASSWORD` set to an existing Owner/Manager's password; creates its own throwaway fixtures, so it never depends on `npm run seed` having been run first.
 - **`npm run test:perf`** (`scripts/perf/query-audit.ts`, local database only) -- the **query audit**. It captures the real SQL of every important repository call, re-runs it with `EXPLAIN ANALYZE` on 3 years of synthetic data (12k orders, 144k stage moves, 360k audit rows) inside a transaction it rolls back, and fails on a query over 150 ms, a large unexpected sequential scan, or an N+1. `--write` refreshes `docs/performance/query-audit.md`. Its fast sibling is the **query budget** (`tests/integration/query-budget.integration.test.ts`, part of `test:integration`): a page of 50 must cost the same number of queries as a page of 5, and page sizes are capped. Rules and reasons are in `docs/engineering-practices.md`; the latest audit is in `docs/performance/README.md`.
 
 ### Docker
@@ -522,9 +522,11 @@ QR and views/advances it. See ADR 0005 for the full rationale.
 source of truth. `requireCapability('orders:read')` etc. gate access at the
 controller layer against the capability matrix in `domain/capabilities.ts`;
 `orders/domain/order-edit.rules.ts`'s `assertFieldsEditable` additionally
-splits editable fields into customer/product vs pricing/assignment groups
-and checks each independently, so e.g. a Designer can edit their own
-order's notes but is rejected touching `totalAmount`. Row-level scoping (a
+splits editable fields into three groups -- customer/product
+(`orders:edit:customer_product_fields`), the total (`orders:edit:total`) and
+designer/master reassignment (`orders:edit:pricing_assignment`) -- and checks
+each independently, so e.g. a Designer can edit their own order's notes and
+total but is rejected reassigning its master tailor. Row-level scoping (a
 Designer/Master Tailor only ever sees their own assigned orders) is applied
 inside `drizzle-orders.repository.ts`'s query construction.
 
@@ -573,11 +575,14 @@ schemas in `openapi.yaml`; see ADR 0005.
 (`derivePaymentStatus`, a small deliberate duplicate in both the Orders and
 Payments domains -- Domain layers don't import across modules, see ADR 0003):
 `unpaid` (nothing recorded) -> `advance_paid` (some, below the total) ->
-`fully_paid` (recorded sum reaches the total). Because it's derived, the old
-manual-status class of bugs (status disagreeing with the ledger) is gone:
+`fully_paid` (recorded sum reaches the total). A **₹0 total is `fully_paid`**
+-- free work (promotions, friends, design contests) has nothing to collect, so
+it never shows in Pending Payments; editing the total up later re-derives it
+(migration `20261005000001` fixed the older ₹0 rows). Because it's derived, the
+old manual-status class of bugs (status disagreeing with the ledger) is gone:
 
 - `CreateOrderRequest` no longer accepts `paymentStatus`; a new order starts
-  `unpaid`, and an advance collected at booking is recorded as the first
+  `unpaid` (or `fully_paid` at a ₹0 total), and an advance collected at booking is recorded as the first
   ledger entry (`POST /orders/:id/payments` right after creation), which
   syncs the status.
 - Every ledger write (`POST`/`PATCH`/`DELETE` on a payment) recomputes the
@@ -1313,7 +1318,7 @@ sequenceDiagram
 | GET `/team-members`                           | bearer | -- (any authenticated role)                            | team-members.routes.ts | `listActive`                            | `findActive`                                                                      |
 
 `PATCH /orders/:id` isn't gated by a single capability at the router level --
-`OrdersService.updateOrder` checks `customer_product_fields` vs
+`OrdersService.updateOrder` checks `customer_product_fields`, `total` and
 `pricing_assignment` independently per field group, which is why it's "--"
 in the table above and explained in prose under RBAC.
 
