@@ -57,11 +57,12 @@ SELECT
   random() < 0.3, random() < 0.25, random() < 0.2,
   (ARRAY['unpaid','advance_paid','fully_paid'])[1 + floor(random() * 3)::int],
   round((500 + random() * 49500)::numeric, 2),
-  -- 14 stages: the multiplier MUST equal the array length, or the last entries
-  -- (Delivered) can never be picked.
+  -- 16 stages: the multiplier MUST equal the array length, or the last entries
+  -- (Delivered) can never be picked. Inserts skip the Delivered-only-from-Ready
+  -- trigger (it guards updates), so synthetic rows may start anywhere.
   (ARRAY['design_pending','design_approved','production_manager_received','falls_kutchu',
-         'fabric_purchased','dyeing','cutting','stitching','hand_work','machine_work','finishing',
-         'quality_check','alteration','delivered'])[1 + floor(random() * 14)::int],
+         'fabric_purchased','dyeing','marking','cutting','stitching','hand_work','machine_work','finishing',
+         'quality_check','alteration','ready','delivered'])[1 + floor(random() * 16)::int],
   :'owner_id'::uuid, :'owner_id'::uuid, bd::timestamptz, bd::timestamptz, 0
 FROM generate_series(1, :orders) AS g,
      LATERAL (SELECT (now() - (floor(random() * 365) || ' days')::interval)::date AS bd) t,

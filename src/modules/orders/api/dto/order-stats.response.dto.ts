@@ -7,10 +7,15 @@
 export interface OrderStatsResponseDto {
   total: number;
   active: number;
+  /** Every delivered order ever. Deprecated -- kept for older web builds; use deliveredThisMonth. */
   completed: number;
+  /** Orders that reached Delivered since the 1st of this month (shop timezone). Visible to all roles. */
+  deliveredThisMonth: number;
+  /** Orders currently in Ready -- finished, waiting for the customer. Visible to all roles. */
+  ready: number;
   /** Orders created in the current calendar month. Visible to all roles. */
   thisMonth: number;
-  /** Orders in an active production stage (cutting..QC). Visible to all roles. */
+  /** Orders in an active production stage (Falls/Kutchu..Alteration; not Ready or Delivered). Visible to all roles. */
   inProduction: number;
   /** Active orders past their delivery due date. Visible to all roles. */
   overdue: number;

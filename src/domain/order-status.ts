@@ -1,9 +1,14 @@
 import type { Capability } from "./capabilities";
 
 /**
- * The production lifecycle. A single linear, forward-only flow of 14 stages
- * (see STAGE_ORDER). `orders.production_status` always stores one of these
- * granular values.
+ * The production lifecycle: 16 stages (see STAGE_ORDER), forward-only with ONE
+ * exception -- Ready -> Alteration, so a garment can loop Ready -> Alteration ->
+ * Ready as often as needed. Delivered is reachable only from Ready. See
+ * stageMoveRefusal() and ADR 0008. `orders.production_status` always stores one
+ * of these granular values.
+ *
+ * Alteration sits BEFORE Ready in the order so the board and the tracker read
+ * Ready right before Delivered; the main path skips it (QC -> Ready).
  *
  * A parallel CANONICAL_STAGES vocabulary still exists so the Kanban board has a
  * stable grouping key, but the flow is now effectively 1:1 (each granular stage
@@ -16,6 +21,7 @@ export const GRANULAR_STATUSES = [
   { value: "falls_kutchu", label: "Falls / Kutchu" },
   { value: "fabric_purchased", label: "Fabric Purchased" },
   { value: "dyeing", label: "Dyeing" },
+  { value: "marking", label: "Marking" },
   { value: "cutting", label: "Cutting" },
   { value: "stitching", label: "Stitching" },
   { value: "hand_work", label: "Hand Work" },
@@ -23,6 +29,7 @@ export const GRANULAR_STATUSES = [
   { value: "finishing", label: "Finishing" },
   { value: "quality_check", label: "Quality Check / Trail" },
   { value: "alteration", label: "Alteration" },
+  { value: "ready", label: "Ready" },
   { value: "delivered", label: "Delivered" },
 ] as const;
 
@@ -83,6 +90,7 @@ export const STAGE_CAPABILITY: Record<GranularStatus, StatusCapability> = {
   falls_kutchu: "orders:status:production",
   fabric_purchased: "orders:status:production",
   dyeing: "orders:status:production",
+  marking: "orders:status:production",
   cutting: "orders:status:production",
   stitching: "orders:status:production",
   hand_work: "orders:status:production",
@@ -90,6 +98,7 @@ export const STAGE_CAPABILITY: Record<GranularStatus, StatusCapability> = {
   finishing: "orders:status:production",
   quality_check: "orders:status:finalization",
   alteration: "orders:status:finalization",
+  ready: "orders:status:finalization",
   delivered: "orders:status:finalization",
 };
 
@@ -120,3 +129,36 @@ export const COMPLETED_CANONICAL_STAGES: CanonicalStage[] = ["delivered"];
 
 /** The one stage that should render as an "alarming" (needs-attention) state in the UI. */
 export const ALARMING_STATUS: GranularStatus = "alteration";
+
+/** Finished and waiting for the customer -- the only stage Delivered can follow. */
+export const READY_STATUS: GranularStatus = "ready";
+
+/** Why a move from `from` to `to` breaks the flow's shape, or null if it doesn't (role checks are separate). */
+export type StageMoveRefusal = "same_stage" | "backward" | "deliver_requires_ready";
+
+/**
+ * The flow's shape rules, independent of who is asking:
+ *   - same stage           -> refused (idempotency / concurrent double-advance)
+ *   - into Delivered       -> only from Ready
+ *   - backwards            -> only Ready -> Alteration (the alteration loop)
+ *   - any other forward move is fine (skips are checked against the role separately)
+ */
+export function stageMoveRefusal(from: GranularStatus, to: GranularStatus): StageMoveRefusal | null {
+  if (from === to) return "same_stage";
+  if (to === "delivered" && from !== READY_STATUS) return "deliver_requires_ready";
+  if (STAGE_ORDER[to] < STAGE_ORDER[from]) {
+    return from === READY_STATUS && to === ALARMING_STATUS ? null : "backward";
+  }
+  return null;
+}
+
+/**
+ * The stage a scan or "advance" button moves to next: the next stage on the MAIN
+ * path. Alteration is never the default next step (it's a deliberate choice), so
+ * QC and Alteration both advance to Ready. Null once Delivered.
+ */
+export function nextMainStage(current: GranularStatus): GranularStatus | null {
+  if (current === "delivered") return null;
+  if (current === "quality_check" || current === ALARMING_STATUS) return READY_STATUS;
+  return GRANULAR_STATUS_VALUES[STAGE_ORDER[current] + 1] ?? null;
+}

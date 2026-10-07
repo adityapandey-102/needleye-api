@@ -172,7 +172,11 @@ rate limiting, optimistic locking), `0005-money-roles-status-flow-and-concurrenc
 adds the finalization tier, the no-skip rule, and the Dyeing stage), and `0006-production-deployment-and-database-privileges.md`
 (the least-privilege runtime DB role, migration-vs-runtime credentials, the
 Session-mode pooler, `TRUST_PROXY`/`DB_POOL_MAX`/`API_PORT`, and why there are
-two Supabase keys).
+two Supabase keys). `0007-leads-and-public-enquiry-form.md` records the Leads
+module, the public enquiry form and the Ledger Activity export.
+`0008-ledger-integrity-pricing-and-stages.md` is the ledger-integrity programme
+(five phases): the Marking and Ready stages, Delivered only from Ready, the
+pricing and payment rules, split audit logs, ledger totals and closing the books.
 
 ### Module conversion history
 
@@ -676,25 +680,31 @@ _target_ status in the request body, which isn't known until it's parsed, so
 `OrdersService.updateStatus` delegates the authorization decision to
 `domain/order-status.rules.ts`'s `assertCanChangeStage(role, newStatus)` (same
 pattern `updateOrder` uses for its field-split check, via
-`assertFieldsEditable`). Each of the 14 stages maps to one of four capability
-tiers via `STAGE_CAPABILITY` in `domain/order-status.ts` (see ADR 0005):
+`assertFieldsEditable`). Each of the 16 stages maps to one of four capability
+tiers via `STAGE_CAPABILITY` in `domain/order-status.ts` (see ADR 0005 and 0008):
 
 - `orders:status:design` — Design Pending, Design Approved (owner / designer /
   production_manager)
 - `orders:status:pm_received` — Production Manager Received (owner /
   production_manager only)
-- `orders:status:production` — Falls/Kutchu … Finishing (owner / designer /
-  production_manager / worker / master_tailor)
-- `orders:status:finalization` — Quality Check / Trail, Alteration, Delivered
+- `orders:status:production` — Falls/Kutchu … Finishing, incl. Dyeing and
+  Marking (owner / designer / production_manager / worker / master_tailor)
+- `orders:status:finalization` — Quality Check / Trail, Alteration, Ready, Delivered
   (owner / designer / production_manager — **not** master_tailor or worker:
   these are sign-off stages, so the floor can't move an order into them)
 
 The check is a **pure tier check with no ownership/`"assigned"` restriction** —
 whoever's role can reach a stage may advance any order to it (the earlier
-assigned-only rule was removed in ADR 0005). Movement is **forward-only**: the
-repository locks the row (`SELECT … FOR UPDATE`), reads the current stage, and
-rejects any move to an equal-or-earlier stage with
-`409 ORDER_STATUS_NOT_FORWARD`. That makes re-applying the current stage a no-op
+assigned-only rule was removed in ADR 0005). Movement is **forward-only with one
+loop** (ADR 0008): the repository locks the row (`SELECT … FOR UPDATE`), reads
+the current stage, and `assertStageMove` rejects any move to an equal-or-earlier
+stage with `409 ORDER_STATUS_NOT_FORWARD` -- except **Ready -> Alteration**, so a
+garment can go Ready -> Alteration -> Ready as often as needed -- and any move
+into Delivered from a stage other than Ready with
+`409 ORDER_DELIVER_REQUIRES_READY`. The database enforces Delivered-only-from-
+Ready too (trigger `orders_guard_stage_change`), so no other write path can skip
+it. The main path is QC -> Ready -> Delivered; `nextMainStage` (what a QR scan
+offers) never suggests Alteration. Re-applying the current stage is a no-op
 (no duplicate history row) and blocks reverts, and the row lock serialises two
 people advancing the same order at once (the loser gets the same 409) — see the
 concurrency integration test asserting `[200, 409]`.
@@ -711,11 +721,16 @@ row-locked transaction as the forward-only check: the service passes it to
 `repository.updateStatus` as a guard, keeping the rule in the domain layer while
 enforcing it against the locked value rather than a possibly stale read.
 
-`PRODUCTION_STAGE_STATUSES` (which backs the dashboard's "In Production" count)
-is a *reporting* grouping defined by position — Falls/Kutchu through Delivered —
-not by permission tier. Deriving it from the tier would have silently dropped
-Quality Check and Alteration out of that count when the finalization tier was
-split off.
+`PRODUCTION_STAGE_STATUSES` is a *reporting* grouping defined by position —
+Falls/Kutchu through Delivered — not by permission tier. Deriving it from the
+tier would have silently dropped Quality Check and Alteration out of that count
+when the finalization tier was split off. The dashboard's "In Production" count
+is that grouping minus Ready and Delivered; Ready has its own card ("Ready for
+delivery", `stats.ready`, bucket `ready`). "Delivered" on the dashboard is
+`deliveredThisMonth` (bucket `delivered_this_month`): orders whose Delivered
+stage-history row falls on or after the 1st of this month in
+`BUSINESS_TIMEZONE` -- not every delivered order ever (`completed` is still
+returned for older web builds).
 
 ### Product catalogue — validated in the API, not the database
 

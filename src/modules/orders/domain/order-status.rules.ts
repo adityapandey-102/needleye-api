@@ -1,5 +1,12 @@
-import { GRANULAR_STATUS_VALUES, getCapabilityScope, granularLabel, stageCapability, stageIndex } from "../../../domain";
-import { ForbiddenError } from "../../../common/errors/app-error";
+import {
+  GRANULAR_STATUS_VALUES,
+  getCapabilityScope,
+  granularLabel,
+  stageCapability,
+  stageIndex,
+  stageMoveRefusal,
+} from "../../../domain";
+import { ConflictError, ForbiddenError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
 import type { GranularStatus, Role } from "../../../domain";
 
@@ -15,7 +22,7 @@ import type { GranularStatus, Role } from "../../../domain";
  * physically receives the garment scans it and advances the stage, so anyone in
  * the stage's tier may do it on any order.
  *
- * Forward-only ordering, idempotency, concurrency, and the no-skipping rule
+ * The flow's shape (assertStageMove), concurrency, and the no-skipping rule
  * (assertCanSkipStages) all need the order's *current* status, which must be
  * read and compared inside the same row-locked transaction that writes -- so
  * DrizzleOrdersRepository.updateStatus runs them there, not the service.
@@ -57,5 +64,31 @@ export function assertCanSkipStages(role: Role, from: GranularStatus, to: Granul
         ERROR_CODES.ORDER_STATUS_TRANSITION_FORBIDDEN,
       );
     }
+  }
+}
+
+/**
+ * The flow's shape (ADR 0008): forward-only except Ready -> Alteration, and
+ * Delivered only from Ready. Both 409s -- the move is valid in principle but
+ * not from where the order is now. The database trigger
+ * orders_guard_stage_change enforces the same two rules underneath.
+ */
+export function assertStageMove(from: GranularStatus, to: GranularStatus): void {
+  switch (stageMoveRefusal(from, to)) {
+    case "same_stage":
+      throw new ConflictError(`This order is already at "${granularLabel(from)}".`, ERROR_CODES.ORDER_STATUS_NOT_FORWARD);
+    case "deliver_requires_ready":
+      throw new ConflictError(
+        `This order is at "${granularLabel(from)}" -- an order can only be delivered once it's Ready.`,
+        ERROR_CODES.ORDER_DELIVER_REQUIRES_READY,
+      );
+    case "backward":
+      throw new ConflictError(
+        `This order is already at "${granularLabel(from)}" -- the production flow only moves forward ` +
+          `(the one way back is Ready -> Alteration).`,
+        ERROR_CODES.ORDER_STATUS_NOT_FORWARD,
+      );
+    case null:
+      return;
   }
 }

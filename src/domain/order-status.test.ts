@@ -8,7 +8,9 @@ import {
   STATUS_ALIASES,
   canonicalLabel,
   granularLabel,
+  nextMainStage,
   stageIndex,
+  stageMoveRefusal,
   toCanonicalStage,
 } from "./order-status";
 
@@ -38,13 +40,16 @@ describe("order status vocabularies", () => {
     );
     expect(design).toEqual(DESIGN_STAGE_STATUSES);
     expect(pmReceived).toEqual(["production_manager_received"]);
-    expect(finalization).toEqual(["quality_check", "alteration", "delivered"]);
+    expect(finalization).toEqual(["quality_check", "alteration", "ready", "delivered"]);
   });
 
-  it("places Dyeing between Fabric Purchased and Cutting, in the production tier", () => {
-    expect(GRANULAR_STATUS_VALUES).toHaveLength(14);
+  it("places Dyeing then Marking between Fabric Purchased and Cutting, in the production tier", () => {
+    expect(GRANULAR_STATUS_VALUES).toHaveLength(16);
     expect(stageIndex("dyeing")).toBe(stageIndex("fabric_purchased") + 1);
-    expect(stageIndex("cutting")).toBe(stageIndex("dyeing") + 1);
+    expect(stageIndex("marking")).toBe(stageIndex("dyeing") + 1);
+    expect(stageIndex("cutting")).toBe(stageIndex("marking") + 1);
+    expect(STAGE_CAPABILITY.marking).toBe("orders:status:production");
+    expect(granularLabel("marking")).toBe("Marking");
     expect(STAGE_CAPABILITY.dyeing).toBe("orders:status:production");
     expect(granularLabel("dyeing")).toBe("Dyeing");
     expect(PRODUCTION_STAGE_STATUSES).toContain("dyeing");
@@ -62,6 +67,12 @@ describe("order status vocabularies", () => {
     expect(PRODUCTION_STAGE_STATUSES).not.toContain("production_manager_received");
   });
 
+  it("places Ready right before Delivered, after Alteration, in the finalization tier", () => {
+    expect(GRANULAR_STATUS_VALUES.slice(-4)).toEqual(["quality_check", "alteration", "ready", "delivered"]);
+    expect(STAGE_CAPABILITY.ready).toBe("orders:status:finalization");
+    expect(granularLabel("ready")).toBe("Ready");
+  });
+
   it("orders the flow strictly forward (each stage's index is greater than the previous)", () => {
     for (let i = 1; i < GRANULAR_STATUS_VALUES.length; i++) {
       expect(stageIndex(GRANULAR_STATUS_VALUES[i]!)).toBeGreaterThan(stageIndex(GRANULAR_STATUS_VALUES[i - 1]!));
@@ -74,5 +85,61 @@ describe("order status vocabularies", () => {
     expect(canonicalLabel("delivered")).toBe("Delivered");
     // @ts-expect-error -- exercising the fallback branch with a value outside the known union
     expect(granularLabel("not_a_real_status")).toBe("not_a_real_status");
+  });
+});
+
+describe("stageMoveRefusal (the flow's shape, ADR 0008)", () => {
+  it("allows ordinary forward moves, including skips", () => {
+    expect(stageMoveRefusal("design_pending", "design_approved")).toBeNull();
+    expect(stageMoveRefusal("dyeing", "marking")).toBeNull();
+    expect(stageMoveRefusal("stitching", "finishing")).toBeNull();
+    expect(stageMoveRefusal("quality_check", "ready")).toBeNull();
+    expect(stageMoveRefusal("quality_check", "alteration")).toBeNull();
+    expect(stageMoveRefusal("finishing", "ready")).toBeNull();
+  });
+
+  it("refuses the same stage (repeat scan / concurrent double-advance)", () => {
+    expect(stageMoveRefusal("cutting", "cutting")).toBe("same_stage");
+    expect(stageMoveRefusal("ready", "ready")).toBe("same_stage");
+    expect(stageMoveRefusal("delivered", "delivered")).toBe("same_stage");
+  });
+
+  it("allows Delivered only from Ready", () => {
+    expect(stageMoveRefusal("ready", "delivered")).toBeNull();
+    for (const from of GRANULAR_STATUS_VALUES.filter((s) => s !== "ready" && s !== "delivered")) {
+      expect(stageMoveRefusal(from, "delivered")).toBe("deliver_requires_ready");
+    }
+  });
+
+  it("allows the alteration loop: Ready -> Alteration -> Ready", () => {
+    expect(stageMoveRefusal("ready", "alteration")).toBeNull();
+    expect(stageMoveRefusal("alteration", "ready")).toBeNull();
+  });
+
+  it("refuses every other backward move", () => {
+    expect(stageMoveRefusal("cutting", "marking")).toBe("backward");
+    expect(stageMoveRefusal("ready", "quality_check")).toBe("backward");
+    expect(stageMoveRefusal("alteration", "quality_check")).toBe("backward");
+    expect(stageMoveRefusal("delivered", "alteration")).toBe("backward");
+    expect(stageMoveRefusal("delivered", "ready")).toBe("backward");
+  });
+});
+
+describe("nextMainStage (what a scan advances to)", () => {
+  it("walks the main path and never suggests Alteration", () => {
+    expect(nextMainStage("dyeing")).toBe("marking");
+    expect(nextMainStage("marking")).toBe("cutting");
+    expect(nextMainStage("finishing")).toBe("quality_check");
+    expect(nextMainStage("quality_check")).toBe("ready");
+    expect(nextMainStage("alteration")).toBe("ready");
+    expect(nextMainStage("ready")).toBe("delivered");
+    expect(nextMainStage("delivered")).toBeNull();
+  });
+
+  it("every suggestion is a move the flow allows", () => {
+    for (const from of GRANULAR_STATUS_VALUES) {
+      const next = nextMainStage(from);
+      if (next) expect(stageMoveRefusal(from, next)).toBeNull();
+    }
   });
 });

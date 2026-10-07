@@ -281,11 +281,22 @@ async function main() {
   check("PATCH status -> quality_check as worker -> 403", await setStatus(orderId, "quality_check", workerToken), 403);
   check("PATCH status -> delivered as master_tailor -> 403", await setStatus(orderId, "delivered", masterAToken), 403);
   check("PATCH status -> quality_check as designer -> 200", await setStatus(orderId, "quality_check", designerAToken), 200);
+
+  console.log("\n--- Ready, the alteration loop, Delivered only from Ready (ADR 0008) ---");
+  check("PATCH status -> delivered from QC as production_manager -> 409 (only from Ready)", await setStatus(orderId, "delivered", pmToken), 409);
+  check("PATCH status -> ready as master_tailor -> 403", await setStatus(orderId, "ready", masterAToken), 403);
   check(
-    "PATCH status -> delivered as production_manager -> 200 (may skip Alteration: PM can set it)",
-    await setStatus(orderId, "delivered", pmToken),
+    "PATCH status -> ready as production_manager -> 200 (may skip Alteration: PM can set it)",
+    await setStatus(orderId, "ready", pmToken),
     200,
   );
+  check("PATCH status -> alteration from Ready as designer -> 200 (the one way back)", await setStatus(orderId, "alteration", designerAToken), 200);
+  check("PATCH status -> delivered from Alteration as owner -> 409 (only from Ready)", await setStatus(orderId, "delivered", ownerToken), 409);
+  check("PATCH status -> quality_check from Alteration as owner -> 409 (no other way back)", await setStatus(orderId, "quality_check", ownerToken), 409);
+  check("PATCH status -> ready again as designer -> 200", await setStatus(orderId, "ready", designerAToken), 200);
+  check("PATCH status -> delivered as worker -> 403", await setStatus(orderId, "delivered", workerToken), 403);
+  check("PATCH status -> delivered from Ready as production_manager -> 200", await setStatus(orderId, "delivered", pmToken), 200);
+  check("PATCH status -> alteration after Delivered as owner -> 409", await setStatus(orderId, "alteration", ownerToken), 409);
 
   console.log("\n--- dashboard + reports ---");
   check("GET /orders/stats as owner_manager -> 200", (await req("/orders/stats", {}, ownerToken)).status, 200);

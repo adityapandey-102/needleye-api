@@ -547,12 +547,15 @@ paths:
           in: query
           description: |
             Dashboard filter a summary card deep-links into. One of:
-            `active`, `production`, `completed`, `ready`, `delivered`,
-            `pending_payment`, `overdue`, `urgent`, `this_month`.
+            `active`, `production` (Falls/Kutchu..Alteration), `completed`,
+            `ready` (in Ready now), `delivered`, `delivered_this_month`
+            (reached Delivered since the 1st, shop timezone), `pending_payment`,
+            `payment_overdue`, `payment_upcoming`, `overdue`, `urgent`,
+            `this_month` (booked since the 1st, shop timezone).
             Unknown values are ignored (no filtering).
           schema:
             type: string
-            enum: [active, production, completed, ready, delivered, pending_payment, payment_overdue, payment_upcoming, overdue, urgent, this_month]
+            enum: [active, production, completed, ready, delivered, delivered_this_month, pending_payment, payment_overdue, payment_upcoming, overdue, urgent, this_month]
         - name: limit
           in: query
           description: Page size. Defaults to 20, clamped to a maximum of 100.
@@ -934,18 +937,22 @@ paths:
         |---|---|---|
         | `orders:status:design` | Design Pending, Design Approved | owner, designer, PM |
         | `orders:status:pm_received` | Production Manager Received | owner, PM |
-        | `orders:status:production` | Falls/Kutchu ... Finishing | owner, designer, PM, master tailor, worker |
-        | `orders:status:finalization` | Quality Check / Trail, Alteration, Delivered | owner, designer, PM |
+        | `orders:status:production` | Falls/Kutchu ... Finishing (incl. Dyeing, Marking) | owner, designer, PM, master tailor, worker |
+        | `orders:status:finalization` | Quality Check / Trail, Alteration, Ready, Delivered | owner, designer, PM |
 
         **No skipping past a gated stage.** A forward jump may pass over
         intermediate stages only if the caller could have set each of them --
         so a designer can't go Design Approved -> Falls/Kutchu over PM Received,
         but anyone can skip Hand Work on an order that doesn't need it.
 
-        **Forward-only.** Moving to the current or an earlier stage is a 409.
-        The order row is locked for the whole check-and-write, so two people
-        advancing the same order at once serialise (the loser gets the 409),
-        and the forward-only + no-skip checks run against the locked stage.
+        **Forward-only, with one loop (ADR 0008).** Moving to the current or an
+        earlier stage is a 409 -- except **Ready -> Alteration**, so a garment
+        can go Ready -> Alteration -> Ready as often as needed. **Delivered only
+        from Ready** (409 `ORDER_DELIVER_REQUIRES_READY`; a database trigger
+        enforces it too). The order row is locked for the whole
+        check-and-write, so two people advancing the same order at once
+        serialise (the loser gets the 409), and the flow + no-skip checks run
+        against the locked stage.
 
         Deliberately not gated by a `requireCapability` middleware call -- the
         capability depends on the *target* status in the body -- so the
@@ -979,7 +986,9 @@ paths:
         "409":
           description: >-
             `ORDER_STATUS_NOT_FORWARD` -- the target is the order's current stage
-            or an earlier one (also what the loser of a concurrent advance gets).
+            or an earlier one other than Ready -> Alteration (also what the loser
+            of a concurrent advance gets). `ORDER_DELIVER_REQUIRES_READY` -- the
+            target is Delivered but the order isn't in Ready.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1746,10 +1755,11 @@ components:
     GranularStatus:
       type: string
       description: >
-        The 14-stage, forward-only production flow. `orders.production_status`
-        always stores one of these. Moving into a stage is gated by role tier
+        The 16-stage production flow. `orders.production_status` always
+        stores one of these. Moving into a stage is gated by role tier
         (design / pm_received / production / finalization) -- not by
-        assignment -- can only move forward, and can't skip past a stage the
+        assignment -- moves forward only (except Ready -> Alteration),
+        reaches Delivered only from Ready, and can't skip past a stage the
         role couldn't set (see PATCH /orders/{id}/status).
       enum:
         - design_pending
@@ -1758,6 +1768,7 @@ components:
         - falls_kutchu
         - fabric_purchased
         - dyeing
+        - marking
         - cutting
         - stitching
         - hand_work
@@ -1765,6 +1776,7 @@ components:
         - finishing
         - quality_check
         - alteration
+        - ready
         - delivered
 
     ProductCategory:
@@ -2008,10 +2020,12 @@ components:
       type: object
       properties:
         total: { type: integer, description: Every order in the caller's row scope. }
-        active: { type: integer, description: "Not yet in a completed canonical stage (ready_for_delivery/delivered)." }
-        completed: { type: integer, description: In the ready_for_delivery or delivered canonical stage. }
-        thisMonth: { type: integer, description: "Orders created in the current calendar month. Visible to all roles." }
-        inProduction: { type: integer, description: "Orders in an active production stage (cutting..QC, excluding ready/delivered). Visible to all roles." }
+        active: { type: integer, description: "Not yet Delivered (Ready orders count as active)." }
+        completed: { type: integer, description: "Deprecated (kept for older web builds): every Delivered order ever. The dashboard shows deliveredThisMonth." }
+        deliveredThisMonth: { type: integer, description: "Orders that reached Delivered since the 1st of this month, shop timezone (by their stage-history row). Visible to all roles." }
+        ready: { type: integer, description: "Orders currently in Ready -- finished, waiting for the customer. Visible to all roles." }
+        thisMonth: { type: integer, description: "Orders created since the 1st of this month, shop timezone. Visible to all roles." }
+        inProduction: { type: integer, description: "Orders in an active production stage (Falls/Kutchu..Alteration; not Ready or Delivered). Visible to all roles." }
         overdue: { type: integer, description: "Active orders past their delivery due date. Visible to all roles." }
         urgent: { type: integer, description: "Active orders due within 3 days (not overdue). Visible to all roles." }
         pendingPayments: { type: integer, description: "Absent for master_tailor. Orders whose paymentStatus isn't fully_paid." }

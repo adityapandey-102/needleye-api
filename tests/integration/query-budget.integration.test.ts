@@ -4,6 +4,8 @@ import { createApp } from "../../src/app";
 import { db } from "../../src/common/database/drizzle-client";
 import { authProvider } from "../../src/common/auth/supabase-auth-provider";
 import { createFixtureUser, deleteFixtureUser, closeDb, type FixtureUser } from "./helpers";
+import { businessToday } from "../../src/common/time/business-date";
+import { env } from "../../src/config/env";
 
 /**
  * Query budget: every list endpoint makes the SAME number of database queries
@@ -45,7 +47,7 @@ describe("query budget: no N+1, bounded pages (integration)", () => {
     return { n: count, body: res.body };
   }
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = businessToday(new Date(), env.BUSINESS_TIMEZONE); // the shop day, as the API cuts days
   const lists: [string, (limit: number) => string][] = [
     ["orders", (l) => `/api/v1/orders?limit=${l}`],
     ["orders search", (l) => `/api/v1/orders?search=a&limit=${l}`],

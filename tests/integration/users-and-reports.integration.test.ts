@@ -7,7 +7,10 @@ import { db } from "../../src/common/database/drizzle-client";
 import { orderStatusHistory } from "../../src/modules/orders/infrastructure/order-status-history.schema";
 import { DrizzleOrdersRepository } from "../../src/modules/orders/infrastructure/drizzle-orders.repository";
 import { auditLog } from "../../src/common/audit/audit-log.schema";
-import { eq } from "drizzle-orm";
+import { orders } from "../../src/modules/orders/infrastructure/order.schema";
+import { and, eq } from "drizzle-orm";
+import { businessToday } from "../../src/common/time/business-date";
+import { env } from "../../src/config/env";
 
 /**
  * Integration coverage for the user-management and financial-reporting
@@ -111,12 +114,91 @@ describe("Users & reports (integration)", () => {
     const res = await request(app).get("/api/v1/orders/stats").set("Authorization", `Bearer ${session.accessToken}`);
     expect(res.status).toBe(200);
     const body = res.body as Record<string, unknown>;
-    for (const field of ["total", "active", "completed", "thisMonth", "inProduction", "overdue", "urgent"]) {
+    for (const field of ["total", "active", "completed", "deliveredThisMonth", "ready", "thisMonth", "inProduction", "overdue", "urgent"]) {
       expect(body[field]).toBeTypeOf("number");
     }
     // Payment aggregates are stripped for master_tailor (no payments:read).
     expect(body.pendingPayments).toBeUndefined();
     expect(body.collectedRevenue).toBeUndefined();
+  });
+
+  it("counts Ready and Delivered-this-month (not all-time) on the dashboard, with matching buckets", async () => {
+    const designer = await createFixtureUser("designer", "Stage Cards Designer");
+    const master = await createFixtureUser("master_tailor", "Stage Cards Master");
+    createdUserIds.push(designer.id, master.id);
+    const session = await authProvider.signInWithPassword(designer.email, designer.password);
+    const repo = new DrizzleOrdersRepository();
+    const make = async () => {
+      const o = await repo.create({
+        customerName: "Cards", phone: "9000000000", billNumber: `CARD-${Date.now()}-${Math.random()}`,
+        bookingDate: "2026-10-01", dueDate: "2039-01-01", nextPaymentDate: null, designerId: designer.id, masterTailorId: master.id,
+        productCategory: "saree", orderDetails: "cards", handWork: false, machineWork: false, purchaseRequired: false,
+        paymentStatus: "unpaid", totalAmount: "100.00", productionStatus: "design_pending",
+        designerInstructions: null, specialNotes: null, createdBy: designer.id, updatedBy: designer.id,
+      });
+      createdOrderIds.push(o.id);
+      return o.id;
+    };
+    const ready = await make();
+    await repo.updateStatus(ready, "ready", designer.id);
+    const deliveredNow = await make();
+    await repo.updateStatus(deliveredNow, "ready", designer.id);
+    await repo.updateStatus(deliveredNow, "delivered", designer.id);
+    // Delivered, but long ago: not this month's.
+    const deliveredOld = await make();
+    await repo.updateStatus(deliveredOld, "ready", designer.id);
+    await repo.updateStatus(deliveredOld, "delivered", designer.id);
+    await db
+      .update(orderStatusHistory)
+      .set({ createdAt: new Date("2025-01-15T10:00:00Z") })
+      .where(and(eq(orderStatusHistory.orderId, deliveredOld), eq(orderStatusHistory.status, "delivered")));
+
+    const auth = { Authorization: `Bearer ${session.accessToken}` };
+    const stats = (await request(app).get("/api/v1/orders/stats").set(auth)).body as Record<string, number>;
+    expect(stats).toMatchObject({ ready: 1, deliveredThisMonth: 1, completed: 2, inProduction: 0, active: 1 });
+
+    const ids = async (bucket: string) =>
+      ((await request(app).get(`/api/v1/orders?bucket=${bucket}`).set(auth)).body as { orders: { id: string }[] }).orders.map((o) => o.id);
+    expect(await ids("ready")).toEqual([ready]);
+    expect(await ids("delivered_this_month")).toEqual([deliveredNow]);
+  });
+
+  it("refuses Delivered from anything but Ready -- in the API and in the database itself", async () => {
+    const token = await ownerToken();
+    const designer = await createFixtureUser("designer", "Guard Designer");
+    const master = await createFixtureUser("master_tailor", "Guard Master");
+    createdUserIds.push(designer.id, master.id);
+    const repo = new DrizzleOrdersRepository();
+    const o = await repo.create({
+      customerName: "Guard", phone: "9000000000", billNumber: `GUARD-${Date.now()}`,
+      bookingDate: "2026-10-01", dueDate: "2039-01-01", nextPaymentDate: null, designerId: designer.id, masterTailorId: master.id,
+      productCategory: "saree", orderDetails: "guard", handWork: false, machineWork: false, purchaseRequired: false,
+      paymentStatus: "unpaid", totalAmount: "100.00", productionStatus: "design_pending",
+      designerInstructions: null, specialNotes: null, createdBy: designer.id, updatedBy: designer.id,
+    });
+    createdOrderIds.push(o.id);
+    await repo.updateStatus(o.id, "quality_check", designer.id);
+
+    const res = await request(app)
+      .patch(`/api/v1/orders/${o.id}/status`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ status: "delivered" });
+    expect(res.status).toBe(409);
+    expect((res.body as { code: string }).code).toBe("ORDER_DELIVER_REQUIRES_READY");
+
+    // A direct write that skips the API is refused by the trigger.
+    await expect(db.update(orders).set({ productionStatus: "delivered" }).where(eq(orders.id, o.id))).rejects.toThrow();
+
+    // The alteration loop, then delivery from Ready.
+    for (const status of ["ready", "alteration", "ready", "delivered"]) {
+      const step = await request(app)
+        .patch(`/api/v1/orders/${o.id}/status`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ status });
+      expect(step.status, status).toBe(200);
+    }
+    const history = await repo.listStatusHistory(o.id);
+    expect(history.map((h) => h.status).slice(0, 4)).toEqual(["delivered", "ready", "alteration", "ready"]);
   });
 
   it("accepts a bucket filter on GET /orders", async () => {
@@ -239,7 +321,9 @@ describe("Users & reports (integration)", () => {
     createdUserIds.push(owner.id, master.id);
     const session = await authProvider.signInWithPassword(owner.email, owner.password);
     const auth = `Bearer ${session.accessToken}`;
-    const today = new Date().toISOString().slice(0, 10);
+    // The SHOP day (the feed cuts days at midnight in BUSINESS_TIMEZONE), not
+    // the UTC day -- they differ between 00:00 and 05:30 IST.
+    const today = businessToday(new Date(), env.BUSINESS_TIMEZONE);
 
     // Create an order, then record -> edit -> remove a payment so all three
     // audit verbs land in the feed.
@@ -251,7 +335,8 @@ describe("Users & reports (integration)", () => {
         phone: "9000000030",
         billNumber: `LEDGER-${Date.now()}`,
         bookingDate: today,
-        dueDate: today,
+        // A free day far ahead: "today" can already be at delivery capacity.
+        dueDate: new Date(Date.UTC(2040, 0, 1) + Math.floor(Math.random() * 3650) * 86_400_000).toISOString().slice(0, 10),
         designerId: owner.id,
         masterTailorId: master.id,
         productCategory: "saree",

@@ -51,6 +51,13 @@ replay of history. So for the initial cutover:
 - [ ] In the Supabase dashboard, confirm the `order-images` bucket exists under Storage, and that `profiles`/`orders`/`payments`/`order_status_history`/etc. all exist under Table Editor.
 - [ ] From this point forward, schema changes go through Drizzle (`npm run db:generate` then `npm run db:migrate`, both already pointed at `DATABASE_URL`) for the portable tables, and a new `supabase/migrations/*.sql` file (via `npx supabase migration new <name>`) for anything genuinely Supabase-specific (a new RLS policy, another trigger). The split from ADR 0003 continues to apply.
 
+> **Timing note -- `20261008000001_order_stages_marking_ready.sql` (ADR 0008).**
+> It adds the Marking and Ready stages and a trigger that refuses any move into
+> Delivered except from Ready. An API build older than this migration has no
+> Ready stage, so until the new API is live **nobody can mark an order
+> Delivered**. Apply it immediately before deploying the matching API (and the
+> web right after), not days ahead.
+
 ### 1a. Least-privilege runtime database role (recommended)
 
 > Full rationale for this and every other production decision below (why

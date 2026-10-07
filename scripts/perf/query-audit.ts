@@ -142,6 +142,12 @@ async function main() {
     },
     { name: "orders bucket: overdue", run: () => orders.findMany(owner, { bucket: "overdue" }, { limit: 20, offset: 0 }) },
     { name: "orders bucket: pending_payment", run: () => orders.findMany(owner, { bucket: "pending_payment" }, { limit: 20, offset: 0 }) },
+    { name: "orders bucket: ready", run: () => orders.findMany(owner, { bucket: "ready" }, { limit: 20, offset: 0 }) },
+    {
+      name: "orders bucket: delivered this month",
+      run: () => orders.findMany(owner, { bucket: "delivered_this_month" }, { limit: 20, offset: 0 }),
+    },
+    { name: "orders bucket count: delivered this month", run: () => orders.countMany(owner, { bucket: "delivered_this_month" }) },
     {
       name: "orders kanban (last 2 months, page of 50)",
       run: () =>
@@ -287,7 +293,7 @@ async function fillVolume(client: pg.Client) {
        ($2::uuid[])[1 + floor(random() * cardinality($2::uuid[]))::int],
        'saree', 'synthetic', (array['unpaid','advance_paid','fully_paid'])[1 + floor(random() * 3)::int], 10000,
        case when t.at < now() - interval '40 days' then 'delivered'
-            else (array['design_pending','cutting','stitching','finishing','quality_check'])[1 + floor(random() * 5)::int] end,
+            else (array['design_pending','marking','cutting','stitching','finishing','quality_check','ready'])[1 + floor(random() * 7)::int] end,
        ($1::uuid[])[1 + floor(random() * cardinality($1::uuid[]))::int],
        t.at
      from generate_series(1, $3::int) g
@@ -301,6 +307,15 @@ async function fillVolume(client: pg.Client) {
      from orders o cross join generate_series(1, $2::int) k
      where o.order_number like 'PERF-%'`,
     [s, VOLUME.movesPerOrder],
+  );
+  // Every delivered synthetic order gets its Delivered history row (what the
+  // "Delivered this month" card and bucket read), 30 days after booking.
+  await client.query(
+    `insert into order_status_history (order_id, status, label, changed_by, created_at)
+     select o.id, 'delivered', 'Delivered', ($1::uuid[])[1], o.created_at + interval '30 days'
+     from orders o
+     where o.order_number like 'PERF-%' and o.production_status = 'delivered'`,
+    [s],
   );
   await client.query(
     `insert into payments (order_id, amount, method, paid_at, recorded_by, created_at)

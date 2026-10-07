@@ -42,6 +42,8 @@ export const ERROR_CODES = {
   ORDER_STATUS_TRANSITION_FORBIDDEN: "ORDER_STATUS_TRANSITION_FORBIDDEN",
   /** Status change rejected: the flow is forward-only -- the target stage is the current one or earlier (also covers a concurrent double-advance). */
   ORDER_STATUS_NOT_FORWARD: "ORDER_STATUS_NOT_FORWARD",
+  /** Status change rejected: Delivered can only follow Ready (ADR 0008). */
+  ORDER_DELIVER_REQUIRES_READY: "ORDER_DELIVER_REQUIRES_READY",
   ORDER_PAYMENT_MISMATCH: "ORDER_PAYMENT_MISMATCH",
   /** Edit would set total_amount below the sum already recorded in the ledger (would create an "overpaid" order). */
   ORDER_TOTAL_BELOW_PAID: "ORDER_TOTAL_BELOW_PAID",

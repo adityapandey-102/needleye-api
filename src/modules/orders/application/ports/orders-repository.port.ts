@@ -37,7 +37,7 @@ export interface OrderListFilters {
   status?: string;
   designerId?: string;
   masterTailorId?: string;
-  /** Dashboard/list filter: active | production | completed | ready | delivered | pending_payment | payment_overdue | payment_upcoming | overdue | urgent | this_month. */
+  /** Dashboard/list filter: active | production | completed | ready | delivered | delivered_this_month | pending_payment | payment_overdue | payment_upcoming | overdue | urgent | this_month. */
   bucket?: string;
   /**
    * Only orders created on or after this shop day (YYYY-MM-DD, business
@@ -129,7 +129,12 @@ export interface OrderImageInfo {
 export interface OrderStatsRaw {
   total: number;
   active: number;
+  /** Every delivered order ever. Kept for older web builds; the dashboard now shows deliveredThisMonth. */
   completed: number;
+  /** Orders that reached Delivered since the 1st of this month (shop timezone). */
+  deliveredThisMonth: number;
+  /** Orders currently in Ready (finished, waiting for the customer). */
+  ready: number;
   thisMonth: number;
   inProduction: number;
   overdue: number;

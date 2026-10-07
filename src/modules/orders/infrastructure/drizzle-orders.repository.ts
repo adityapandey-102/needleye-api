@@ -17,15 +17,17 @@ import {
   CANONICAL_TO_GRANULAR,
   COMPLETED_CANONICAL_STAGES,
   PRODUCTION_STAGE_STATUSES,
+  READY_STATUS,
   granularLabel,
-  stageIndex,
   type GranularStatus,
 } from "../../../domain";
+import { assertStageMove } from "../domain/order-status.rules";
 import { OrderMapper, type OrderQueryResult } from "./order.mapper";
 import { OrderStatusHistoryMapper, type OrderStatusHistoryRow } from "./order-status-history.mapper";
 import type { OrderEntity } from "../domain/order.entity";
 import type { OrderStatusHistoryEntity } from "../domain/order-status-history.entity";
 import { env } from "../../../config/env";
+import { businessToday, monthStartMonthsBack } from "../../../common/time/business-date";
 import type {
   OrdersRepositoryPort,
   RowScope,
@@ -73,12 +75,24 @@ async function lockDayAndCount(tx: Tx, dueDate: string, excludeOrderId?: string)
 /** The granular values a Kanban card sits on once it reaches the "ready"/"delivered" canonical columns -- see domain/order-status.ts. */
 const COMPLETED_STATUSES = COMPLETED_CANONICAL_STAGES.map((stage) => CANONICAL_TO_GRANULAR[stage]);
 
-/** Production stages still actively being worked (excludes ready/delivered) -- the "In Production" dashboard bucket. */
-const IN_PRODUCTION_STATUSES = PRODUCTION_STAGE_STATUSES.filter((s) => !COMPLETED_STATUSES.includes(s));
+/** Production stages still actively being worked (excludes Ready and Delivered) -- the "In Production" dashboard bucket. */
+const IN_PRODUCTION_STATUSES = PRODUCTION_STAGE_STATUSES.filter((s) => !COMPLETED_STATUSES.includes(s) && s !== READY_STATUS);
 
 /** SQL-safe `'a','b'` lists of the status groups, for raw queries (values are code constants, never user input). */
 const COMPLETED_STATUS_SQL_LIST = COMPLETED_STATUSES.map((s) => `'${s}'`).join(", ");
 const IN_PRODUCTION_STATUS_SQL_LIST = IN_PRODUCTION_STATUSES.map((s) => `'${s}'`).join(", ");
+
+/**
+ * Midnight on the 1st of the current month in the SHOP's timezone, as an
+ * instant -- a plain range bound, so timestamp indexes apply. The date is
+ * computed here and sent as a value (not derived from now() in SQL): with a
+ * concrete bound the planner can estimate how few rows match, where a now()
+ * expression made it guess "a third of the table" and scan every order.
+ */
+function shopMonthStart() {
+  const monthStart = monthStartMonthsBack(businessToday(new Date(), env.BUSINESS_TIMEZONE), 0);
+  return sql`((${monthStart}::date)::timestamp at time zone ${env.BUSINESS_TIMEZONE})`;
+}
 
 export class DrizzleOrdersRepository implements OrdersRepositoryPort {
   /** Applies row-level visibility for the caller's role -- owner_manager/accountant unscoped, designer/master_tailor limited to their own orders. */
@@ -124,6 +138,18 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         return inArray(orders.productionStatus, COMPLETED_STATUSES);
       case "delivered":
         return eq(orders.productionStatus, "delivered");
+      case "ready":
+        return eq(orders.productionStatus, READY_STATUS);
+      case "delivered_this_month":
+        // Same definition as getStats' deliveredThisMonth card. "= any(array(...))"
+        // runs the subquery FIRST (a short range read of this month's delivery
+        // events on order_status_history_completed_idx), then fetches just those
+        // orders by primary key. As a join or EXISTS the planner preferred to
+        // scan every delivered order (the query audit flagged it).
+        return and(
+          eq(orders.productionStatus, "delivered"),
+          sql`${orders.id} = any(array(select h.order_id from ${orderStatusHistory} h where h.status = 'delivered' and h.created_at >= ${shopMonthStart()}))`,
+        );
       case "pending_payment":
         return ne(orders.paymentStatus, "fully_paid");
       case "payment_overdue":
@@ -140,7 +166,7 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
           sql`${orders.dueDate} >= current_date and ${orders.dueDate} < current_date + 3`,
         );
       case "this_month":
-        return sql`${orders.createdAt} >= date_trunc('month', current_date)`;
+        return sql`${orders.createdAt} >= ${shopMonthStart()}`;
       default:
         return undefined;
     }
@@ -202,7 +228,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
           total: sql<string>`count(*)`,
           active: sql<string>`count(*) filter (where ${notInArray(orders.productionStatus, COMPLETED_STATUSES)})`,
           completed: sql<string>`count(*) filter (where ${inArray(orders.productionStatus, COMPLETED_STATUSES)})`,
-          thisMonth: sql<string>`count(*) filter (where ${orders.createdAt} >= date_trunc('month', current_date))`,
+          ready: sql<string>`count(*) filter (where ${eq(orders.productionStatus, READY_STATUS)})`,
+          thisMonth: sql<string>`count(*) filter (where ${orders.createdAt} >= ${shopMonthStart()})`,
           inProduction: sql<string>`count(*) filter (where ${inArray(orders.productionStatus, IN_PRODUCTION_STATUSES)})`,
           // Delivery-timeline urgency, on active (not-yet-completed) orders only --
           // mirrors the frontend's getTimelineSummary thresholds (overdue: past due;
@@ -229,6 +256,22 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
       throw new InternalError("Failed to load order stats", error);
     }
 
+    // Delivered THIS month, by the delivery's stage-history row (one short
+    // range read on order_status_history_completed_idx). Distinct orders: old
+    // data remapped from the retired ready_for_delivery stage can carry two
+    // delivered rows for one order.
+    // Unscoped callers don't need orders at all; a scoped one joins its own rows.
+    let deliveredRows;
+    try {
+      const deliveredThisMonth = and(eq(orderStatusHistory.status, "delivered"), gte(orderStatusHistory.createdAt, shopMonthStart()));
+      const count = db.select({ n: sql<string>`count(distinct ${orderStatusHistory.orderId})` }).from(orderStatusHistory);
+      deliveredRows = condition
+        ? await count.innerJoin(orders, eq(orders.id, orderStatusHistory.orderId)).where(and(deliveredThisMonth, condition))
+        : await count.where(deliveredThisMonth);
+    } catch (error) {
+      throw new InternalError("Failed to load order stats", error);
+    }
+
     const row = orderRows[0];
     const collectedRevenue = paymentRows[0]?.collected ?? "0";
     const totalValue = row?.totalValue ?? "0";
@@ -237,6 +280,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
       total: row ? Number(row.total) : 0,
       active: row ? Number(row.active) : 0,
       completed: row ? Number(row.completed) : 0,
+      deliveredThisMonth: Number(deliveredRows[0]?.n ?? 0),
+      ready: row ? Number(row.ready) : 0,
       thisMonth: row ? Number(row.thisMonth) : 0,
       inProduction: row ? Number(row.inProduction) : 0,
       overdue: row ? Number(row.overdue) : 0,
@@ -690,17 +735,10 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         const current = rows[0]?.current;
         if (!current) throw new NotFoundError("Order not found", ERROR_CODES.ORDER_NOT_FOUND);
 
-        // Forward-only: the target stage must be strictly LATER in the flow than
-        // the current one. This rejects going backwards AND re-applying the same
-        // stage (idempotency) in one check.
-        if (stageIndex(status) <= stageIndex(current)) {
-          throw new ConflictError(
-            current === status
-              ? `This order is already at "${granularLabel(current)}".`
-              : `This order is already at "${granularLabel(current)}" -- the production flow only moves forward.`,
-            ERROR_CODES.ORDER_STATUS_NOT_FORWARD,
-          );
-        }
+        // The flow's shape: forward-only except Ready -> Alteration, Delivered
+        // only from Ready. Rejecting the same stage also makes a repeat scan or
+        // a concurrent double-advance a clean 409 (idempotency).
+        assertStageMove(current, status);
 
         // Caller-supplied transition rule (e.g. no skipping past a stage the
         // role can't set). Run HERE, against the locked `current`, rather than in

@@ -96,11 +96,17 @@ describe("owner reports (integration)", () => {
     await closeDb();
   });
 
+  /** Delivered only follows Ready (the database enforces it), so go through Ready first. */
+  async function deliver(id: string) {
+    await db.update(orders).set({ productionStatus: "ready" }).where(eq(orders.id, id));
+    await db.update(orders).set({ productionStatus: "delivered" }).where(eq(orders.id, id));
+  }
+
   it("a designer is Working while an order they created is undelivered, Idle once it's delivered", async () => {
     expect((await row(designer))?.openOrders).toBe(0);
     const id = await newOrder();
     expect(await row(designer)).toMatchObject({ openOrders: 1, role: "designer" });
-    await db.update(orders).set({ productionStatus: "delivered" }).where(eq(orders.id, id));
+    await deliver(id);
     expect((await row(designer))?.openOrders).toBe(0);
   });
 
@@ -109,7 +115,7 @@ describe("owner reports (integration)", () => {
     expect((await row(designer))?.openOrders).toBe(1);
     await db.update(orders).set({ createdAt: new Date(Date.now() - 46 * 86_400_000) }).where(eq(orders.id, id));
     expect((await row(designer))?.openOrders).toBe(0);
-    await db.update(orders).set({ productionStatus: "delivered" }).where(eq(orders.id, id));
+    await deliver(id);
   });
 
   it("the floor: whoever made the LATEST move holds the order; a later move by someone else passes it on", async () => {
