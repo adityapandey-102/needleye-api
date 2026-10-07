@@ -2,7 +2,14 @@ import { env } from "../../../config/env";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
 import { assertFieldsEditable, assertOwnershipForScopedEdit } from "../domain/order-edit.rules";
-import { assertTotalCoversLedger, derivePaymentStatus } from "../domain/order-ledger.rules";
+import { derivePaymentStatus } from "../domain/order-ledger.rules";
+import {
+  assertEditKeepsTotal,
+  assertPricedForDelivery,
+  canChangePriceAtAll,
+  decidePriceChange,
+} from "../domain/order-pricing.rules";
+import { canViewPaymentFields } from "../domain/order-visibility.rules";
 import { assertLedgerExportRange, assertLedgerExportSize, LEDGER_EXPORT_MAX_ROWS } from "../domain/ledger-export.rules";
 import { assertCanChangeStage, assertCanSkipStages } from "../domain/order-status.rules";
 import { checkDeliveryDayCapacity, nearCapacityThreshold } from "../domain/delivery-capacity.rules";
@@ -28,6 +35,8 @@ import type {
 import type { DeliveryLoadQuery, DeliveryLoadResponseDto } from "../api/dto/delivery-load.dto";
 import type { CreateOrderDto } from "../api/dto/create-order.dto";
 import type { UpdateOrderDto } from "../api/dto/update-order.dto";
+import type { ChangePriceDto } from "../api/dto/change-price.dto";
+import type { OrderPriceChangeEntity } from "../domain/order-price-change.entity";
 import type { OrderListItemResponseDto, OrderResponseDto } from "../api/dto/order.response.dto";
 import type { OrderStatusHistoryResponseDto } from "../api/dto/order-status-history.response.dto";
 import type { OrderStatsResponseDto } from "../api/dto/order-stats.response.dto";
@@ -194,14 +203,16 @@ export class OrdersService {
     // The PM confirmation and the lead link are request flags, not order fields -- keep them out of the record.
     const { confirmedWithProductionManager = false, leadId, ...fields } = dto;
     const leadLink = leadId ? this.leadLinkFor(ctx, leadId) : undefined;
+    // A price at booking is a first "set": the same people who may set one later.
+    if (fields.totalAmount !== null) this.assertCanPriceAtBooking(ctx, fields.designerId);
+    assertPricedForDelivery(fields.productionStatus, fields.totalAmount);
     const record: NewOrderRecord = {
       ...fields,
       bookingDate: dto.bookingDate ?? businessToday(new Date(), env.BUSINESS_TIMEZONE),
       nextPaymentDate: dto.nextPaymentDate ?? null,
       // Payment status is derived from the ledger, never chosen at creation. A
-      // new order has an empty ledger: unpaid, or fully_paid when the total is
-      // 0 (free work). If the creator records an advance (a separate ledger
-      // call right after), that write recomputes and syncs the status.
+      // new order has an empty ledger: not_priced (no total -- the usual case),
+      // unpaid, or fully_paid when the total is 0 (free work).
       paymentStatus: derivePaymentStatus("0.00", fields.totalAmount),
       designerInstructions: dto.designerInstructions || null,
       specialNotes: dto.specialNotes || null,
@@ -233,7 +244,14 @@ export class OrdersService {
     // `version` is the optimistic-lock token and `confirmedWithProductionManager`
     // a request flag -- neither is a field to write, so separate both out BEFORE
     // the editable-fields check (which would reject them as unknown fields).
-    const { version: expectedVersion, confirmedWithProductionManager = false, ...fields } = dto;
+    const { version: expectedVersion, confirmedWithProductionManager = false, totalAmount, ...fields } = dto;
+    // The total never changes through an edit (ADR 0008). The edit form may
+    // resend it unchanged -- fine, it's dropped; a different value is refused.
+    if (totalAmount !== undefined) {
+      const current = await this.ordersRepository.findBasicById(orderId);
+      if (!current) throw new NotFoundError("Order not found", ERROR_CODES.ORDER_NOT_FOUND);
+      assertEditKeepsTotal(current.totalAmount, totalAmount);
+    }
     const submittedKeys = Object.keys(fields);
     if (submittedKeys.length === 0) throw new BadRequestError("No editable fields to update", ERROR_CODES.VALIDATION_NO_FIELDS);
 
@@ -246,14 +264,6 @@ export class OrdersService {
     }
 
     const record: UpdateOrderRecord = { ...fields, updatedBy: ctx.authUserId };
-    // If the total changed, keep the ledger invariant intact: the new total can
-    // never sit below what's already been collected (that would be an "overpaid"
-    // order). Then re-derive the payment status from the (unchanged) ledger sum.
-    if (fields.totalAmount !== undefined) {
-      const sum = await this.ordersRepository.sumPaymentsForOrder(orderId);
-      assertTotalCoversLedger(fields.totalAmount, sum);
-      record.paymentStatus = derivePaymentStatus(sum, fields.totalAmount);
-    }
     // Only a submitted due date can move the order onto a full day; the guard
     // itself skips an unchanged date (the edit form resends every field).
     const capacity: { overriddenAt?: number } = {};
@@ -375,6 +385,58 @@ export class OrdersService {
       to: range.to,
       timeZone: env.BUSINESS_TIMEZONE,
     };
+  }
+
+  /**
+   * PUT /orders/:id/price -- set the first price, raise it, or give a discount
+   * (ADR 0008). Which one it is, and whether the caller may make it, is decided
+   * against the order's LOCKED state inside the repository's transaction; the
+   * price-history row is written in that same transaction.
+   */
+  async changePrice(
+    ctx: AuthContext,
+    orderId: string,
+    dto: ChangePriceDto,
+  ): Promise<{ order: OrderResponseDto; change: OrderPriceChangeEntity }> {
+    const role = ctx.profile.role;
+    if (!canChangePriceAtAll(role)) {
+      throw new ForbiddenError("Your role can't set or change an order's price", ERROR_CODES.ORDER_PRICE_FORBIDDEN);
+    }
+    const change = await this.ordersRepository.changePrice(
+      orderId,
+      { newTotal: dto.totalAmount, changedBy: ctx.authUserId },
+      (state) => decidePriceChange({ role, callerId: ctx.authUserId, newTotal: dto.totalAmount, reason: dto.reason }, state),
+    );
+    await this.audit.record({
+      action: AUDIT_ACTIONS.ORDER_PRICE_CHANGED,
+      entityType: AUDIT_ENTITIES.ORDER,
+      entityId: orderId,
+      metadata: { kind: change.kind, from: change.previousTotal, to: change.newTotal, reason: change.reason },
+    });
+    const entity = await this.ordersRepository.findAnyById(orderId);
+    if (!entity) throw new NotFoundError("Order not found", ERROR_CODES.ORDER_NOT_FOUND);
+    const amountPaid = await this.ordersRepository.sumPaymentsForOrder(orderId);
+    return { order: toOrderResponseDto(entity, amountPaid, role, await this.signImageUrls([entity])), change };
+  }
+
+  /** An order's price history -- for roles that can see its money, on orders in their scope. */
+  async getPriceHistory(ctx: AuthContext, orderId: string): Promise<OrderPriceChangeEntity[]> {
+    if (!canViewPaymentFields(ctx.profile.role)) {
+      throw new ForbiddenError("Your role can't see order prices", ERROR_CODES.ORDER_PRICE_FORBIDDEN);
+    }
+    const order = await this.ordersRepository.findById({ role: ctx.profile.role, userId: ctx.authUserId }, orderId);
+    if (!order) throw new NotFoundError("Order not found", ERROR_CODES.ORDER_NOT_FOUND);
+    return this.ordersRepository.listPriceHistory(orderId);
+  }
+
+  /** A total given at booking: owner / accountant, or a designer booking their OWN order. */
+  private assertCanPriceAtBooking(ctx: AuthContext, designerId: string): void {
+    const scope = getCapabilityScope(ctx.profile.role, "orders:price:set");
+    if (scope === true || (scope === "assigned" && designerId === ctx.authUserId)) return;
+    throw new ForbiddenError(
+      "Your role can't set a price -- save the order without one; its designer, the Owner or the Accountant prices it.",
+      ERROR_CODES.ORDER_PRICE_FORBIDDEN,
+    );
   }
 
   async getOrderHistory(ctx: AuthContext, orderId: string): Promise<OrderStatusHistoryResponseDto[]> {

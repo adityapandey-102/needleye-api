@@ -143,6 +143,7 @@ async function main() {
     { name: "orders bucket: overdue", run: () => orders.findMany(owner, { bucket: "overdue" }, { limit: 20, offset: 0 }) },
     { name: "orders bucket: pending_payment", run: () => orders.findMany(owner, { bucket: "pending_payment" }, { limit: 20, offset: 0 }) },
     { name: "orders bucket: ready", run: () => orders.findMany(owner, { bucket: "ready" }, { limit: 20, offset: 0 }) },
+    { name: "orders bucket: price not set", run: () => orders.findMany(owner, { bucket: "not_priced" }, { limit: 20, offset: 0 }) },
     {
       name: "orders bucket: delivered this month",
       run: () => orders.findMany(owner, { bucket: "delivered_this_month" }, { limit: 20, offset: 0 }),
@@ -163,6 +164,7 @@ async function main() {
     },
     { name: "order by id", run: () => orders.findById(owner, orderId) },
     { name: "order status history", run: () => orders.listStatusHistory(orderId) },
+    { name: "order price history", run: () => orders.listPriceHistory(orderId) },
     { name: "payment sums for a page", run: () => orders.sumPaymentsForOrders([orderId]) },
     {
       name: "dashboard stats (owner)",

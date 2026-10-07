@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { openApiDocument } from "./openapi";
-import { GRANULAR_STATUS_VALUES, PRODUCT_CATEGORY_VALUES } from "../domain";
+import { GRANULAR_STATUS_VALUES, PAYMENT_STATUS_VALUES, PRODUCT_CATEGORY_VALUES } from "../domain";
 
 /**
  * openapi.yaml is hand-maintained, so its enums can silently drift from the
@@ -19,5 +19,9 @@ describe("openapi.yaml stays in sync with the domain", () => {
 
   it("documents exactly the production stages, in flow order", () => {
     expect(schemas.GranularStatus?.enum).toEqual([...GRANULAR_STATUS_VALUES]);
+  });
+
+  it("documents exactly the payment statuses (incl. not_priced)", () => {
+    expect(schemas.PaymentStatus?.enum).toEqual([...PAYMENT_STATUS_VALUES]);
   });
 });

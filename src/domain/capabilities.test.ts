@@ -37,11 +37,19 @@ describe("capabilities matrix", () => {
     }
   });
 
-  it("lets owner_manager change any order's total, and a designer only their own", () => {
-    expect(getCapabilityScope("owner_manager", "orders:edit:total")).toBe(true);
-    expect(getCapabilityScope("designer", "orders:edit:total")).toBe("assigned");
-    for (const role of ["master_tailor", "accountant", "production_manager", "worker"] as Role[]) {
-      expect(getCapabilityScope(role, "orders:edit:total")).toBe(false);
+  it("pricing and payment corrections (ADR 0008): set = owner/accountant/own designer; adjust + correct = owner/accountant", () => {
+    expect(getCapabilityScope("owner_manager", "orders:price:set")).toBe(true);
+    expect(getCapabilityScope("accountant", "orders:price:set")).toBe(true);
+    expect(getCapabilityScope("designer", "orders:price:set")).toBe("assigned");
+    expect(getCapabilityScope("owner_manager", "orders:price:adjust")).toBe(true);
+    expect(getCapabilityScope("accountant", "orders:price:adjust")).toBe(true);
+    expect(getCapabilityScope("designer", "orders:price:adjust")).toBe(false);
+    expect(getCapabilityScope("owner_manager", "payments:correct")).toBe(true);
+    expect(getCapabilityScope("accountant", "payments:correct")).toBe(true);
+    expect(getCapabilityScope("designer", "payments:correct")).toBe(false);
+    for (const role of ["master_tailor", "production_manager", "worker"] as Role[]) {
+      expect(getCapabilityScope(role, "orders:price:set")).toBe(false);
+      expect(getCapabilityScope(role, "orders:price:adjust")).toBe(false);
     }
   });
 

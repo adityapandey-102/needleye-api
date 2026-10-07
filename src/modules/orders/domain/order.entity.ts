@@ -41,7 +41,8 @@ export interface OrderEntity {
   purchaseRequired: boolean;
   paymentStatus: PaymentStatus;
   /** Money as a canonical 2dp string (see common/money/money.ts). */
-  totalAmount: string;
+  /** Null until the order is priced (ADR 0008). */
+  totalAmount: string | null;
   productionStatus: GranularStatus;
   designerInstructions: string | null;
   specialNotes: string | null;

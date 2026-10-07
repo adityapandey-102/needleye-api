@@ -23,9 +23,11 @@ export const createOrderDtoSchema = z.object({
   machineWork: z.boolean().default(false),
   purchaseRequired: z.boolean().default(false),
   // Payment status is DERIVED from the ledger, never submitted -- see
-  // derivePaymentStatus. An advance is recorded via the payments endpoint
-  // right after creation, which recomputes and syncs the status.
-  totalAmount: moneyField.default("0.00"),
+  // derivePaymentStatus. A new order normally has NO price (null): it's priced
+  // afterwards via PUT /orders/:id/price (ADR 0008). A total given here is the
+  // first price -- allowed only for roles that may set one (owner, accountant,
+  // the order's own designer) and recorded in the price history.
+  totalAmount: moneyField.nullable().default(null),
   productionStatus: z.enum(GRANULAR_STATUS_VALUES, {
     errorMap: () => ({ message: "Please select current status" }),
   }),

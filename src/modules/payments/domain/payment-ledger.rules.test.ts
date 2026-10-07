@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { assertDoesNotExceedTotal, derivePaymentStatus } from "./payment-ledger.rules";
-import { BadRequestError } from "../../../common/errors/app-error";
+import {
+  assertDoesNotExceedTotal,
+  assertOrderPriced,
+  assertPaidAtNotFuture,
+  assertPaymentsCorrectable,
+  derivePaymentStatus,
+} from "./payment-ledger.rules";
+import { BadRequestError, ConflictError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
 
 describe("derivePaymentStatus", () => {
@@ -50,5 +56,28 @@ describe("assertDoesNotExceedTotal", () => {
 
   it("has no floating-point noise at the boundary", () => {
     expect(() => assertDoesNotExceedTotal("0.30", "0.30")).not.toThrow();
+  });
+});
+
+describe("payment rules (ADR 0008)", () => {
+  it("not_priced while the order has no total", () => {
+    expect(derivePaymentStatus("0.00", null)).toBe("not_priced");
+  });
+
+  it("no payment until the order is priced (409)", () => {
+    expect(() => assertOrderPriced(null)).toThrow(ConflictError);
+    expect(() => assertOrderPriced(null)).toThrow(/Set the order total first/);
+    expect(() => assertOrderPriced("0.00")).not.toThrow();
+  });
+
+  it("payments are final once the order is delivered (409)", () => {
+    expect(() => assertPaymentsCorrectable("delivered")).toThrow(ConflictError);
+    expect(() => assertPaymentsCorrectable("ready")).not.toThrow();
+  });
+
+  it("a payment can't be dated after the shop's today", () => {
+    expect(() => assertPaidAtNotFuture("2026-10-10", "2026-10-09")).toThrow(BadRequestError);
+    expect(() => assertPaidAtNotFuture("2026-10-09", "2026-10-09")).not.toThrow();
+    expect(() => assertPaidAtNotFuture("2025-12-31", "2026-10-09")).not.toThrow();
   });
 });

@@ -551,11 +551,13 @@ paths:
             `ready` (in Ready now), `delivered`, `delivered_this_month`
             (reached Delivered since the 1st, shop timezone), `pending_payment`,
             `payment_overdue`, `payment_upcoming`, `overdue`, `urgent`,
-            `this_month` (booked since the 1st, shop timezone).
+            `this_month` (booked since the 1st, shop timezone), `not_priced`
+            (no price yet). The payment buckets only count orders that still
+            owe (unpaid / advance_paid).
             Unknown values are ignored (no filtering).
           schema:
             type: string
-            enum: [active, production, completed, ready, delivered, delivered_this_month, pending_payment, payment_overdue, payment_upcoming, overdue, urgent, this_month]
+            enum: [active, production, completed, ready, delivered, delivered_this_month, pending_payment, payment_overdue, payment_upcoming, overdue, urgent, this_month, not_priced]
         - name: limit
           in: query
           description: Page size. Defaults to 20, clamped to a maximum of 100.
@@ -870,20 +872,19 @@ paths:
       summary: Edit an order
       description: |
         The core field-level RBAC: customer/product fields
-        (`orders:edit:customer_product_fields`), the total (`totalAmount`,
-        `orders:edit:total` -- owner on any order, a Designer on their own)
-        and reassignment (`designerId`, `masterTailorId`, gated by
+        (`orders:edit:customer_product_fields`) and reassignment
+        (`designerId`, `masterTailorId`, gated by
         `orders:edit:pricing_assignment`, owner only) are checked
-        *independently* -- a Designer can edit their own order's notes and
-        total but gets 403 reassigning its designer or master tailor. A
-        total of 0 (free work) derives `fully_paid`. `productionStatus` is accepted by the request schema
-        but silently stripped by the controller before it reaches the service
-        -- status changes go through `PATCH /orders/{id}/status` instead,
-        which enforces design-stage vs production-stage RBAC. Changing
-        `totalAmount` re-derives the payment status from the ledger, and is
-        rejected (400 `ORDER_TOTAL_BELOW_PAID`) if the new total would fall
-        below what's already been recorded in the ledger (which would leave the
-        order "overpaid") -- the mirror of the payment-side overpayment guard.
+        *independently* -- a Designer can edit their own order's notes but
+        gets 403 reassigning its designer or master tailor.
+        `productionStatus` is accepted by the request schema but silently
+        stripped by the controller -- status changes go through
+        `PATCH /orders/{id}/status`.
+
+        **The price never changes here (ADR 0008).** `totalAmount` may be
+        resent UNCHANGED (edit forms send every field) and is then ignored; a
+        different value is refused with 400 `ORDER_PRICE_USE_PRICING` -- use
+        `PUT /orders/{id}/price`.
 
         Moving `dueDate` onto a day already at capacity is refused with 409
         `DELIVERY_DAY_FULL` unless `confirmedWithProductionManager: true` is
@@ -906,7 +907,7 @@ paths:
                 type: object
                 properties: { order: { $ref: "#/components/schemas/Order" } }
         "400":
-          description: "No editable fields, or the new totalAmount is below the collected ledger sum (ORDER_TOTAL_BELOW_PAID)"
+          description: "No editable fields, or a changed totalAmount (ORDER_PRICE_USE_PRICING -- prices change only via PUT /orders/{id}/price)"
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -989,9 +990,92 @@ paths:
             or an earlier one other than Ready -> Alteration (also what the loser
             of a concurrent advance gets). `ORDER_DELIVER_REQUIRES_READY` -- the
             target is Delivered but the order isn't in Ready.
+            `ORDER_PRICE_REQUIRED` -- the target is Delivered but the order has
+            no price yet ("Set the order total first").
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+
+  /orders/{id}/price:
+    put:
+      tags: [Orders]
+      summary: Set, raise or discount an order's price
+      description: |
+        The ONLY way an order's total changes (ADR 0008). The server decides
+        what the request means from the order's state, read under its row
+        lock in the same transaction that writes the change and its
+        `order_price_history` row:
+
+        | Order now | New total | Kind | Who | Reason |
+        |---|---|---|---|---|
+        | no price | any (Rs 0 = intentional free work) | `set` | the order's own designer, owner, accountant | optional |
+        | priced | higher | `raise` | owner, accountant | required (3-500 chars) |
+        | priced | lower | `discount` | owner, accountant | required; never below what's collected |
+
+        Refused: 403 `ORDER_PRICE_FORBIDDEN` (role / not your order), 409
+        `ORDER_PRICE_LOCKED` (delivered), 400 `ORDER_PRICE_UNCHANGED`,
+        `ORDER_PRICE_REASON_REQUIRED`, `ORDER_TOTAL_BELOW_PAID` (the message
+        states the largest discount possible). The payment status is
+        re-derived; a discount down to what's collected settles the order
+        (fully_paid, next payment date cleared). Database triggers refuse a
+        locked or below-collected price on any other write path too.
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChangePriceRequest" }
+      responses:
+        "200":
+          description: The repriced order and the price-history row just written
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  order: { $ref: "#/components/schemas/Order" }
+                  change: { $ref: "#/components/schemas/PriceChange" }
+        "400":
+          description: ORDER_PRICE_UNCHANGED, ORDER_PRICE_REASON_REQUIRED, ORDER_TOTAL_BELOW_PAID, or validation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: ORDER_PRICE_FORBIDDEN -- this role can't make this kind of change (or it isn't their order)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: ORDER_PRICE_LOCKED -- the order is delivered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /orders/{id}/price-history:
+    get:
+      tags: [Orders]
+      summary: An order's price history (set / raise / discount), newest first
+      description: For roles that can see order money (`payments:read`), on orders in their row scope (a designer, their own; 404 otherwise). 403 for the PM, master tailor and worker.
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "200":
+          description: Price changes, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  history:
+                    type: array
+                    items: { $ref: "#/components/schemas/PriceChange" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /orders/{id}/history:
     get:
@@ -1089,8 +1173,12 @@ paths:
       tags: [Payments]
       summary: Record a payment
       description: |
-        Gated by `payments:manage`. Rejected with 400 `PAYMENT_EXCEEDS_TOTAL`
-        if the resulting ledger sum would exceed `total_amount` (overpayment).
+        Gated by `payments:manage` (owner, accountant, the order's own
+        designer). Refused with 409 `PAYMENT_ORDER_NOT_PRICED` while the order
+        has no price (ADR 0008), with 400 `PAYMENT_DATE_INVALID` for a
+        `paidAt` after the shop's today (it must be a real YYYY-MM-DD date),
+        and with 400 `PAYMENT_EXCEEDS_TOTAL` if the resulting ledger sum would
+        exceed `total_amount` (overpayment). Allowed before or after delivery.
         After recording, the order's DERIVED payment status is recomputed and
         synced (unpaid -> advance_paid -> fully_paid), and its `nextPaymentDate`
         is rescheduled: cleared once fully paid, or set to the request's
@@ -1115,7 +1203,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: Would leave a fully_paid order's ledger not matching its total_amount
+          description: PAYMENT_ORDER_NOT_PRICED -- set the order total first
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1124,7 +1212,11 @@ paths:
     patch:
       tags: [Payments]
       summary: Edit a payment entry
-      description: Same `fully_paid` consistency rule as POST, evaluated against the edited amount.
+      description: |
+        Gated by `payments:correct` -- owner and accountant only (ADR 0008).
+        Refused with 409 `PAYMENT_LOCKED_AFTER_DELIVERY` once the order is
+        delivered (also enforced by a database trigger). Same overpayment and
+        payment-date rules as POST, evaluated against the edited values.
       parameters:
         - $ref: "#/components/parameters/OrderIdPath"
         - $ref: "#/components/parameters/PaymentId"
@@ -1146,7 +1238,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: Would leave a fully_paid order's ledger not matching its total_amount
+          description: PAYMENT_LOCKED_AFTER_DELIVERY -- the order is delivered
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1154,7 +1246,7 @@ paths:
     delete:
       tags: [Payments]
       summary: Remove a payment entry
-      description: Rejected with 409 if the order is `fully_paid` and removing this entry would break the ledger-sum-equals-total_amount invariant -- change the order's payment status first if that's intentional.
+      description: Gated by `payments:correct` -- owner and accountant only. Refused with 409 `PAYMENT_LOCKED_AFTER_DELIVERY` once the order is delivered (ADR 0008). Re-derives the order's payment status.
       parameters:
         - $ref: "#/components/parameters/OrderIdPath"
         - $ref: "#/components/parameters/PaymentId"
@@ -1225,16 +1317,16 @@ paths:
           description: One page of staff, plus totals
           content:
             application/json:
-              schema: { : "#/components/schemas/StaffActivity" }
+              schema: { $ref: "#/components/schemas/StaffActivity" }
         "400":
           description: A limit over 50, an unknown role/status, or a search over 100 characters
           content:
             application/json:
-              schema: { : "#/components/schemas/Error" }
+              schema: { $ref: "#/components/schemas/Error" }
         "401":
-          : "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/Unauthorized"
         "403":
-          : "#/components/responses/Forbidden"
+          $ref: "#/components/responses/Forbidden"
 
   /reports/activity-days:
     get:
@@ -1299,7 +1391,7 @@ paths:
           description: "`open` = every stage that isn't converted / lost / discarded."
           schema: { type: string, enum: [open, new, assigned, unattended, attended, follow_up, converted, lost, discarded] }
         - { name: urgent, in: query, schema: { type: string, enum: ["true", "false"] } }
-        - { name: q, in: query, description: Search customer name, phone or lead number., schema: { type: string, maxLength: 80 } }
+        - { name: q, in: query, description: "Search customer name, phone or lead number.", schema: { type: string, maxLength: 80 } }
         - { name: assignedTo, in: query, description: Owner only -- one designer's leads., schema: { type: string, format: uuid } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
         - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
@@ -1844,10 +1936,42 @@ components:
         - kids_girls_custom
         - kids_boys_custom
 
+    ChangePriceRequest:
+      type: object
+      required: [totalAmount]
+      properties:
+        totalAmount:
+          allOf: [{ $ref: "#/components/schemas/MoneyInput" }]
+          description: The new total (at most 9999999999.99).
+        reason:
+          type: string
+          maxLength: 500
+          description: Required (3-500 characters) to raise or discount; optional for the first price.
+
+    PriceChange:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        orderId: { type: string, format: uuid }
+        kind: { type: string, enum: [set, raise, discount] }
+        previousTotal:
+          type: string
+          allOf: [{ $ref: "#/components/schemas/Money" }]
+          nullable: true
+          description: Null for the first price.
+        newTotal: { $ref: "#/components/schemas/Money" }
+        collected:
+          allOf: [{ $ref: "#/components/schemas/Money" }]
+          description: What had been collected when the price changed.
+        reason: { type: string, nullable: true }
+        changedBy: { type: string, format: uuid, nullable: true }
+        changedByName: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+
     PaymentStatus:
       type: string
-      description: DERIVED from the ledger (sum of payments vs order total), never submitted. unpaid -> advance_paid -> fully_paid. A 0 total (free work) is fully_paid.
-      enum: [unpaid, advance_paid, fully_paid]
+      description: DERIVED from the ledger (sum of payments vs order total), never submitted. not_priced (no total yet, ADR 0008) -> unpaid -> advance_paid -> fully_paid. A 0 total (free work) is fully_paid.
+      enum: [not_priced, unpaid, advance_paid, fully_paid]
 
     PaymentMethod:
       type: string
@@ -1953,7 +2077,7 @@ components:
         orderId: { type: string, format: uuid }
         slot: { type: integer, minimum: 1, maximum: 4 }
         storagePath: { type: string }
-        url: { type: string, description: Freshly-signed Supabase Storage URL, re-resolved on every read -- never stored. }
+        url: { type: string, description: "Freshly-signed Supabase Storage URL, re-resolved on every read -- never stored." }
         originalFilename: { type: string, nullable: true }
         contentType: { type: string, nullable: true }
         sizeBytes: { type: integer, nullable: true }
@@ -1991,14 +2115,21 @@ components:
           allOf: [{ $ref: "#/components/schemas/PaymentStatus" }]
           description: Derived from the ledger (never submitted). Absent entirely (not null) for callers without payments:read (master_tailor) -- a real server-side omission, not a UI-only hide.
         totalAmount:
+          type: string
           allOf: [{ $ref: "#/components/schemas/Money" }]
-          description: "Absent for master_tailor -- see paymentStatus."
+          nullable: true
+          description: "Null while the order has no price (ADR 0008). Absent for roles without payments:read -- see paymentStatus."
+        priceSet:
+          type: boolean
+          description: "Whether the order has a price. Present for EVERY role (it's not an amount), so any role can tell Delivered needs pricing first."
         amountPaid:
           allOf: [{ $ref: "#/components/schemas/Money" }]
           description: "Absent for master_tailor. The real sum of GET /orders/{orderId}/payments -- never stored, always derived at read time."
         outstanding:
+          type: string
           allOf: [{ $ref: "#/components/schemas/Money" }]
-          description: "Absent for master_tailor -- see paymentStatus."
+          nullable: true
+          description: "Null while the order has no price. Absent for roles without payments:read -- see paymentStatus."
         nextPaymentDate:
           type: string
           format: date
@@ -2028,7 +2159,8 @@ components:
         inProduction: { type: integer, description: "Orders in an active production stage (Falls/Kutchu..Alteration; not Ready or Delivered). Visible to all roles." }
         overdue: { type: integer, description: "Active orders past their delivery due date. Visible to all roles." }
         urgent: { type: integer, description: "Active orders due within 3 days (not overdue). Visible to all roles." }
-        pendingPayments: { type: integer, description: "Absent for master_tailor. Orders whose paymentStatus isn't fully_paid." }
+        pendingPayments: { type: integer, description: "Absent for master_tailor. Orders still owing (unpaid / advance_paid) -- a not-priced order owes nothing yet." }
+        notPriced: { type: integer, description: "Absent for master_tailor. Orders with no price yet (the Price not set card / bucket not_priced)." }
         collectedRevenue:
           allOf: [{ $ref: "#/components/schemas/Money" }]
           description: "Absent for master_tailor. SUM(payments.amount) across the scope."
@@ -2108,14 +2240,17 @@ components:
         orderId: { type: string, format: uuid, nullable: true }
         orderNumber: { type: string, nullable: true, description: Human-readable order number (null if the order was since removed). }
         snapshot:
+          type: object
           allOf: [{ $ref: "#/components/schemas/LedgerAmountSnapshot" }]
           nullable: true
           description: created/deleted only -- the payment's amount + method.
         before:
+          type: object
           allOf: [{ $ref: "#/components/schemas/LedgerAmountSnapshot" }]
           nullable: true
           description: updated only -- values before the edit.
         after:
+          type: object
           allOf: [{ $ref: "#/components/schemas/LedgerAmountSnapshot" }]
           nullable: true
           description: updated only -- values after the edit.
@@ -2127,7 +2262,7 @@ components:
         events:
           type: array
           items: { $ref: "#/components/schemas/LedgerEvent" }
-        total: { type: integer, description: Total events matching the range, ignoring pagination. }
+        total: { type: integer, description: "Total events matching the range, ignoring pagination." }
         limit: { type: integer }
         offset: { type: integer }
         from: { type: string, format: date, description: Inclusive window start (echoes the resolved request). }
@@ -2167,11 +2302,18 @@ components:
         handWork: { type: boolean, default: false }
         machineWork: { type: boolean, default: false }
         purchaseRequired: { type: boolean, default: false }
-        # paymentStatus is NOT accepted -- it is derived from the ledger. Record
-        # an advance via POST /orders/{orderId}/payments right after creation.
+        # paymentStatus is NOT accepted -- it is derived from the ledger.
         totalAmount:
-          allOf: [{ $ref: "#/components/schemas/MoneyInput" }]
-          default: "0.00"
+          type: string
+          pattern: '^d+(.d{1,2})?$'
+          nullable: true
+          default: null
+          description: >-
+            A decimal string like MoneyInput (a number is also accepted), or null.
+            Usually omitted: a new order has no price and is priced afterwards
+            with PUT /orders/{id}/price (ADR 0008). A total given here is the
+            first price -- 403 ORDER_PRICE_FORBIDDEN unless the caller is the
+            owner, the accountant, or the order's own designer.
         nextPaymentDate: { type: string, format: date, nullable: true, description: "When the next payment is expected (payment-due tracking). Optional; null to leave unset." }
         productionStatus: { $ref: "#/components/schemas/GranularStatus" }
         designerInstructions: { type: string }
@@ -2214,9 +2356,12 @@ components:
         handWork: { type: boolean }
         machineWork: { type: boolean }
         purchaseRequired: { type: boolean }
-        # paymentStatus is NOT accepted -- derived from the ledger. Changing
-        # totalAmount re-derives it server-side; record payments via the ledger.
-        totalAmount: { $ref: "#/components/schemas/MoneyInput" }
+        # paymentStatus is NOT accepted -- derived from the ledger.
+        totalAmount:
+          type: string
+          pattern: '^d+(.d{1,2})?$'
+          nullable: true
+          description: "A decimal string (a number is also accepted) or null. Accepted only UNCHANGED (ignored); a different value is 400 ORDER_PRICE_USE_PRICING -- use PUT /orders/{id}/price."
         nextPaymentDate: { type: string, format: date, nullable: true, description: "When the next payment is expected (payment-due tracking). Null to clear." }
         productionStatus: { $ref: "#/components/schemas/GranularStatus" }
         designerInstructions: { type: string }

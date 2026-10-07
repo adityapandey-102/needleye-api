@@ -1,6 +1,7 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db } from "../../src/common/database/drizzle-client";
 import { orders } from "../../src/modules/orders/infrastructure/order.schema";
+import { payments } from "../../src/modules/payments/infrastructure/payments.schema";
 import { supabaseClient } from "../../src/common/database/supabase-client";
 import { authProvider } from "../../src/common/auth/supabase-auth-provider";
 import type { Role } from "../../src/domain";
@@ -46,9 +47,21 @@ export async function deleteFixtureUser(userId: string): Promise<void> {
   });
 }
 
-/** Deletes an order -- cascades to order_images/payments/order_status_history (all `on delete cascade`). */
+/**
+ * Deletes a fixture order. Payments first: they no longer cascade (ON DELETE
+ * RESTRICT, ADR 0008), and a delivered order's payments are locked by the
+ * payments_guard trigger -- so that one delete runs with replica-mode triggers
+ * off. Only the local test role can do that; the production runtime role
+ * can't (it isn't allowed to set session_replication_role). The order itself
+ * then cascades to its images and status / price history as usual.
+ */
 export async function deleteFixtureOrder(orderId: string): Promise<void> {
-  await db.delete(orders).where(eq(orders.id, orderId));
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`set local session_replication_role = replica`);
+    await tx.delete(payments).where(eq(payments.orderId, orderId));
+    await tx.execute(sql`set local session_replication_role = origin`);
+    await tx.delete(orders).where(eq(orders.id, orderId));
+  });
 }
 
 /** Call once in an `afterAll` per test file so the Postgres pool doesn't keep the process alive. */

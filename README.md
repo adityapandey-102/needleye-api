@@ -114,7 +114,7 @@ more scripts are useful for local development:
 
 - **`npm run seed`** (`src/db/seed.ts`) -- populates ~40 orders spanning every production status, payment state (unpaid/advance/fully, with the status **derived** from the ledger it records), and due-date bucket, with real multi-step status history and a handful of reference images, plus the 5 designer / 5 master-tailor / 1 accountant staff accounts (the designer/master names are the prototype's own, for continuity). Safe to re-run -- staff are looked up by email first, so a second run reuses the same accounts instead of duplicating them; it never deletes anything.
 - **`npm run test:integration`** (`tests/integration/`, Vitest) -- repository↔database, service↔repository, authentication, and API-endpoint coverage against the real local Supabase stack (no mocking). Creates and tears down its own fixtures every run. See `tests/integration/README.md`.
-- **`npm run test:rbac`** (`tests/rbac-matrix.mjs`) -- a small, self-contained per-role 200/403 check against the running API: `orders:create`, `orders:edit:total`, `orders:edit:pricing_assignment`, `payments:read`/`payments:manage`, the status tiers (`orders:status:design`/`pm_received`/`production`), `users:manage`, row-scoping, and the unauthenticated case. Needs `SEED_OWNER_PASSWORD` set to an existing Owner/Manager's password; creates its own throwaway fixtures, so it never depends on `npm run seed` having been run first.
+- **`npm run test:rbac`** (`tests/rbac-matrix.mjs`) -- a small, self-contained per-role 200/403 check against the running API: `orders:create`, pricing (`orders:price:set` / `orders:price:adjust` via `PUT /orders/:id/price`), `orders:edit:pricing_assignment`, `payments:read`/`payments:manage`/`payments:correct`, the status tiers (`orders:status:design`/`pm_received`/`production`), `users:manage`, row-scoping, and the unauthenticated case. Needs `SEED_OWNER_PASSWORD` set to an existing Owner/Manager's password; creates its own throwaway fixtures, so it never depends on `npm run seed` having been run first.
 - **`npm run test:perf`** (`scripts/perf/query-audit.ts`, local database only) -- the **query audit**. It captures the real SQL of every important repository call, re-runs it with `EXPLAIN ANALYZE` on 3 years of synthetic data (12k orders, 144k stage moves, 360k audit rows) inside a transaction it rolls back, and fails on a query over 150 ms, a large unexpected sequential scan, or an N+1. `--write` refreshes `docs/performance/query-audit.md`. Its fast sibling is the **query budget** (`tests/integration/query-budget.integration.test.ts`, part of `test:integration`): a page of 50 must cost the same number of queries as a page of 5, and page sizes are capped. Rules and reasons are in `docs/engineering-practices.md`; the latest audit is in `docs/performance/README.md`.
 
 ### Docker
@@ -311,7 +311,8 @@ src/
         order.entity.ts                      # OrderEntity, OrderImageEntity -- pure, no persistence/HTTP shape
         order-status-history.entity.ts         # OrderStatusHistoryEntity -- one row in the status audit trail
         order-edit.rules.ts                    # assertFieldsEditable/assertOwnershipForScopedEdit -- the RBAC field-splitting + ownership invariants, framework-free
-        order-ledger.rules.ts                    # derivePaymentStatus -- unpaid/advance_paid/fully_paid from the ledger sum, seen from the Orders side (a small, deliberate duplicate of Payments' own copy -- Domain layers don't import across modules, see ADR 0003)
+        order-pricing.rules.ts                   # decidePriceChange (set / raise / discount: who, reason, never below collected, locked once delivered), assertPricedForDelivery, assertEditKeepsTotal (ADR 0008)
+        order-ledger.rules.ts                    # derivePaymentStatus -- not_priced/unpaid/advance_paid/fully_paid from the ledger sum, seen from the Orders side (a small, deliberate duplicate of Payments' own copy -- Domain layers don't import across modules, see ADR 0003)
         order-status.rules.ts                      # assertCanChangeStage (four-tier stage RBAC) + assertCanSkipStages (no jumping past a stage the role can't set) for PATCH /orders/:id/status -- forward-only + no-skip enforced under the repository's row lock, see "Order status history & Kanban" below
         order-visibility.rules.ts                    # canViewPaymentFields -- master_tailor's zero payment-visibility rule
       infrastructure/
@@ -334,7 +335,7 @@ src/
         ports/payments-repository.port.ts   # the interface -- Application depends on this, never on the Drizzle adapter
       domain/
         payment.entity.ts                   # PaymentEntity, OrderLedgerContext -- pure, no persistence/HTTP shape
-        payment-ledger.rules.ts               # assertDoesNotExceedTotal (overpayment guard) + derivePaymentStatus -- framework-free (decimal.js money, see common/money)
+        payment-ledger.rules.ts               # assertDoesNotExceedTotal (overpayment guard), assertOrderPriced, assertPaymentsCorrectable (locked once delivered), assertPaidAtNotFuture + derivePaymentStatus -- framework-free (decimal.js money, see common/money)
       infrastructure/
         drizzle-payments.repository.ts        # implements the port; reads `orders` from Orders' schema and `profiles` from Users' schema (see ADR 0003)
         payments.schema.ts                      # this module's own Drizzle table def for `payments`
@@ -544,11 +545,13 @@ QR and views/advances it. See ADR 0005 for the full rationale.
 source of truth. `requireCapability('orders:read')` etc. gate access at the
 controller layer against the capability matrix in `domain/capabilities.ts`;
 `orders/domain/order-edit.rules.ts`'s `assertFieldsEditable` additionally
-splits editable fields into three groups -- customer/product
-(`orders:edit:customer_product_fields`), the total (`orders:edit:total`) and
-designer/master reassignment (`orders:edit:pricing_assignment`) -- and checks
-each independently, so e.g. a Designer can edit their own order's notes and
-total but is rejected reassigning its master tailor. Row-level scoping (a
+splits editable fields into two groups -- customer/product
+(`orders:edit:customer_product_fields`) and designer/master reassignment
+(`orders:edit:pricing_assignment`) -- and checks each independently, so e.g.
+a Designer can edit their own order's notes but is rejected reassigning its
+master tailor. **The total is not an editable field** (ADR 0008): an edit may
+resend it unchanged (ignored), any other value is `400 ORDER_PRICE_USE_PRICING`
+-- prices change only through `PUT /orders/:id/price` (see "Pricing" below). Row-level scoping (a
 Designer/Master Tailor only ever sees their own assigned orders) is applied
 inside `drizzle-orders.repository.ts`'s query construction.
 
@@ -561,6 +564,44 @@ the exact same order returns those fields for an Owner/Manager and omits
 them entirely for a Master Tailor. This is real enforcement, not just the
 frontend hiding a column; a role with no payment visibility never receives
 the data in the first place.
+
+### Pricing (ADR 0008)
+
+A new order normally has **no price**: `total_amount` is null and
+`payment_status` is `not_priced` (a CHECK keeps the two in step). The web asks
+"Add pricing now?" right after an order is saved. Every `Order` response
+carries `priceSet` for every role (it's not an amount), so any role can tell
+that Delivered needs pricing first.
+
+`PUT /orders/:id/price { totalAmount, reason? }` is the only way a total
+changes. `OrdersService.changePrice` hands `decidePriceChange`
+(`order-pricing.rules.ts`) to `DrizzleOrdersRepository.changePrice`, which
+runs it against the order **locked** (`FOR UPDATE` -- a payment locks the same
+row, so "collected" can't move underneath) and writes the new total, the
+re-derived status and one `order_price_history` row in the same transaction:
+
+| Order now | New total | Kind | Who | Reason |
+|---|---|---|---|---|
+| no price | any (₹0 = free work) | `set` | owner, accountant, the order's own designer (`orders:price:set`) | optional |
+| priced | higher | `raise` | owner, accountant (`orders:price:adjust`) | required |
+| priced | lower | `discount` | owner, accountant | required; never below what's collected |
+
+A delivered order's price is locked (`409 ORDER_PRICE_LOCKED`), and
+`PATCH /orders/:id/status` refuses Delivered without a price
+(`409 ORDER_PRICE_REQUIRED`, "Set the order total first"). A total given at
+booking (`POST /orders` with `totalAmount`) is recorded as the first `set`
+and needs the same right (the PM gets `403 ORDER_PRICE_FORBIDDEN`).
+`GET /orders/:id/price-history` lists the changes (`payments:read` roles, row-scoped).
+
+**The database enforces the same rules underneath** (migration
+`20261009000001`): `orders_guard_price_change` (Delivered needs a price; no
+price change once delivered; a price can't be removed or set below the
+payments), `payments_guard` (no payment on an unpriced order; payments never sum
+past the total; no edit/delete once delivered), `order_price_history` is
+append-only (trigger), and `payments.order_id` is `ON DELETE RESTRICT`. The
+integration fixtures clean up with `session_replication_role = replica` for the
+payment rows only -- the local test role may set it; the production runtime role
+can't.
 
 ### Payment ledger
 
@@ -604,9 +645,8 @@ it never shows in Pending Payments; editing the total up later re-derives it
 old manual-status class of bugs (status disagreeing with the ledger) is gone:
 
 - `CreateOrderRequest` no longer accepts `paymentStatus`; a new order starts
-  `unpaid` (or `fully_paid` at a ₹0 total), and an advance collected at booking is recorded as the first
-  ledger entry (`POST /orders/:id/payments` right after creation), which
-  syncs the status.
+  `not_priced` (or `unpaid` / `fully_paid` when priced at booking). Once it's
+  priced, an advance is recorded as a ledger entry, which syncs the status.
 - Every ledger write (`POST`/`PATCH`/`DELETE` on a payment) recomputes the
   order's status from the new sum and writes it back via
   `PaymentsRepository.updateOrderLedgerState` (a cross-module
@@ -615,8 +655,8 @@ old manual-status class of bugs (status disagreeing with the ledger) is gone:
   reschedules `next_payment_date`: cleared once fully paid, or set to the
   request's `nextPaymentDate` while a balance remains (fixing a stale
   "due today" after a same-day payment).
-- `PATCH /orders/:id` doesn't accept `paymentStatus` either; changing
-  `total_amount` re-derives it server-side.
+- `PATCH /orders/:id` doesn't accept `paymentStatus` either, and can't change
+  the total; `PUT /orders/:id/price` re-derives the status server-side.
 
 The `sum(ledger) <= total_amount` invariant is guarded from **both**
 directions, so an order can never be "overpaid" (which would silently inflate
@@ -624,16 +664,21 @@ collected revenue):
 
 - **Payment side** -- `assertDoesNotExceedTotal` (`PAYMENT_EXCEEDS_TOTAL`, 400):
   a payment can't push the recorded sum over `total_amount`.
-- **Order side** -- `assertTotalCoversLedger` (`ORDER_TOTAL_BELOW_PAID`, 400):
-  `PATCH /orders/:id` can't lower `total_amount` below the sum already
-  collected. To discount after collecting, reduce/remove the payment in the
-  ledger first (i.e. record the refund), then lower the total.
+- **Order side** -- `decidePriceChange` (`ORDER_TOTAL_BELOW_PAID`, 400): a
+  discount can't take `total_amount` below the sum already collected; the
+  message states the largest discount possible. No payment is ever removed to
+  make room (ADR 0008).
 
 Currency comparisons round to the cent (`Math.round(amount * 100)`) to avoid
 float noise.
 
-**Access**: `payments:read`/`payments:manage` gate `GET`/`POST`/`PATCH`/`DELETE`
-on `/orders/:orderId/payments[/:paymentId]` at the router level (`requireCapability`);
+**Access**: `payments:read` gates `GET`, `payments:manage` gates `POST` (owner,
+accountant, the order's own designer) and `payments:correct` gates `PATCH`/`DELETE`
+(owner and accountant only) on `/orders/:orderId/payments[/:paymentId]` at the
+router level (`requireCapability`). Under the order lock the repository also
+refuses a payment on an unpriced order (`409 PAYMENT_ORDER_NOT_PRICED`) and any
+edit/delete once the order is delivered (`409 PAYMENT_LOCKED_AFTER_DELIVERY`);
+the service refuses a `paidAt` after the shop's today (`400 PAYMENT_DATE_INVALID`);
 a `designer`'s "assigned" scope is additionally checked in
 `PaymentsService.loadOrderForAccess` against the order's `designer_id` --
 `master_tailor` has no path to this data at all: not the router (403

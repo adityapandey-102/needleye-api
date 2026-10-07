@@ -57,6 +57,14 @@ replay of history. So for the initial cutover:
 > Ready stage, so until the new API is live **nobody can mark an order
 > Delivered**. Apply it immediately before deploying the matching API (and the
 > web right after), not days ahead.
+>
+> **`20261009000001_order_pricing_and_payment_rules.sql` (ADR 0008, phase 2)**
+> -- orders can be unpriced, price history, payment/price guards. Same timing:
+> right before the matching API. Under the old API, designers lose editing /
+> deleting payments on delivered orders (the database refuses it), and an order
+> with payments can no longer be deleted. Before running it, list any `₹0`
+> orders that were placeholders rather than free work and price them: once
+> delivered, a price is locked.
 
 ### 1a. Least-privilege runtime database role (recommended)
 

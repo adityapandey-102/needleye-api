@@ -19,7 +19,7 @@ export type OrderQueryResult = {
   machineWork: boolean;
   purchaseRequired: boolean;
   paymentStatus: OrderEntity["paymentStatus"];
-  totalAmount: string;
+  totalAmount: string | null;
   productionStatus: OrderEntity["productionStatus"];
   version: number;
   designerInstructions: string | null;
@@ -64,7 +64,7 @@ export const OrderMapper = {
       machineWork: row.machineWork,
       purchaseRequired: row.purchaseRequired,
       paymentStatus: row.paymentStatus,
-      totalAmount: toMoneyString(row.totalAmount),
+      totalAmount: row.totalAmount === null ? null : toMoneyString(row.totalAmount),
       productionStatus: row.productionStatus,
       designerInstructions: row.designerInstructions,
       specialNotes: row.specialNotes,

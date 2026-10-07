@@ -23,6 +23,7 @@ export const AUDIT_ACTIONS = {
   ORDER_CREATED: "order.created",
   ORDER_UPDATED: "order.updated",
   ORDER_STATUS_CHANGED: "order.status_changed",
+  ORDER_PRICE_CHANGED: "order.price_changed",
   ORDER_IMAGE_DELETED: "order.image_deleted",
   /** Booked onto a delivery day that was already full, after confirming with the Production Manager. */
   ORDER_DELIVERY_OVERRIDE: "order.delivery_override",

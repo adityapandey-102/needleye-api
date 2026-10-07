@@ -3,6 +3,7 @@ import { db } from "../../../common/database/drizzle-client";
 import { orders } from "./order.schema";
 import { orderImages } from "./order-image.schema";
 import { orderStatusHistory } from "./order-status-history.schema";
+import { orderPriceHistory } from "./order-price-history.schema";
 // Cross-module Infrastructure-only read of Payments' schema, for the ledger
 // sum aggregates below -- see docs/adr/0003-per-module-schema-ownership.md.
 import { payments } from "../../payments/infrastructure/payments.schema";
@@ -22,6 +23,9 @@ import {
   type GranularStatus,
 } from "../../../domain";
 import { assertStageMove } from "../domain/order-status.rules";
+import { assertPricedForDelivery, type PriceChangeDecision, type PriceState } from "../domain/order-pricing.rules";
+import { derivePaymentStatus } from "../domain/order-ledger.rules";
+import type { OrderPriceChangeEntity } from "../domain/order-price-change.entity";
 import { OrderMapper, type OrderQueryResult } from "./order.mapper";
 import { OrderStatusHistoryMapper, type OrderStatusHistoryRow } from "./order-status-history.mapper";
 import type { OrderEntity } from "../domain/order.entity";
@@ -77,6 +81,9 @@ const COMPLETED_STATUSES = COMPLETED_CANONICAL_STAGES.map((stage) => CANONICAL_T
 
 /** Production stages still actively being worked (excludes Ready and Delivered) -- the "In Production" dashboard bucket. */
 const IN_PRODUCTION_STATUSES = PRODUCTION_STAGE_STATUSES.filter((s) => !COMPLETED_STATUSES.includes(s) && s !== READY_STATUS);
+
+/** Payment statuses that still have money to collect -- a "not_priced" order owes nothing YET (ADR 0008). */
+const OWED_PAYMENT_STATUSES = ["unpaid", "advance_paid"] as const;
 
 /** SQL-safe `'a','b'` lists of the status groups, for raw queries (values are code constants, never user input). */
 const COMPLETED_STATUS_SQL_LIST = COMPLETED_STATUSES.map((s) => `'${s}'`).join(", ");
@@ -151,13 +158,15 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
           sql`${orders.id} = any(array(select h.order_id from ${orderStatusHistory} h where h.status = 'delivered' and h.created_at >= ${shopMonthStart()}))`,
         );
       case "pending_payment":
-        return ne(orders.paymentStatus, "fully_paid");
+        return inArray(orders.paymentStatus, [...OWED_PAYMENT_STATUSES]);
+      case "not_priced":
+        return eq(orders.paymentStatus, "not_priced");
       case "payment_overdue":
         // Outstanding balance whose scheduled next-payment date has passed.
-        return and(ne(orders.paymentStatus, "fully_paid"), sql`${orders.nextPaymentDate} < current_date`);
+        return and(inArray(orders.paymentStatus, [...OWED_PAYMENT_STATUSES]), sql`${orders.nextPaymentDate} < current_date`);
       case "payment_upcoming":
         // Outstanding balance with a next-payment date still ahead (or today).
-        return and(ne(orders.paymentStatus, "fully_paid"), sql`${orders.nextPaymentDate} >= current_date`);
+        return and(inArray(orders.paymentStatus, [...OWED_PAYMENT_STATUSES]), sql`${orders.nextPaymentDate} >= current_date`);
       case "overdue":
         return and(notInArray(orders.productionStatus, COMPLETED_STATUSES), sql`${orders.dueDate} < current_date`);
       case "urgent":
@@ -236,7 +245,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
           // urgent: due within 3 days).
           overdue: sql<string>`count(*) filter (where ${notInArray(orders.productionStatus, COMPLETED_STATUSES)} and ${orders.dueDate} < current_date)`,
           urgent: sql<string>`count(*) filter (where ${notInArray(orders.productionStatus, COMPLETED_STATUSES)} and ${orders.dueDate} >= current_date and ${orders.dueDate} < current_date + 3)`,
-          pendingPayments: sql<string>`count(*) filter (where ${ne(orders.paymentStatus, "fully_paid")})`,
+          pendingPayments: sql<string>`count(*) filter (where ${inArray(orders.paymentStatus, [...OWED_PAYMENT_STATUSES])})`,
+          notPriced: sql<string>`count(*) filter (where ${eq(orders.paymentStatus, "not_priced")})`,
           totalValue: sql<string>`coalesce(sum(${orders.totalAmount}), 0)`,
         })
         .from(orders)
@@ -287,6 +297,7 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
       overdue: row ? Number(row.overdue) : 0,
       urgent: row ? Number(row.urgent) : 0,
       pendingPayments: row ? Number(row.pendingPayments) : 0,
+      notPriced: row ? Number(row.notPriced) : 0,
       collectedRevenue: toMoneyString(collectedRevenue),
       outstandingRevenue: toMoneyString(outstanding(totalValue, collectedRevenue)),
     };
@@ -374,8 +385,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
           count(*) filter (where production_status in (${sql.raw(COMPLETED_STATUS_SQL_LIST)}))::int as completed,
           count(*) filter (where production_status not in (${sql.raw(COMPLETED_STATUS_SQL_LIST)}) and due_date < current_date)::int as overdue,
           count(*) filter (where production_status not in (${sql.raw(COMPLETED_STATUS_SQL_LIST)}) and due_date >= current_date and due_date < current_date + 3)::int as urgent,
-          count(*) filter (where payment_status <> 'fully_paid')::int as pp_count,
-          coalesce(sum(greatest(total_amount - coalesce((select sum(p.amount) from payments p where p.order_id = orders.id), 0), 0)) filter (where payment_status <> 'fully_paid'), 0) as pp_amount
+          count(*) filter (where payment_status in ('unpaid', 'advance_paid'))::int as pp_count,
+          coalesce(sum(greatest(total_amount - coalesce((select sum(p.amount) from payments p where p.order_id = orders.id), 0), 0)) filter (where payment_status in ('unpaid', 'advance_paid')), 0) as pp_amount
         from orders
         where orders.${sql.raw(staffColumnName)} = ${staffId}
           and booking_date >= ${range.from}::date
@@ -563,7 +574,7 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     }
     const row = rows[0];
     if (!row) return null;
-    return { ...row, totalAmount: toMoneyString(row.totalAmount) };
+    return { ...row, totalAmount: row.totalAmount === null ? null : toMoneyString(row.totalAmount) };
   }
 
   async countOrdersDueByDay(
@@ -612,7 +623,7 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
             machineWork: data.machineWork,
             purchaseRequired: data.purchaseRequired,
             paymentStatus: data.paymentStatus,
-            totalAmount: toMoneyString(data.totalAmount),
+            totalAmount: data.totalAmount === null ? null : toMoneyString(data.totalAmount),
             productionStatus: data.productionStatus,
             designerInstructions: data.designerInstructions,
             specialNotes: data.specialNotes,
@@ -625,6 +636,19 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         // An order saved for a lead converts it here, in this transaction --
         // if the lead can't be converted, this throws and no order is created.
         if (leadLink) await convertLeadInTransaction(tx, leadLink, inserted);
+
+        // A price given at booking is the order's first price -- recorded like
+        // any later one (see changePrice()), in this same transaction.
+        if (data.totalAmount !== null) {
+          await tx.insert(orderPriceHistory).values({
+            orderId: inserted.id,
+            kind: "set",
+            previousTotal: null,
+            newTotal: toMoneyString(data.totalAmount),
+            collected: "0.00",
+            changedBy: data.createdBy,
+          });
+        }
 
         // A brand-new order's history starts with one entry for its initial
         // status -- the timeline is never empty, same as every subsequent
@@ -659,9 +683,7 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     // updated_at is deliberately not touched: orders_set_updated_at (a
     // BEFORE UPDATE trigger) already keeps it current. `version` is always
     // bumped so the next reader/editor sees a moved-on value (optimistic lock).
-    const { totalAmount, ...rest } = data;
-    const record: Partial<typeof orders.$inferInsert> = { ...rest };
-    if (totalAmount !== undefined) record.totalAmount = toMoneyString(totalAmount);
+    const record: Partial<typeof orders.$inferInsert> = { ...data };
 
     // When a version is supplied, the write only lands if the stored version
     // still matches -- so a concurrent edit (holding the old version) hits 0 rows.
@@ -728,7 +750,7 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         // waits, then sees the already-advanced status and is rejected below --
         // no duplicate history rows, no concurrent double-advance.
         const rows = await tx
-          .select({ current: orders.productionStatus })
+          .select({ current: orders.productionStatus, total: orders.totalAmount })
           .from(orders)
           .where(eq(orders.id, id))
           .for("update");
@@ -739,6 +761,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         // only from Ready. Rejecting the same stage also makes a repeat scan or
         // a concurrent double-advance a clean 409 (idempotency).
         assertStageMove(current, status);
+        // Delivered needs a price (ADR 0008) -- judged on the locked row.
+        assertPricedForDelivery(status, rows[0]!.total);
 
         // Caller-supplied transition rule (e.g. no skipping past a stage the
         // role can't set). Run HERE, against the locked `current`, rather than in
@@ -788,6 +812,102 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
       throw new InternalError("Failed to load order status history", error);
     }
     return rows.map((row) => OrderStatusHistoryMapper.toEntity(row));
+  }
+
+  async changePrice(
+    id: string,
+    request: { newTotal: string; changedBy: string },
+    decide: (state: PriceState) => PriceChangeDecision,
+  ): Promise<OrderPriceChangeEntity> {
+    let changeId: string;
+    try {
+      changeId = await db.transaction(async (tx) => {
+        // Lock the order row. Recording a payment locks it too, so a payment
+        // and a price change on the same order serialise: "collected" and the
+        // current total can't move between the check and the write.
+        const [row] = await tx
+          .select({ total: orders.totalAmount, productionStatus: orders.productionStatus, designerId: orders.designerId })
+          .from(orders)
+          .where(eq(orders.id, id))
+          .for("update");
+        if (!row) throw new NotFoundError("Order not found", ERROR_CODES.ORDER_NOT_FOUND);
+        const [paid] = await tx
+          .select({ sum: sql<string>`coalesce(sum(${payments.amount}), 0)` })
+          .from(payments)
+          .where(eq(payments.orderId, id));
+
+        const previousTotal = row.total === null ? null : toMoneyString(row.total);
+        const collected = toMoneyString(paid?.sum ?? 0);
+        const newTotal = toMoneyString(request.newTotal);
+        const decision = decide({ currentTotal: previousTotal, productionStatus: row.productionStatus, designerId: row.designerId, collected });
+
+        const status = derivePaymentStatus(collected, newTotal);
+        await tx
+          .update(orders)
+          .set({
+            totalAmount: newTotal,
+            paymentStatus: status,
+            // Nothing left to collect -> nothing left to schedule (same as a settling payment).
+            ...(status === "fully_paid" ? { nextPaymentDate: null } : {}),
+            updatedBy: request.changedBy,
+            version: sql`${orders.version} + 1`,
+          })
+          .where(eq(orders.id, id));
+        const [inserted] = await tx
+          .insert(orderPriceHistory)
+          .values({
+            orderId: id,
+            kind: decision.kind,
+            previousTotal,
+            newTotal,
+            collected,
+            reason: decision.reason,
+            changedBy: request.changedBy,
+          })
+          .returning({ id: orderPriceHistory.id });
+        if (!inserted) throw new InternalError("Failed to save the price");
+        return inserted.id;
+      });
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new InternalError("Failed to save the price", error);
+    }
+
+    const change = (await this.listPriceHistory(id)).find((c) => c.id === changeId);
+    if (!change) throw new InternalError("Failed to save the price");
+    return change;
+  }
+
+  async listPriceHistory(orderId: string): Promise<OrderPriceChangeEntity[]> {
+    try {
+      const rows = await db
+        .select({
+          id: orderPriceHistory.id,
+          orderId: orderPriceHistory.orderId,
+          kind: orderPriceHistory.kind,
+          previousTotal: orderPriceHistory.previousTotal,
+          newTotal: orderPriceHistory.newTotal,
+          collected: orderPriceHistory.collected,
+          reason: orderPriceHistory.reason,
+          changedBy: orderPriceHistory.changedBy,
+          changedByName: profiles.fullName,
+          createdAt: orderPriceHistory.createdAt,
+        })
+        .from(orderPriceHistory)
+        .leftJoin(profiles, eq(profiles.id, orderPriceHistory.changedBy))
+        .where(eq(orderPriceHistory.orderId, orderId))
+        .orderBy(desc(orderPriceHistory.createdAt));
+      return rows.map((r) => ({
+        ...r,
+        previousTotal: r.previousTotal === null ? null : toMoneyString(r.previousTotal),
+        newTotal: toMoneyString(r.newTotal),
+        collected: toMoneyString(r.collected),
+        changedByName: r.changedByName ?? null,
+        createdAt: r.createdAt.toISOString(),
+      }));
+    } catch (error) {
+      throw new InternalError("Failed to load the price history", error);
+    }
   }
 
   async upsertImage(data: NewImageRecord): Promise<void> {

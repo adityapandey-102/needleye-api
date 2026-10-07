@@ -11,6 +11,7 @@ import * as orderSchema from "../../modules/orders/infrastructure/order.schema";
 import * as orderImageSchema from "../../modules/orders/infrastructure/order-image.schema";
 import * as orderCounterSchema from "../../modules/orders/infrastructure/order-counter.schema";
 import * as orderStatusHistorySchema from "../../modules/orders/infrastructure/order-status-history.schema";
+import * as orderPriceHistorySchema from "../../modules/orders/infrastructure/order-price-history.schema";
 import * as orderRelationsSchema from "../../modules/orders/infrastructure/order.relations";
 import * as auditLogSchema from "../audit/audit-log.schema";
 import * as leadsSchema from "../../modules/leads/infrastructure/leads.schema";
@@ -38,6 +39,7 @@ const schema = {
   ...orderImageSchema,
   ...orderCounterSchema,
   ...orderStatusHistorySchema,
+  ...orderPriceHistorySchema,
   ...orderRelationsSchema,
   ...auditLogSchema,
   ...leadsSchema,

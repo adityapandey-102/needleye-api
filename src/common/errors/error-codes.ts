@@ -47,6 +47,18 @@ export const ERROR_CODES = {
   ORDER_PAYMENT_MISMATCH: "ORDER_PAYMENT_MISMATCH",
   /** Edit would set total_amount below the sum already recorded in the ledger (would create an "overpaid" order). */
   ORDER_TOTAL_BELOW_PAID: "ORDER_TOTAL_BELOW_PAID",
+  /** Delivered needs a price: set the order total first (ADR 0008). */
+  ORDER_PRICE_REQUIRED: "ORDER_PRICE_REQUIRED",
+  /** The order is delivered -- its price is locked. */
+  ORDER_PRICE_LOCKED: "ORDER_PRICE_LOCKED",
+  /** The new total equals the current one -- nothing to change. */
+  ORDER_PRICE_UNCHANGED: "ORDER_PRICE_UNCHANGED",
+  /** Raising or discounting a price needs a reason (3-500 characters). */
+  ORDER_PRICE_REASON_REQUIRED: "ORDER_PRICE_REASON_REQUIRED",
+  /** The caller's role can't make this kind of price change (set / raise / discount). */
+  ORDER_PRICE_FORBIDDEN: "ORDER_PRICE_FORBIDDEN",
+  /** An order edit tried to change the total -- prices change only through PUT /orders/:id/price. */
+  ORDER_PRICE_USE_PRICING: "ORDER_PRICE_USE_PRICING",
   /** Optimistic-lock conflict: the order was modified by someone else since it was loaded. */
   ORDER_MODIFIED: "ORDER_MODIFIED",
   /** The chosen delivery date is at capacity and the caller didn't confirm the override with the Production Manager. */
@@ -67,6 +79,12 @@ export const ERROR_CODES = {
   PAYMENT_LEDGER_MISMATCH: "PAYMENT_LEDGER_MISMATCH",
   /** A payment would push the ledger sum above the order total (overpayment). */
   PAYMENT_EXCEEDS_TOTAL: "PAYMENT_EXCEEDS_TOTAL",
+  /** No payments until the order has a price. */
+  PAYMENT_ORDER_NOT_PRICED: "PAYMENT_ORDER_NOT_PRICED",
+  /** The order is delivered -- its payments can no longer be edited or deleted. */
+  PAYMENT_LOCKED_AFTER_DELIVERY: "PAYMENT_LOCKED_AFTER_DELIVERY",
+  /** The payment date is in the future (shop timezone). */
+  PAYMENT_DATE_INVALID: "PAYMENT_DATE_INVALID",
 
   // -- Leads ------------------------------------------------------------------
   LEAD_NOT_FOUND: "LEAD_NOT_FOUND",

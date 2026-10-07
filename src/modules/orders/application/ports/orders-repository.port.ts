@@ -1,3 +1,5 @@
+import type { PriceChangeDecision, PriceState } from "../../domain/order-pricing.rules";
+import type { OrderPriceChangeEntity } from "../../domain/order-price-change.entity";
 import type { GranularStatus, PaymentStatus, ProductCategory, Role } from "../../../../domain";
 import type { OrderEntity } from "../../domain/order.entity";
 import type { OrderStatusHistoryEntity } from "../../domain/order-status-history.entity";
@@ -69,7 +71,8 @@ export interface NewOrderRecord {
   machineWork: boolean;
   purchaseRequired: boolean;
   paymentStatus: PaymentStatus;
-  totalAmount: string;
+  /** Null = no price yet. A price given at creation is recorded as the first "set" in the price history. */
+  totalAmount: string | null;
   productionStatus: GranularStatus;
   designerInstructions: string | null;
   specialNotes: string | null;
@@ -91,8 +94,8 @@ export interface UpdateOrderRecord {
   handWork?: boolean;
   machineWork?: boolean;
   purchaseRequired?: boolean;
-  paymentStatus?: PaymentStatus;
-  totalAmount?: string;
+  // The total (and so the payment status) never changes through an edit --
+  // only through changePrice() (ADR 0008).
   designerInstructions?: string | null;
   specialNotes?: string | null;
   updatedBy: string;
@@ -103,7 +106,7 @@ export interface OrderBasicInfo {
   id: string;
   designerId: string;
   masterTailorId: string;
-  totalAmount: string;
+  totalAmount: string | null;
   paymentStatus: PaymentStatus;
 }
 
@@ -140,6 +143,8 @@ export interface OrderStatsRaw {
   overdue: number;
   urgent: number;
   pendingPayments: number;
+  /** Orders with no price yet (ADR 0008). */
+  notPriced: number;
   /** Money as 2dp strings. */
   collectedRevenue: string;
   outstandingRevenue: string;
@@ -274,6 +279,19 @@ export interface OrdersRepositoryPort {
     assertTransition?: (current: GranularStatus) => void,
   ): Promise<OrderEntity>;
   listStatusHistory(orderId: string): Promise<OrderStatusHistoryEntity[]>;
+  /**
+   * Sets / raises / discounts the order's total and appends one
+   * order_price_history row, atomically, with the order row locked. `decide`
+   * gets the LOCKED state (current total, stage, designer, collected) and
+   * returns the change's kind + reason -- or throws to veto it (ADR 0008).
+   */
+  changePrice(
+    id: string,
+    request: { newTotal: string; changedBy: string },
+    decide: (state: PriceState) => PriceChangeDecision,
+  ): Promise<OrderPriceChangeEntity>;
+  /** An order's price history, newest first. */
+  listPriceHistory(orderId: string): Promise<OrderPriceChangeEntity[]>;
   upsertImage(data: NewImageRecord): Promise<void>;
   findImage(orderId: string, slot: number): Promise<OrderImageInfo | null>;
   deleteImage(orderId: string, slot: number): Promise<void>;

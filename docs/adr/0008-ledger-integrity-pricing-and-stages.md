@@ -10,8 +10,8 @@ Production rollout happens only when the owner asks (see "Rollout").
 | Phase | Scope | State |
 |---|---|---|
 | 1 | Marking and Ready stages; Alteration <-> Ready loop; Delivered only from Ready; dashboard cards | built |
-| 2 | Pricing and payment rules (orders without a price, raise / discount, locks) | planned |
-| 3 | Separate payment and order audit logs, price history, daily-activity categories | planned |
+| 2 | Pricing and payment rules (orders without a price, raise / discount, locks) + price history | built |
+| 3 | Separate payment and order audit logs, daily-activity categories | planned |
 | 4 | Ledger daily totals, calendar months, Revenue page cards + paged month table + export | planned |
 | 5 | Nightly reconciliation, closing the books | planned |
 
@@ -111,6 +111,43 @@ can't silently change. A review of the current code found:
 5. **`payments.order_id` becomes `ON DELETE RESTRICT`** (was CASCADE): an order
    with payments can't be deleted, so money history can't vanish with it.
 
+### How phase 2 is built
+
+- **One pricing endpoint, the server decides the kind.** `PUT /orders/:id/price
+  { totalAmount, reason? }`: no price yet -> `set`; higher -> `raise`; lower ->
+  `discount` (same total -> 400). The rules live in `order-pricing.rules.ts`
+  (`decidePriceChange`) and run against the order row LOCKED in the same
+  transaction that writes the total, the re-derived payment status and the
+  price-history row -- a payment locks the same row, so "collected" can't change
+  underneath. A discount down to exactly what's collected settles the order.
+- **Price history moved into phase 2.** The reason for a raise or a discount has
+  to be stored the moment it happens, so `order_price_history` (kind, previous
+  and new total, collected, reason, who, when; append-only by trigger) ships with
+  the pricing rules instead of with the phase 3 logs. A total given at booking is
+  recorded as the first `set`.
+- **An edit can't change the price.** `PATCH /orders/:id` may resend the
+  current total unchanged (edit forms send every field); any other value is
+  `400 ORDER_PRICE_USE_PRICING`. The order form has no price field at all.
+- **`priceSet` for every role.** The amount stays hidden from the PM, master
+  tailor and worker, but whether an order is priced is not sensitive, so the
+  status menu, Kanban and scan prompt can say "Set the order total first" before
+  trying.
+- **Capabilities.** `orders:edit:total` is replaced by `orders:price:set`
+  (owner, accountant, the order's own designer) and `orders:price:adjust`
+  (owner, accountant). `payments:manage` now means *record*; the new
+  `payments:correct` (owner, accountant) gates editing and deleting --
+  designers can no longer remove a payment they recorded.
+- **Database guards** (migration `20261009000001`): Delivered needs a price;
+  no price change once delivered; a price can't be removed or set below the
+  payments; no payment on an unpriced order; payments never sum past the total;
+  no payment edit/delete once delivered; `payments.order_id ON DELETE RESTRICT`;
+  `orders_price_status_consistent` (no total <=> `not_priced`). Integration
+  fixtures delete payment rows with `session_replication_role = replica`,
+  which the local test role may set and the production runtime role can't.
+- **Payment date.** The API refuses a `paidAt` after the shop's today
+  (`PAYMENT_DATE_INVALID`) or that isn't a real date. The web records payments
+  dated today, as before. "Not in a closed month" arrives with phase 5.
+
 ## Decisions -- audit logs (phase 3)
 
 1. **Separate, typed logs**, append-only, written **in the same transaction** as
@@ -119,8 +156,7 @@ can't silently change. A review of the current code found:
      before/after amount, method, paid-at date and reason;
    - `order_audit_log` -- order create / edit with the changed fields' before and
      after values;
-   - `order_price_history` -- every price set / raise / discount with the
-     amount before and after, who, and the reason;
+   - `order_price_history` -- built in phase 2 (see above);
    - `order_status_history` is reused (it's already separate) and gains
      `from_status`;
    - `audit_log` keeps sign-ins, QR and account events.

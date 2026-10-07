@@ -22,6 +22,8 @@ export interface OrderStatsResponseDto {
   /** Active orders due within 3 days (not overdue). Visible to all roles. */
   urgent: number;
   pendingPayments?: number;
+  /** Orders with no price yet (ADR 0008). Absent for roles without payments:read. */
+  notPriced?: number;
   // Money as 2dp strings.
   collectedRevenue?: string;
   outstandingRevenue?: string;

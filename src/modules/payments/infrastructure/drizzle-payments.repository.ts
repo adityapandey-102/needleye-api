@@ -6,14 +6,18 @@ import { db } from "../../../common/database/drizzle-client";
 import { orders } from "../../orders/infrastructure/order.schema";
 import { profiles } from "../../users/infrastructure/profile.schema";
 import { payments } from "./payments.schema";
-import { InternalError, NotFoundError } from "../../../common/errors/app-error";
+import { AppError, InternalError, NotFoundError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
-import { BadRequestError } from "../../../common/errors/app-error";
 import { addMoney, subtractMoney, toMoneyString } from "../../../common/money/money";
 // A repository may depend inward on its own module's domain (Clean Architecture):
 // the invariant + status derivation run inside the same locked transaction as the
 // write, so they can't be raced. Mirrors OrdersRepository.updateStatus.
-import { assertDoesNotExceedTotal, derivePaymentStatus } from "../domain/payment-ledger.rules";
+import {
+  assertDoesNotExceedTotal,
+  assertOrderPriced,
+  assertPaymentsCorrectable,
+  derivePaymentStatus,
+} from "../domain/payment-ledger.rules";
 import { PaymentsMapper, type PaymentRow } from "./payments.mapper";
 import type { PaymentEntity, OrderLedgerContext } from "../domain/payment.entity";
 import type {
@@ -53,7 +57,12 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
     let rows;
     try {
       rows = await db
-        .select({ designerId: orders.designerId, totalAmount: orders.totalAmount, paymentStatus: orders.paymentStatus })
+        .select({
+          designerId: orders.designerId,
+          totalAmount: orders.totalAmount,
+          paymentStatus: orders.paymentStatus,
+          productionStatus: orders.productionStatus,
+        })
         .from(orders)
         .where(eq(orders.id, orderId))
         .limit(1);
@@ -62,7 +71,12 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
     }
     const row = rows[0];
     if (!row) return null;
-    return { designerId: row.designerId, totalAmount: toMoneyString(row.totalAmount), paymentStatus: row.paymentStatus };
+    return {
+      designerId: row.designerId,
+      totalAmount: row.totalAmount === null ? null : toMoneyString(row.totalAmount),
+      paymentStatus: row.paymentStatus,
+      productionStatus: row.productionStatus,
+    };
   }
 
   async findByOrderId(orderId: string): Promise<PaymentEntity[]> {
@@ -106,12 +120,16 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
     return toMoneyString(rows[0]?.total ?? 0);
   }
 
-  /** Locks the order row for the rest of the transaction and returns its total. */
-  private async lockOrderTotal(tx: TxLike, orderId: string): Promise<string> {
-    const rows = await tx.select({ total: orders.totalAmount }).from(orders).where(eq(orders.id, orderId)).for("update");
-    const total = rows[0]?.total;
-    if (total === undefined) throw new NotFoundError("Order not found", ERROR_CODES.ORDER_NOT_FOUND);
-    return toMoneyString(total);
+  /** Locks the order row for the rest of the transaction and returns its total (null = not priced) and stage. */
+  private async lockOrder(tx: TxLike, orderId: string): Promise<{ total: string | null; productionStatus: string }> {
+    const rows = await tx
+      .select({ total: orders.totalAmount, productionStatus: orders.productionStatus })
+      .from(orders)
+      .where(eq(orders.id, orderId))
+      .for("update");
+    const row = rows[0];
+    if (!row) throw new NotFoundError("Order not found", ERROR_CODES.ORDER_NOT_FOUND);
+    return { total: row.total === null ? null : toMoneyString(row.total), productionStatus: row.productionStatus };
   }
 
   async create(record: NewPaymentRecord): Promise<PaymentEntity> {
@@ -145,7 +163,8 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
         // Lock the order first: two staff recording a payment on the SAME order
         // now serialize here, so the overpayment check + insert below can't be
         // raced into an overpaid ledger.
-        const total = await this.lockOrderTotal(tx, record.orderId);
+        const { total } = await this.lockOrder(tx, record.orderId);
+        assertOrderPriced(total); // 409 PAYMENT_ORDER_NOT_PRICED -- price first (ADR 0008)
         const newSum = addMoney(await this.sumInTx(tx, record.orderId), record.amount);
         assertDoesNotExceedTotal(newSum, total); // 400 PAYMENT_EXCEEDS_TOTAL
 
@@ -174,7 +193,7 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
         return inserted.id;
       });
     } catch (error) {
-      if (error instanceof NotFoundError || error instanceof BadRequestError) throw error;
+      if (error instanceof AppError) throw error;
       throw new InternalError("Failed to record payment", error);
     }
 
@@ -187,7 +206,9 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
     let found: boolean;
     try {
       found = await db.transaction(async (tx) => {
-        const total = await this.lockOrderTotal(tx, orderId);
+        const { total, productionStatus } = await this.lockOrder(tx, orderId);
+        assertPaymentsCorrectable(productionStatus); // 409 once delivered (ADR 0008)
+        assertOrderPriced(total); // a recorded payment implies a price; belt and braces
         const existing = (
           await tx
             .select({ amount: payments.amount })
@@ -217,7 +238,7 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
         return true;
       });
     } catch (error) {
-      if (error instanceof NotFoundError || error instanceof BadRequestError) throw error;
+      if (error instanceof AppError) throw error;
       throw new InternalError("Failed to update payment", error);
     }
 
@@ -230,7 +251,8 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
   async removePayment(orderId: string, paymentId: string): Promise<boolean> {
     try {
       return await db.transaction(async (tx) => {
-        const total = await this.lockOrderTotal(tx, orderId);
+        const { total, productionStatus } = await this.lockOrder(tx, orderId);
+        assertPaymentsCorrectable(productionStatus); // 409 once delivered (ADR 0008)
         const existing = (
           await tx
             .select({ id: payments.id })
@@ -247,7 +269,7 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
         return true;
       });
     } catch (error) {
-      if (error instanceof NotFoundError) throw error;
+      if (error instanceof AppError) throw error;
       throw new InternalError("Failed to delete payment", error);
     }
   }

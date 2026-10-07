@@ -39,10 +39,13 @@ export interface OrderResponseDto {
    * a real access control, not just a UI convenience.
    */
   paymentStatus?: PaymentStatus;
-  // Money as 2dp strings (see common/money/money.ts).
-  totalAmount?: string;
+  // Money as 2dp strings (see common/money/money.ts). totalAmount and
+  // outstanding are null while the order has no price (ADR 0008).
+  totalAmount?: string | null;
   amountPaid?: string;
-  outstanding?: string;
+  outstanding?: string | null;
+  /** Whether the order has a price -- visible to EVERY role (it's not an amount), so any role can tell Delivered needs pricing first. */
+  priceSet: boolean;
   productionStatus: GranularStatus;
   designerInstructions: string | null;
   specialNotes: string | null;

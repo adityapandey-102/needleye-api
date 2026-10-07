@@ -6,6 +6,7 @@ import { auditLogger as defaultAuditLogger } from "../../../common/audit/drizzle
 import type { AuditLogger } from "../../../common/audit/audit-logger";
 import type { Profile } from "../../../domain";
 import type { OrderLedgerContext } from "../domain/payment.entity";
+import { assertPaidAtNotFuture } from "../domain/payment-ledger.rules";
 import type { PaymentsRepositoryPort, UpdatePaymentRecord } from "./ports/payments-repository.port";
 import type { CreatePaymentDto } from "../api/dto/create-payment.dto";
 import type { UpdatePaymentDto } from "../api/dto/update-payment.dto";
@@ -43,6 +44,8 @@ export class PaymentsService {
 
   async addPayment(ctx: AuthContext, orderId: string, dto: CreatePaymentDto): Promise<PaymentResponseDto> {
     await this.loadOrderForAccess(ctx, orderId);
+    const today = businessToday(new Date(), env.BUSINESS_TIMEZONE);
+    if (dto.paidAt !== undefined) assertPaidAtNotFuture(dto.paidAt, today);
 
     // The overpayment check, the insert, and the order-status recompute all
     // happen atomically under an order row lock inside the repository, so two
@@ -53,7 +56,7 @@ export class PaymentsService {
         amount: dto.amount,
         method: dto.method,
         // The shop's today, not UTC's: a payment at 00:30 IST on the 1st belongs to the new month.
-        paidAt: dto.paidAt ?? businessToday(new Date(), env.BUSINESS_TIMEZONE),
+        paidAt: dto.paidAt ?? today,
         recordedBy: ctx.authUserId,
         notes: dto.notes || null,
       },
@@ -63,7 +66,7 @@ export class PaymentsService {
       action: AUDIT_ACTIONS.PAYMENT_CREATED,
       entityType: AUDIT_ENTITIES.PAYMENT,
       entityId: entity.id,
-      metadata: { orderId, amount: dto.amount, method: dto.method },
+      metadata: { orderId, amount: dto.amount, method: dto.method, paidAt: entity.paidAt },
     });
     return toPaymentResponseDto(entity);
   }
@@ -72,6 +75,7 @@ export class PaymentsService {
     if (Object.keys(dto).length === 0) throw new BadRequestError("No fields to update", ERROR_CODES.VALIDATION_NO_FIELDS);
 
     await this.loadOrderForAccess(ctx, orderId);
+    if (dto.paidAt !== undefined) assertPaidAtNotFuture(dto.paidAt, businessToday(new Date(), env.BUSINESS_TIMEZONE));
     // Read the "before" snapshot for the audit trail (outside the lock is fine --
     // the atomic edit re-reads and re-checks under the lock).
     const existing = await this.paymentsRepository.findById(orderId, paymentId);

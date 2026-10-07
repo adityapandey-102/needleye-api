@@ -107,10 +107,11 @@ export function productCategoryGroup(value: string): ProductCategoryGroup | unde
 /**
  * Payment status is DERIVED from the ledger (sum of payments vs order total),
  * never chosen by hand -- see derivePaymentStatus in the Orders domain. These
- * three values are the possible derived outcomes, kept as a labelled list only
- * for display/formatting.
+ * four values are the possible derived outcomes, kept as a labelled list only
+ * for display/formatting. `not_priced` = the order has no total yet (ADR 0008).
  */
 export const PAYMENT_STATUSES = [
+  { value: "not_priced", label: "Price not set" },
   { value: "unpaid", label: "Unpaid" },
   { value: "advance_paid", label: "Advance Paid" },
   { value: "fully_paid", label: "Fully Paid" },

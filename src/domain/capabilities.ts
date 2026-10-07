@@ -5,7 +5,10 @@ export const CAPABILITIES = [
   "orders:read",
   "orders:edit:customer_product_fields",
   "orders:edit:pricing_assignment",
-  "orders:edit:total",
+  // Pricing (ADR 0008): set = give an unpriced order its first total;
+  // adjust = raise it (with a reason) or discount it (with a reason).
+  "orders:price:set",
+  "orders:price:adjust",
   // Production-flow stage tiers (see order-status.ts STAGE_CAPABILITY). Which
   // roles may move an order INTO a stage depends only on the stage's tier --
   // NOT on whether the order is assigned to them (the shop-floor model: whoever
@@ -14,7 +17,8 @@ export const CAPABILITIES = [
   "orders:status:pm_received", //     Production Manager Received
   "orders:status:production", //      Falls/Kutchu ... Finishing
   "orders:status:finalization", //    Quality Check / Trail, Alteration, Delivered
-  "payments:manage",
+  "payments:manage", // record a payment
+  "payments:correct", // edit or delete a recorded payment (before delivery only)
   "payments:read",
   "reports:financial",
   "reports:staff",
@@ -79,14 +83,24 @@ export const CAPABILITY_MATRIX: Record<Capability, Record<Role, CapabilityScope>
     production_manager: false,
     worker: false,
   },
-  // The order total: owner on any order, and the designer on their OWN orders
-  // (they agree the price with the customer -- often only after booking, e.g.
-  // a ₹0 order priced later).
-  "orders:edit:total": {
+  // First price on an unpriced order: owner, accountant, and the designer on
+  // their OWN orders (they agree the price with the customer, often after
+  // booking). Not the PM, master tailor or worker.
+  "orders:price:set": {
     owner_manager: true,
     designer: "assigned",
     master_tailor: false,
-    accountant: false,
+    accountant: true,
+    production_manager: false,
+    worker: false,
+  },
+  // Changing a price once set -- raise (reason required) or discount (reason
+  // required, never below what's collected): owner and accountant only.
+  "orders:price:adjust": {
+    owner_manager: true,
+    designer: false,
+    master_tailor: false,
+    accountant: true,
     production_manager: false,
     worker: false,
   },
@@ -130,11 +144,22 @@ export const CAPABILITY_MATRIX: Record<Capability, Record<Role, CapabilityScope>
     production_manager: true,
     worker: false,
   },
-  // Designer manages payments on their own orders -- they collect money from
-  // the client at booking. Master Tailor / Worker / PM have no payment access.
+  // Recording a payment: the designer on their own orders (they collect money
+  // from the client), owner, accountant. Master Tailor / Worker / PM have no
+  // payment access.
   "payments:manage": {
     owner_manager: true,
     designer: "assigned",
+    master_tailor: false,
+    accountant: true,
+    production_manager: false,
+    worker: false,
+  },
+  // Editing or deleting a recorded payment: owner and accountant only, and
+  // only before the order is delivered (ADR 0008).
+  "payments:correct": {
+    owner_manager: true,
+    designer: false,
     master_tailor: false,
     accountant: true,
     production_manager: false,

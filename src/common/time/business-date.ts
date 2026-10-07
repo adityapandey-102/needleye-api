@@ -19,3 +19,10 @@ export function monthStartMonthsBack(today: string, monthsBack: number): string 
   const [y, m] = today.split("-").map(Number);
   return new Date(Date.UTC(y!, m! - 1 - monthsBack, 1)).toISOString().slice(0, 10);
 }
+
+/** YYYY-MM-DD that is a real calendar date (rejects 2026-02-31 and anything not in that shape). */
+export function isRealIsoDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const d = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
+}

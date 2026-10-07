@@ -94,7 +94,7 @@ describe("DrizzleOrdersRepository (integration)", () => {
             insert into orders (order_number, customer_name, phone, bill_number, due_date, designer_id, master_tailor_id,
                                 product_category, order_details, payment_status)
             values ('', 'Numbering', '9000000000', ${`NUM-${Date.now()}-${i}`}, '2039-01-01', ${designer.id}, ${masterTailor.id},
-                    'saree', 'numbering', 'unpaid')
+                    'saree', 'numbering', 'not_priced')
             returning order_number`);
           numbers.push(res.rows[0]!.order_number);
         }

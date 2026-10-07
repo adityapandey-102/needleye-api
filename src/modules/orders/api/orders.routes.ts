@@ -9,6 +9,7 @@ import { validateBody } from "../../../common/http/validate.middleware";
 import { createOrderDtoSchema, type CreateOrderDto } from "./dto/create-order.dto";
 import { updateOrderDtoSchema, type UpdateOrderDto } from "./dto/update-order.dto";
 import { updateOrderStatusDtoSchema, type UpdateOrderStatusDto } from "./dto/update-order-status.dto";
+import { changePriceDtoSchema, type ChangePriceDto } from "./dto/change-price.dto";
 import { deliveryLoadQuerySchema } from "./dto/delivery-load.dto";
 import { validateImageUpload } from "./orders.validation";
 import { OrdersService } from "../application/orders.service";
@@ -218,6 +219,31 @@ ordersRouter.patch(
     const { status } = req.body as UpdateOrderStatusDto;
     const order = await ordersService.updateStatus({ profile: req.profile!, authUserId: req.authUserId! }, req.params.id!, status);
     res.json({ order });
+  }),
+);
+
+// Pricing (ADR 0008): the only way a total changes. Gated per change kind in
+// the domain (set / raise / discount), so only orders:read here.
+ordersRouter.put(
+  "/:id/price",
+  requireCapability("orders:read"),
+  validateBody(changePriceDtoSchema),
+  asyncHandler(async (req, res) => {
+    const result = await ordersService.changePrice(
+      { profile: req.profile!, authUserId: req.authUserId! },
+      req.params.id!,
+      req.body as ChangePriceDto,
+    );
+    res.json(result);
+  }),
+);
+
+ordersRouter.get(
+  "/:id/price-history",
+  requireCapability("orders:read"),
+  asyncHandler(async (req, res) => {
+    const history = await ordersService.getPriceHistory({ profile: req.profile!, authUserId: req.authUserId! }, req.params.id!);
+    res.json({ history });
   }),
 );
 

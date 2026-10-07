@@ -28,7 +28,8 @@ export const orders = pgTable("orders", {
   machineWork: boolean("machine_work").notNull().default(false),
   purchaseRequired: boolean("purchase_required").notNull().default(false),
   paymentStatus: text("payment_status").notNull().$type<PaymentStatus>(),
-  totalAmount: numeric("total_amount", { precision: 12, scale: 2 }).notNull().default("0"),
+  // Null = no price yet (payment_status 'not_priced', ADR 0008).
+  totalAmount: numeric("total_amount", { precision: 12, scale: 2 }),
   productionStatus: text("production_status").notNull().$type<GranularStatus>().default("design_pending"),
   designerInstructions: text("designer_instructions"),
   specialNotes: text("special_notes"),

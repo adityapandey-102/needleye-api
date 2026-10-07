@@ -489,15 +489,21 @@ describe("Users & reports (integration)", () => {
       expect(await inBucket(bucket), bucket).toBe(false);
     }
 
-    // The price is decided later: the owner edits the total -> nothing collected yet -> unpaid, and it shows up.
-    const priced = await request(app).patch(`/api/v1/orders/${created.id}`).set("Authorization", auth).send({ totalAmount: 4500 });
+    // The price changes later: the owner raises it (with a reason) -> nothing collected yet -> unpaid, and it shows up.
+    const priced = await request(app)
+      .put(`/api/v1/orders/${created.id}/price`)
+      .set("Authorization", auth)
+      .send({ totalAmount: 4500, reason: "No longer a free piece" });
     expect(priced.status).toBe(200);
     expect((priced.body as { order: { paymentStatus: string } }).order.paymentStatus).toBe("unpaid");
     expect(await inBucket("pending_payment")).toBe(true);
     expect(await inBucket("payment_overdue")).toBe(true);
 
-    // Set back to ₹0 (e.g. it became a contest piece) -> fully_paid again.
-    const free = await request(app).patch(`/api/v1/orders/${created.id}`).set("Authorization", auth).send({ totalAmount: 0 });
+    // Discounted back to ₹0 (e.g. it became a contest piece) -> fully_paid again.
+    const free = await request(app)
+      .put(`/api/v1/orders/${created.id}/price`)
+      .set("Authorization", auth)
+      .send({ totalAmount: 0, reason: "Design contest piece" });
     expect(free.status).toBe(200);
     expect((free.body as { order: { paymentStatus: string } }).order.paymentStatus).toBe("fully_paid");
     expect(await inBucket("pending_payment")).toBe(false);

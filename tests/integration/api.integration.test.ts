@@ -115,7 +115,7 @@ describe("API endpoints (integration)", () => {
     expect(auditRows[0]?.requestId).toBeTruthy();
   });
 
-  it("rejects lowering an order's total below what's already been collected (no overpaid state)", async () => {
+  it("a discount can't go below what's been collected, and an edit can't change the price at all (ADR 0008)", async () => {
     const owner = await createFixtureUser("owner_manager", "API Integration Owner");
     const masterTailor = await createFixtureUser("master_tailor", "API Integration Master 2");
     createdUserIds.push(owner.id, masterTailor.id);
@@ -152,22 +152,34 @@ describe("API endpoints (integration)", () => {
       .send({ amount: 600, method: "cash" });
     expect(payRes.status).toBe(201);
 
-    // Lowering the total to ₹500 (below the ₹600 collected) is rejected...
-    const badRes = await request(app)
+    // An order edit can't change the total (it may resend the same one)...
+    const viaEdit = await request(app).patch(`/api/v1/orders/${orderId}`).set("Authorization", auth).send({ totalAmount: 800 });
+    expect(viaEdit.status).toBe(400);
+    expect((viaEdit.body as { code: string }).code).toBe("ORDER_PRICE_USE_PRICING");
+    const sameTotal = await request(app)
       .patch(`/api/v1/orders/${orderId}`)
       .set("Authorization", auth)
-      .send({ totalAmount: 500 });
+      .send({ totalAmount: "1000.00", orderDetails: "Edited, same price" });
+    expect(sameTotal.status).toBe(200);
+
+    // ...a discount to ₹500 (below the ₹600 collected) is rejected...
+    const badRes = await request(app)
+      .put(`/api/v1/orders/${orderId}/price`)
+      .set("Authorization", auth)
+      .send({ totalAmount: 500, reason: "Too big a discount" });
     expect(badRes.status).toBe(400);
     expect((badRes.body as { code: string }).code).toBe("ORDER_TOTAL_BELOW_PAID");
 
-    // ...but lowering to ₹800 (still >= ₹600) is fine, and re-derives to advance_paid.
+    // ...but a discount to ₹800 (still >= ₹600) is fine, and re-derives to advance_paid.
     const okRes = await request(app)
-      .patch(`/api/v1/orders/${orderId}`)
+      .put(`/api/v1/orders/${orderId}/price`)
       .set("Authorization", auth)
-      .send({ totalAmount: 800 });
+      .send({ totalAmount: 800, reason: "Loyal customer" });
     expect(okRes.status).toBe(200);
-    expect((okRes.body as { order: { paymentStatus: string; totalAmount: string } }).order.paymentStatus).toBe("advance_paid");
-    expect((okRes.body as { order: { totalAmount: string } }).order.totalAmount).toBe("800.00");
+    const ok = okRes.body as { order: { paymentStatus: string; totalAmount: string }; change: { kind: string; previousTotal: string } };
+    expect(ok.order.paymentStatus).toBe("advance_paid");
+    expect(ok.order.totalAmount).toBe("800.00");
+    expect(ok.change).toMatchObject({ kind: "discount", previousTotal: "1000.00" });
   });
 
   it("advances an order into the Falls / Kutchu production stage (status + history both accept it)", async () => {

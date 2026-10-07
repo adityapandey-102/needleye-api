@@ -152,7 +152,7 @@ async function main() {
     masterTailorId: masterA.id,
     productCategory: "saree",
     orderDetails: "orders:create capability check",
-    totalAmount: "1000.00",
+    // No price: new orders are priced afterwards (ADR 0008).
     productionStatus: "design_pending",
   });
   check("POST /orders as owner_manager -> 201", (await req("/orders", { method: "POST", body: createBody }, ownerToken)).status, 201);
@@ -161,6 +161,17 @@ async function main() {
   check("POST /orders as master_tailor -> 403", (await req("/orders", { method: "POST", body: createBody }, masterAToken)).status, 403);
   check("POST /orders as accountant -> 403", (await req("/orders", { method: "POST", body: createBody }, accountantToken)).status, 403);
   check("POST /orders as worker -> 403", (await req("/orders", { method: "POST", body: createBody }, workerToken)).status, 403);
+  const pricedBody = JSON.stringify({ ...JSON.parse(createBody), billNumber: `BILL-PRICED-${stamp}`, totalAmount: "1000.00" });
+  check(
+    "POST /orders WITH a total as production_manager -> 403 (the PM can't price)",
+    (await req("/orders", { method: "POST", body: pricedBody }, pmToken)).status,
+    403,
+  );
+  check(
+    "POST /orders WITH a total as the order's own designer -> 201",
+    (await req("/orders", { method: "POST", body: pricedBody }, designerAToken)).status,
+    201,
+  );
 
   console.log("\n--- delivery-day load (the roles that pick due dates: owner / designer / PM) ---");
   const loadPath = `/orders/delivery-load?from=${dueDate}&to=${dueDate}`;
@@ -170,22 +181,34 @@ async function main() {
   check("GET /orders/delivery-load as master_tailor -> 403", (await req(loadPath, {}, masterAToken)).status, 403);
   check("GET /orders/delivery-load as accountant -> 403", (await req(loadPath, {}, accountantToken)).status, 403);
 
-  console.log("\n--- orders:edit:total (owner_manager any order; designer only their own) ---");
-  const pricingPatch = JSON.stringify({ totalAmount: "9999.00" });
-  check("PATCH /orders/:id {totalAmount} as owner_manager -> 200", (await req(`/orders/${orderId}`, { method: "PATCH", body: pricingPatch }, ownerToken)).status, 200);
-  check(
-    "PATCH /orders/:id {totalAmount} as assigned designer -> 200",
-    (await req(`/orders/${orderId}`, { method: "PATCH", body: JSON.stringify({ totalAmount: "8888.00" }) }, designerAToken)).status,
-    200,
+  console.log("\n--- pricing (ADR 0008): set = own designer / owner / accountant; raise + discount = owner / accountant ---");
+  const unpricedRes = await req(
+    "/orders",
+    { method: "POST", body: JSON.stringify({ ...JSON.parse(createBody), billNumber: `BILL-UNPRICED-${stamp}` }) },
+    ownerToken,
   );
-  check("PATCH /orders/:id {totalAmount} as unassigned designer -> 403", (await req(`/orders/${orderId}`, { method: "PATCH", body: pricingPatch }, designerBToken)).status, 403);
-  check("PATCH /orders/:id {totalAmount} as master_tailor -> 403", (await req(`/orders/${orderId}`, { method: "PATCH", body: pricingPatch }, masterAToken)).status, 403);
-  check("PATCH /orders/:id {totalAmount} as accountant -> 403", (await req(`/orders/${orderId}`, { method: "PATCH", body: pricingPatch }, accountantToken)).status, 403);
+  const unpricedId = unpricedRes.body.order.id;
+  check("  a new order without a total is not priced", unpricedRes.body.order.paymentStatus, "not_priced");
+  const setPrice = async (id, token, totalAmount, reason) =>
+    (await req(`/orders/${id}/price`, { method: "PUT", body: JSON.stringify(reason ? { totalAmount, reason } : { totalAmount }) }, token)).status;
+  check("PUT /orders/:id/price (first price) as master_tailor -> 403", await setPrice(unpricedId, masterAToken, "3000.00"), 403);
+  check("PUT /orders/:id/price (first price) as production_manager -> 403", await setPrice(unpricedId, pmToken, "3000.00"), 403);
+  check("PUT /orders/:id/price (first price) as worker -> 403", await setPrice(unpricedId, workerToken, "3000.00"), 403);
+  check("PUT /orders/:id/price (first price) as unassigned designer -> 403", await setPrice(unpricedId, designerBToken, "3000.00"), 403);
+  check("PUT /orders/:id/price (first price) as assigned designer -> 200", await setPrice(unpricedId, designerAToken, "3000.00"), 200);
+  check("PUT /orders/:id/price (raise) as assigned designer -> 403", await setPrice(unpricedId, designerAToken, "3500.00", "More work"), 403);
+  check("PUT /orders/:id/price (raise, no reason) as accountant -> 400", await setPrice(unpricedId, accountantToken, "3500.00"), 400);
+  check("PUT /orders/:id/price (raise) as accountant -> 200", await setPrice(unpricedId, accountantToken, "3500.00", "Extra lining"), 200);
+  check("PUT /orders/:id/price (discount) as owner_manager -> 200", await setPrice(unpricedId, ownerToken, "3200.00", "Festive offer"), 200);
   check(
-    "PATCH /orders/:id {totalAmount} as production_manager -> 403 (PM edits info, never pricing)",
-    (await req(`/orders/${orderId}`, { method: "PATCH", body: pricingPatch }, pmToken)).status,
-    403,
+    "PATCH /orders/:id {totalAmount: different} as owner_manager -> 400 (prices change only via /price)",
+    (await req(`/orders/${unpricedId}`, { method: "PATCH", body: JSON.stringify({ totalAmount: "9999.00" }) }, ownerToken)).status,
+    400,
   );
+  check("GET /orders/:id/price-history as assigned designer -> 200", (await req(`/orders/${unpricedId}/price-history`, {}, designerAToken)).status, 200);
+  check("GET /orders/:id/price-history as accountant -> 200", (await req(`/orders/${unpricedId}/price-history`, {}, accountantToken)).status, 200);
+  check("GET /orders/:id/price-history as master_tailor -> 403", (await req(`/orders/${unpricedId}/price-history`, {}, masterAToken)).status, 403);
+  check("GET /orders/:id/price-history as unassigned designer -> 404", (await req(`/orders/${unpricedId}/price-history`, {}, designerBToken)).status, 404);
 
   console.log("\n--- orders:edit:pricing_assignment (reassigning designer / master: owner_manager only) ---");
   check(
@@ -229,6 +252,35 @@ async function main() {
     "POST /orders/:orderId/payments as master_tailor -> 403",
     (await req(`/orders/${orderId}/payments`, { method: "POST", body: JSON.stringify({ amount: "100.00", method: "cash" }) }, masterAToken)).status,
     403,
+  );
+  const designerPayment = await req(
+    `/orders/${orderId}/payments`,
+    { method: "POST", body: JSON.stringify({ amount: "100.00", method: "cash" }) },
+    designerAToken,
+  );
+  check("POST /orders/:orderId/payments as assigned designer -> 201", designerPayment.status, 201);
+  const paymentPath = `/orders/${orderId}/payments/${designerPayment.body.payment.id}`;
+  check(
+    "PATCH a payment as assigned designer -> 403 (corrections: owner / accountant only)",
+    (await req(paymentPath, { method: "PATCH", body: JSON.stringify({ amount: "90.00" }) }, designerAToken)).status,
+    403,
+  );
+  check("DELETE a payment as assigned designer -> 403", (await req(paymentPath, { method: "DELETE" }, designerAToken)).status, 403);
+  check(
+    "PATCH a payment as accountant -> 200",
+    (await req(paymentPath, { method: "PATCH", body: JSON.stringify({ amount: "90.00" }) }, accountantToken)).status,
+    200,
+  );
+  const stillUnpriced = await req(
+    "/orders",
+    { method: "POST", body: JSON.stringify({ ...JSON.parse(createBody), billNumber: `BILL-NOPRICE-${stamp}` }) },
+    ownerToken,
+  );
+  check(
+    "POST a payment on a not-priced order as owner_manager -> 409 (price first)",
+    (await req(`/orders/${stillUnpriced.body.order.id}/payments`, { method: "POST", body: JSON.stringify({ amount: "100.00", method: "cash" }) }, ownerToken))
+      .status,
+    409,
   );
 
   console.log("\n--- single-order read: outsider VIEW is allowed, payments stripped ---");
@@ -297,6 +349,16 @@ async function main() {
   check("PATCH status -> delivered as worker -> 403", await setStatus(orderId, "delivered", workerToken), 403);
   check("PATCH status -> delivered from Ready as production_manager -> 200", await setStatus(orderId, "delivered", pmToken), 200);
   check("PATCH status -> alteration after Delivered as owner -> 409", await setStatus(orderId, "alteration", ownerToken), 409);
+  check(
+    "PATCH a payment after Delivered as owner_manager -> 409 (payments locked)",
+    (await req(paymentPath, { method: "PATCH", body: JSON.stringify({ amount: "80.00" }) }, ownerToken)).status,
+    409,
+  );
+  check(
+    "PUT /orders/:id/price after Delivered as owner_manager -> 409 (price locked)",
+    await setPrice(orderId, ownerToken, "6000.00", "Late change"),
+    409,
+  );
 
   console.log("\n--- dashboard + reports ---");
   check("GET /orders/stats as owner_manager -> 200", (await req("/orders/stats", {}, ownerToken)).status, 200);

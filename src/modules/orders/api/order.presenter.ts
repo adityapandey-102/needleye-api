@@ -29,7 +29,8 @@ export function toOrderResponseDto(
     ...entity,
     images,
     amountPaid: toMoneyString(amountPaid),
-    outstanding: toMoneyString(outstanding(entity.totalAmount, amountPaid)),
+    outstanding: entity.totalAmount === null ? null : toMoneyString(outstanding(entity.totalAmount, amountPaid)),
+    priceSet: entity.totalAmount !== null,
   };
 
   // Payment fields are stripped when the role can't see them at all, OR when

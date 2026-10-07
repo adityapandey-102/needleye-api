@@ -45,9 +45,11 @@ paymentsRouter.post(
   }),
 );
 
+// Corrections (edit / delete): owner and accountant only, and only before the
+// order is delivered -- the repository refuses that under the order lock (ADR 0008).
 paymentsRouter.patch(
   "/:paymentId",
-  requireCapability("payments:manage"),
+  requireCapability("payments:correct"),
   validateBody(updatePaymentDtoSchema),
   asyncHandler(async (req, res) => {
     const payment = await paymentsService.updatePayment(
@@ -62,7 +64,7 @@ paymentsRouter.patch(
 
 paymentsRouter.delete(
   "/:paymentId",
-  requireCapability("payments:manage"),
+  requireCapability("payments:correct"),
   asyncHandler(async (req, res) => {
     await paymentsService.deletePayment(
       { profile: req.profile!, authUserId: req.authUserId!, capabilityScope: req.capabilityScope },

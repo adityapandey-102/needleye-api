@@ -27,7 +27,8 @@ export interface PaymentEntity {
  */
 export interface OrderLedgerContext {
   designerId: string;
-  /** Money as a canonical 2dp string (see common/money/money.ts). */
-  totalAmount: string;
+  /** Money as a canonical 2dp string (see common/money/money.ts); null = the order has no price yet. */
+  totalAmount: string | null;
   paymentStatus: string;
+  productionStatus: string;
 }
