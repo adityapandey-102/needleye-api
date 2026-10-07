@@ -1,8 +1,9 @@
 import { env } from "../../../config/env";
-import { BadRequestError, NotFoundError } from "../../../common/errors/app-error";
+import { BadRequestError, ForbiddenError, NotFoundError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
 import { assertFieldsEditable, assertOwnershipForScopedEdit } from "../domain/order-edit.rules";
 import { assertTotalCoversLedger, derivePaymentStatus } from "../domain/order-ledger.rules";
+import { assertLedgerExportRange, assertLedgerExportSize, LEDGER_EXPORT_MAX_ROWS } from "../domain/ledger-export.rules";
 import { assertCanChangeStage, assertCanSkipStages } from "../domain/order-status.rules";
 import { checkDeliveryDayCapacity, nearCapacityThreshold } from "../domain/delivery-capacity.rules";
 import { toOrderListItemDto, toOrderResponseDto } from "../api/order.presenter";
@@ -13,7 +14,7 @@ import { auditLogger as defaultAuditLogger } from "../../../common/audit/drizzle
 import { logger } from "../../../common/logger/logger";
 import { toMoneyString, type MoneyLike } from "../../../common/money/money";
 import type { AuditLogger } from "../../../common/audit/audit-logger";
-import type { GranularStatus, Profile } from "../../../domain";
+import { getCapabilityScope, type GranularStatus, type Profile } from "../../../domain";
 import type { StorageProvider } from "../../../common/storage/storage-provider";
 import type { OrderEntity } from "../domain/order.entity";
 import type {
@@ -32,8 +33,13 @@ import type { OrderStatusHistoryResponseDto } from "../api/dto/order-status-hist
 import type { OrderStatsResponseDto } from "../api/dto/order-stats.response.dto";
 import type { RevenueResponseDto } from "../api/dto/revenue.response.dto";
 import type { StaffReportResponseDto } from "../api/dto/staff-report.response.dto";
-import type { LedgerEventsResponseDto, LedgerEventDto, LedgerAmountSnapshot } from "../api/dto/ledger-events.response.dto";
-import type { LedgerEventRaw } from "./ports/orders-repository.port";
+import type {
+  LedgerEventsResponseDto,
+  LedgerEventDto,
+  LedgerAmountSnapshot,
+  LedgerExportResponseDto,
+} from "../api/dto/ledger-events.response.dto";
+import type { LedgerEventRaw, LeadLink } from "./ports/orders-repository.port";
 import { businessToday } from "../../../common/time/business-date";
 
 interface AuthContext {
@@ -174,9 +180,20 @@ export class OrdersService {
     });
   }
 
+  /**
+   * Converting a lead needs access to leads: the owner converts any open lead;
+   * a designer only their own (the Leads module re-checks under the row lock).
+   */
+  private leadLinkFor(ctx: AuthContext, leadId: string): LeadLink {
+    if (getCapabilityScope(ctx.profile.role, "leads:manage") === true) return { leadId, actorId: ctx.authUserId, actor: "owner" };
+    if (getCapabilityScope(ctx.profile.role, "leads:read") === "assigned") return { leadId, actorId: ctx.authUserId, actor: "designer" };
+    throw new ForbiddenError("Your role can't create an order from a lead", ERROR_CODES.LEAD_NOT_CONVERTIBLE);
+  }
+
   async createOrder(ctx: AuthContext, dto: CreateOrderDto): Promise<OrderResponseDto> {
-    // The PM confirmation is a request flag, not an order field -- keep it out of the record.
-    const { confirmedWithProductionManager = false, ...fields } = dto;
+    // The PM confirmation and the lead link are request flags, not order fields -- keep them out of the record.
+    const { confirmedWithProductionManager = false, leadId, ...fields } = dto;
+    const leadLink = leadId ? this.leadLinkFor(ctx, leadId) : undefined;
     const record: NewOrderRecord = {
       ...fields,
       bookingDate: dto.bookingDate ?? businessToday(new Date(), env.BUSINESS_TIMEZONE),
@@ -195,12 +212,13 @@ export class OrdersService {
     const entity = await this.ordersRepository.create(
       record,
       this.deliveryCapacityGuard(record.dueDate, confirmedWithProductionManager, capacity),
+      leadLink,
     );
     await this.audit.record({
       action: AUDIT_ACTIONS.ORDER_CREATED,
       entityType: AUDIT_ENTITIES.ORDER,
       entityId: entity.id,
-      metadata: { orderNumber: entity.orderNumber },
+      metadata: { orderNumber: entity.orderNumber, ...(leadId ? { leadId } : {}) },
     });
     if (capacity.overriddenAt !== undefined) {
       await this.auditDeliveryOverride(entity.id, record.dueDate, capacity.overriddenAt);
@@ -334,6 +352,28 @@ export class OrdersService {
       offset: page.offset,
       from: range.from,
       to: range.to,
+    };
+  }
+
+  /**
+   * The Ledger Activity export (CSV / PDF): EVERY ledger event in one week or
+   * one month, in one response -- same rows and shape as getLedgerEvents, just
+   * not paged. Refuses a window longer than 31 days (no yearly exports) and a
+   * window holding more rows than one export may carry.
+   */
+  async getLedgerExport(range: { from: string; to: string }): Promise<LedgerExportResponseDto> {
+    assertLedgerExportRange(range.from, range.to);
+    const page = { limit: LEDGER_EXPORT_MAX_ROWS, offset: 0 };
+    const { events, total } = await this.ordersRepository.getLedgerEvents(range, page);
+    assertLedgerExportSize(total);
+    return {
+      events: events.map(toLedgerEventDto),
+      total,
+      limit: page.limit,
+      offset: 0,
+      from: range.from,
+      to: range.to,
+      timeZone: env.BUSINESS_TIMEZONE,
     };
   }
 

@@ -32,12 +32,13 @@ import { DrizzlePaymentsRepository } from "../../src/modules/payments/infrastruc
 import { DrizzleUsersRepository } from "../../src/modules/users/infrastructure/drizzle-users.repository";
 import { DrizzleTeamMembersRepository } from "../../src/modules/team-members/infrastructure/drizzle-team-members.repository";
 import { DrizzleReportsRepository } from "../../src/modules/reports/infrastructure/drizzle-reports.repository";
+import { DrizzleLeadsRepository } from "../../src/modules/leads/infrastructure/drizzle-leads.repository";
 
 const TIME_BUDGET_MS = 150;
 /** A sequential scan over a table this big (actual rows read) fails the audit. */
 const SEQ_SCAN_ROW_LIMIT = 5_000;
-const BIG_TABLES = new Set(["orders", "order_status_history", "payments", "audit_log"]);
-const VOLUME = { orders: 12_000, movesPerOrder: 12, paymentsPerOrder: 2, auditRows: 360_000 };
+const BIG_TABLES = new Set(["orders", "order_status_history", "payments", "audit_log", "leads", "lead_comments", "lead_events"]);
+const VOLUME = { orders: 12_000, movesPerOrder: 12, paymentsPerOrder: 2, auditRows: 360_000, leads: 20_000, commentsPerLead: 2, eventsPerLead: 3 };
 
 const url = process.env.DATABASE_URL ?? "";
 if (!/@(127\.0\.0\.1|localhost)[:/]/.test(url)) {
@@ -114,6 +115,8 @@ async function main() {
   const users = new DrizzleUsersRepository();
   const team = new DrizzleTeamMembersRepository();
   const reports = new DrizzleReportsRepository();
+  const leads = new DrizzleLeadsRepository();
+  const leadId = await pick("select coalesce((select id::text from leads order by created_at desc limit 1), '00000000-0000-0000-0000-000000000000') as id");
   const W = { designerWindowDays: 45, floorWindowDays: 30 };
 
   const cases: Case[] = [
@@ -194,6 +197,39 @@ async function main() {
         reports.getActivityDay({ day: today, timeZone: "Asia/Kolkata", excludePrefixes: ["payment."], limit: 50, offset: 0 }),
     },
   ];
+
+  cases.push(
+    { name: "leads list (owner, open, page)", run: () => leads.list({ scope: { kind: "all" }, status: "open", limit: 20, offset: 0 }) },
+    { name: "leads list (designer's own, open)", run: () => leads.list({ scope: { kind: "assigned", userId: designerId }, status: "open", limit: 20, offset: 0 }) },
+    {
+      name: "leads search 'pri'",
+      run: () => leads.list({ scope: { kind: "all" }, q: "pri", limit: 20, offset: 0 }),
+      expectedScan: SHOP_WIDE(["leads"], "trigram indexes exist; a 3-letter OR search over name/phone/number is one scan at this size"),
+    },
+    {
+      name: "leads summary (owner)",
+      run: () => leads.summary({ kind: "all" }),
+      expectedScan: SHOP_WIDE(["leads"], "counts every lead by stage -- the whole book is the answer"),
+    },
+    {
+      name: "leads designers table (page of 10)",
+      run: () => leads.designerStats({ limit: 10, offset: 0 }),
+      expectedScan: SHOP_WIDE(["leads"], "one grouped pass over every assigned lead to rank designers; the page itself is 10 rows"),
+    },
+    {
+      name: "leads designers table search",
+      run: () => leads.designerStats({ q: "an", limit: 10, offset: 0 }),
+      expectedScan: SHOP_WIDE(["leads"], "one grouped pass over every assigned lead, then the name filter"),
+    },
+    { name: "designer type-ahead (team search)", run: () => team.findActive("designer", { q: "an", limit: 8 }) },
+    { name: "leads summary (designer)", run: () => leads.summary({ kind: "assigned", userId: designerId }) },
+    { name: "leads badge (owner)", run: () => leads.badgeCount({ kind: "all" }) },
+    { name: "leads badge (designer)", run: () => leads.badgeCount({ kind: "assigned", userId: designerId }) },
+    { name: "lead by id", run: () => leads.findById(leadId) },
+    { name: "lead comments", run: () => leads.listComments(leadId) },
+    { name: "lead history", run: () => leads.listEvents(leadId) },
+    { name: "leads from the same phone", run: () => leads.findSamePhone("9811122233", leadId, 5) },
+  );
 
   const recorded: { name: string; queries: Captured[]; bigCount?: number; expectedScan?: Case["expectedScan"] }[] = [];
   for (const c of cases) {
@@ -288,7 +324,31 @@ async function fillVolume(client: pg.Client) {
      cross join lateral (select a.action, case when a.action like 'auth.%' then 'session' when a.action like 'payment.%' then 'payment' else 'order' end as entity) x`,
     [s, VOLUME.auditRows],
   );
-  await client.query("analyze orders; analyze order_status_history; analyze payments; analyze audit_log; analyze profiles;");
+  // 20k leads over 3 years (~18 a day): most closed, a few hundred open, spread over the designers.
+  await client.query(
+    `insert into leads (lead_number, customer_name, phone, requirement, source, status, assigned_to, urgent, first_enquiry_at, last_enquiry_at, created_at, updated_at)
+     select 'PL-' || g, 'Perf Lead ' || g, '9' || lpad((700000000 + g)::text, 9, '0'), 'synthetic requirement', 'public_form',
+       case when t.at < now() - interval '30 days' then (array['converted','lost','discarded'])[1 + floor(random() * 3)::int]
+            else (array['new','assigned','unattended','attended','follow_up'])[1 + floor(random() * 5)::int] end,
+       case when t.at < now() - interval '30 days' or random() > 0.2 then ($1::uuid[])[1 + floor(random() * cardinality($1::uuid[]))::int] end,
+       random() < 0.02, t.at, t.at, t.at, t.at
+     from generate_series(1, $2::int) g
+     cross join lateral (select now() - random() * interval '1095 days' + (g * 0) * interval '1 second' as at) t`,
+    [d, VOLUME.leads],
+  );
+  await client.query(
+    `insert into lead_comments (lead_id, author_id, body, created_at)
+     select l.id, l.assigned_to, 'synthetic note', l.created_at + k * interval '1 day'
+     from leads l cross join generate_series(1, $1::int) k where l.lead_number like 'PL-%'`,
+    [VOLUME.commentsPerLead],
+  );
+  await client.query(
+    `insert into lead_events (lead_id, actor_id, kind, to_status, created_at)
+     select l.id, l.assigned_to, 'status_changed', l.status, l.created_at + k * interval '1 hour'
+     from leads l cross join generate_series(1, $1::int) k where l.lead_number like 'PL-%'`,
+    [VOLUME.eventsPerLead],
+  );
+  await client.query("analyze orders; analyze order_status_history; analyze payments; analyze audit_log; analyze profiles; analyze leads; analyze lead_comments; analyze lead_events;");
 }
 
 // ── explain + budget ──────────────────────────────────────────────────────────

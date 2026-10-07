@@ -39,3 +39,9 @@ export interface LedgerEventsResponseDto {
   from: string;
   to: string;
 }
+
+/** GET /orders/ledger-events/export: the whole window, plus the shop timezone the export's times are shown in. */
+export interface LedgerExportResponseDto extends LedgerEventsResponseDto {
+  /** IANA zone of the shop (BUSINESS_TIMEZONE) -- the export prints every time in it, wherever it's rendered. */
+  timeZone: string;
+}

@@ -1,4 +1,5 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, ilike, type SQL } from "drizzle-orm";
+import { containsPattern } from "../../../common/database/like-pattern";
 import { db } from "../../../common/database/drizzle-client";
 // Cross-module Infrastructure-only read: `profiles` is owned by the Users
 // module's schema. See docs/adr/0003-per-module-schema-ownership.md.
@@ -16,15 +17,18 @@ import type { TeamMembersRepositoryPort } from "../application/ports/team-member
  * empty domain layer.
  */
 export class DrizzleTeamMembersRepository implements TeamMembersRepositoryPort {
-  async findActive(role?: Role): Promise<TeamMemberEntity[]> {
-    const condition = role ? and(eq(profiles.active, true), eq(profiles.role, role)) : eq(profiles.active, true);
+  async findActive(role?: Role, search: { q?: string; limit?: number } = {}): Promise<TeamMemberEntity[]> {
+    const conditions: SQL[] = [eq(profiles.active, true)];
+    if (role) conditions.push(eq(profiles.role, role));
+    if (search.q) conditions.push(ilike(profiles.fullName, containsPattern(search.q)));
 
     try {
-      return await db
+      const query = db
         .select({ id: profiles.id, fullName: profiles.fullName, role: profiles.role })
         .from(profiles)
-        .where(condition)
+        .where(and(...conditions))
         .orderBy(profiles.fullName);
+      return await (search.limit ? query.limit(search.limit) : query);
     } catch (error) {
       throw new InternalError("Failed to load team members", error);
     }

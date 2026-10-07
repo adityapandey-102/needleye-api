@@ -42,7 +42,9 @@ import type {
   StaffWeeklyPoint,
   LedgerEventsResult,
   DueDateCapacityGuard,
+  LeadLink,
 } from "../application/ports/orders-repository.port";
+import { convertLeadInTransaction } from "../../leads/infrastructure/lead-conversion";
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -421,11 +423,15 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
    * event in [from, to] (whole-day inclusive), newest first, joined to the
    * actor (profiles) and the affected order. `orderId` is pulled out of the
    * append-only audit metadata; the order join is a LEFT join so an event
-   * survives even if its order was later removed.
+   * survives even if its order was later removed. Days are the SHOP's days
+   * (BUSINESS_TIMEZONE): a payment at 01:00 IST on 1 July belongs to July, not
+   * to June as a UTC-midnight cut would file it.
    */
   async getLedgerEvents(range: { from: string; to: string }, page: OrderListPage): Promise<LedgerEventsResult> {
     let events: LedgerEventsResult["events"];
     let total: number;
+    const startsAt = sql`((${range.from}::date)::timestamp at time zone ${env.BUSINESS_TIMEZONE})`;
+    const endsBefore = sql`(((${range.to}::date) + 1)::timestamp at time zone ${env.BUSINESS_TIMEZONE})`;
     try {
       const rows = await db.execute(sql`
         select
@@ -440,8 +446,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         left join profiles pr on pr.id = a.actor_id
         left join orders o on o.id = nullif(a.metadata->>'orderId', '')::uuid
         where a.entity_type = 'payment'
-          and a.created_at >= ${range.from}::date
-          and a.created_at < (${range.to}::date + 1)
+          and a.created_at >= ${startsAt}
+          and a.created_at < ${endsBefore}
         order by a.created_at desc
         limit ${page.limit} offset ${page.offset}
       `);
@@ -468,8 +474,8 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         select count(*)::int as total
         from audit_log a
         where a.entity_type = 'payment'
-          and a.created_at >= ${range.from}::date
-          and a.created_at < (${range.to}::date + 1)
+          and a.created_at >= ${startsAt}
+          and a.created_at < ${endsBefore}
       `);
       const countRows = (countRes.rows ?? (countRes as unknown as { total: number }[])) as { total: number }[];
       total = Number(countRows[0]?.total ?? 0);
@@ -533,7 +539,7 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     }
   }
 
-  async create(data: NewOrderRecord, assertDueDateCapacity?: DueDateCapacityGuard): Promise<OrderEntity> {
+  async create(data: NewOrderRecord, assertDueDateCapacity?: DueDateCapacityGuard, leadLink?: LeadLink): Promise<OrderEntity> {
     let insertedId: string;
     try {
       insertedId = await db.transaction(async (tx) => {
@@ -568,8 +574,12 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
             createdBy: data.createdBy,
             updatedBy: data.updatedBy,
           })
-          .returning({ id: orders.id });
+          .returning({ id: orders.id, orderNumber: orders.orderNumber });
         if (!inserted) throw new InternalError("Failed to create order");
+
+        // An order saved for a lead converts it here, in this transaction --
+        // if the lead can't be converted, this throws and no order is created.
+        if (leadLink) await convertLeadInTransaction(tx, leadLink, inserted);
 
         // A brand-new order's history starts with one entry for its initial
         // status -- the timeline is never empty, same as every subsequent

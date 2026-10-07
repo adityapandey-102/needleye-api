@@ -147,6 +147,21 @@ ordersRouter.get(
   }),
 );
 
+// The Ledger Activity export (CSV / PDF): every event of ONE week or ONE month,
+// unpaged. Both dates required and real; the service refuses > 31 days, so a
+// yearly export is impossible even when called directly.
+ordersRouter.get(
+  "/ledger-events/export",
+  requireCapability("reports:financial"),
+  asyncHandler(async (req, res) => {
+    const { from, to } = req.query;
+    if (typeof from !== "string" || typeof to !== "string" || !isRealIsoDate(from) || !isRealIsoDate(to)) {
+      throw new BadRequestError("from and to must be real dates (YYYY-MM-DD)", ERROR_CODES.LEDGER_EXPORT_RANGE_INVALID);
+    }
+    res.json(await ordersService.getLedgerExport({ from, to }));
+  }),
+);
+
 // Delivery-day load for the order form's availability check + calendar.
 // Registered before "/:id" so "delivery-load" isn't matched as an order id.
 // Gated on orders:create -- exactly the roles that pick due dates (owner,

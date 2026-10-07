@@ -87,6 +87,7 @@ for the authoritative list and what each one is for:
 - [ ] `ACCOUNTING_CYCLE_START_DAY` -- optional; day of month the revenue cycle starts (1 = calendar months).
 - [ ] `DELIVERY_DAY_CAPACITY` -- optional; orders that can be due on one day before booking another needs the Production Manager's OK (default 10). The web calendar reads it from the API, so changing it needs no web redeploy.
 - [ ] `BUSINESS_TIMEZONE` -- optional; the shop's IANA timezone (default `Asia/Kolkata`). It sets where each day of the owner's activity feed (/reports) starts and ends. Leave it unset for India.
+- [ ] Public enquiry form (Leads, ADR 0007) -- all optional, safe defaults: `PUBLIC_FORM_SECRET` (signs the form's timing token; default derived from the service-role key), `PUBLIC_ENQUIRY_RATE_LIMIT_MAX` / `_WINDOW_MS` (5 per IP per hour), `PUBLIC_ENQUIRY_GLOBAL_MAX_PER_HOUR` (200). Leave `TURNSTILE_ENABLED=false` until you follow `docs/guides/turn-on-turnstile.md`. Per-IP limits need `TRUST_PROXY` right (above).
 - [ ] `NODE_ENV=production`.
 
 Deploy `needleye-api`. Confirm `GET /health` responds before continuing.
@@ -166,7 +167,10 @@ exactly this moment -- see its README. Against a **deployed** API:
 BASE=https://<your-api>/api/v1 EMAIL=<owner> PASSWORD=<pw> \
   VUS=60 DURATION_MS=20000 MIX_WRITES=0 node scripts/scale-test/load-test.mjs
 
-# Security scan (auth, token tampering, headers, SQLi, CORS, rate limiting)
+# Public enquiry form only -- no credentials, stores nothing (every body it sends must be refused)
+npm run test:public-form -- --base=https://<your-api>/api/v1
+
+# Security scan (auth, token tampering, headers, SQLi, CORS, the public form, rate limiting)
 BASE=https://<your-api>/api/v1 EMAIL=<owner> PASSWORD=<pw> \
   node scripts/scale-test/security-scan.mjs
 ```

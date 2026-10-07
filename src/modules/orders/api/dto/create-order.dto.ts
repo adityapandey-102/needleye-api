@@ -38,6 +38,12 @@ export const createOrderDtoSchema = z.object({
    * using it is audited as order.delivery_override. Never stored on the order.
    */
   confirmedWithProductionManager: z.boolean().optional(),
+  /**
+   * Not an order field -- "this order is for that lead". The lead is marked
+   * Converted in the same transaction; if it can't be (not the caller's, not
+   * yet received, already closed) the order isn't created (409 LEAD_NOT_CONVERTIBLE).
+   */
+  leadId: z.string().uuid().optional(),
 });
 
 export type CreateOrderDto = z.infer<typeof createOrderDtoSchema>;

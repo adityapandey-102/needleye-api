@@ -17,6 +17,10 @@ export const ERROR_CODES = {
   VALIDATION_NO_FIELDS: "VALIDATION_NO_FIELDS",
   ROUTE_NOT_FOUND: "ROUTE_NOT_FOUND",
   RATE_LIMITED: "RATE_LIMITED",
+  /** The JSON body is malformed (400). */
+  MALFORMED_REQUEST: "MALFORMED_REQUEST",
+  /** The body is over the route's size limit (413) -- e.g. 8 kB on the public enquiry form. */
+  PAYLOAD_TOO_LARGE: "PAYLOAD_TOO_LARGE",
   DATABASE_ERROR: "DATABASE_ERROR",
   INTERNAL: "INTERNAL",
 
@@ -45,6 +49,10 @@ export const ERROR_CODES = {
   ORDER_MODIFIED: "ORDER_MODIFIED",
   /** The chosen delivery date is at capacity and the caller didn't confirm the override with the Production Manager. */
   DELIVERY_DAY_FULL: "DELIVERY_DAY_FULL",
+  /** Ledger export window is backwards or longer than one month (31 days) -- exports are weekly/monthly only. */
+  LEDGER_EXPORT_RANGE_INVALID: "LEDGER_EXPORT_RANGE_INVALID",
+  /** Ledger export window holds more rows than one export may carry. */
+  LEDGER_EXPORT_TOO_LARGE: "LEDGER_EXPORT_TOO_LARGE",
 
   // -- Images -----------------------------------------------------------------
   IMAGE_INVALID_SLOT: "IMAGE_INVALID_SLOT",
@@ -57,6 +65,23 @@ export const ERROR_CODES = {
   PAYMENT_LEDGER_MISMATCH: "PAYMENT_LEDGER_MISMATCH",
   /** A payment would push the ledger sum above the order total (overpayment). */
   PAYMENT_EXCEEDS_TOTAL: "PAYMENT_EXCEEDS_TOTAL",
+
+  // -- Leads ------------------------------------------------------------------
+  LEAD_NOT_FOUND: "LEAD_NOT_FOUND",
+  /** The stage change isn't allowed for this role / from this stage (see lead-status.rules.ts). */
+  LEAD_STATUS_FORBIDDEN: "LEAD_STATUS_FORBIDDEN",
+  /** The lead is converted / lost / discarded -- reopen it before assigning. */
+  LEAD_CLOSED: "LEAD_CLOSED",
+  /** The assignee isn't an active designer. */
+  LEAD_ASSIGNEE_INVALID: "LEAD_ASSIGNEE_INVALID",
+  /** Optimistic-lock conflict: the lead changed since it was loaded. */
+  LEAD_MODIFIED: "LEAD_MODIFIED",
+  /** Saving an order for a lead that can't be converted (closed, not yours, or not yet received). */
+  LEAD_NOT_CONVERTIBLE: "LEAD_NOT_CONVERTIBLE",
+  /** Public enquiry form: the form token is missing, tampered or expired -- reload the page. */
+  ENQUIRY_FORM_EXPIRED: "ENQUIRY_FORM_EXPIRED",
+  /** Public enquiry form: the human check (Cloudflare Turnstile, when switched on) failed. */
+  ENQUIRY_VERIFICATION_FAILED: "ENQUIRY_VERIFICATION_FAILED",
 
   // -- Users ------------------------------------------------------------------
   USER_NOT_FOUND: "USER_NOT_FOUND",

@@ -274,6 +274,24 @@ src/
         staff-activity.entity.ts
       infrastructure/
         drizzle-reports.repository.ts      # two raw-SQL reads over profiles / orders / order_status_history / audit_log (see ADR 0003)
+    leads/                           # enquiries worked by designers until they become orders (ADR 0007) + the PUBLIC enquiry form
+      api/
+        leads.routes.ts                  # signed-in: list / summary / badge / detail / add / assign / status / comments (leads:read, leads:manage) -- composition root
+        public-enquiries.routes.ts       # NO login: GET /public/enquiry-form + POST /public/enquiries -- own 8 kB body limit (mounted in app.ts) + per-IP and global rate limits
+        dto/leads.dto.ts                   # strict zod schemas; names letters-only, phones normalised to 10 digits, text stripped of control chars
+      application/
+        leads.service.ts                 # who may see/do what (owner = all, designer = own, 404 otherwise); public submit (honeypot, timing token, Turnstile)
+        form-token.ts                      # HMAC open-time token: too fast = bot, tampered/expired = reload
+        ports/leads-repository.port.ts, ports/human-check.port.ts
+      domain/
+        lead-status.rules.ts             # the stage machine: who may move a lead from which stage to which; urgent; convertible stages
+        enquiry.rules.ts                 # input normalisation + the 2-per-phone-per-24h decision (create / merge / limit) + the customer's wording
+        lead.entity.ts
+      infrastructure/
+        drizzle-leads.repository.ts      # raw SQL; per-phone advisory lock for enquiries; FOR UPDATE on stage changes
+        lead-conversion.ts               # converts a lead INSIDE the order-insert transaction (called by the Orders repository)
+        cloudflare-turnstile.ts          # siteverify client -- fails closed; wired only when TURNSTILE_ENABLED=true
+        leads.schema.ts
     orders/                        # the largest module -- every layer earns its keep here, converted last
       api/
         orders.routes.ts                 # controller -- composition root: new OrdersService(new DrizzleOrdersRepository(), storageProvider)
@@ -805,6 +823,50 @@ count uses the partial `order_status_history_completed_idx`
 `order.updated` audit metadata lists the fields the form *submitted*, not only
 the ones that changed, so the web feed just says "Edited order …".
 
+### Leads and the public enquiry form
+
+`modules/leads/` (ADR 0007 has every decision). A lead is a customer enquiry --
+from the **public enquiry form** (`/enquiry` on the web, no login) or added by
+the owner -- that a designer works until it becomes an order or is closed.
+
+- **Access:** `leads:read` (owner every lead; a designer only theirs -- anyone
+  else's answers **404**, so existence never leaks) and `leads:manage` (owner:
+  add, assign, discard, any stage). Everyone else: 403.
+- **Stages** (`lead-status.rules.ts`): New -> Assigned -> Unattended (the
+  designer's "Received") -> Attended <-> Follow-up -> Converted / Lost;
+  Discarded = the owner's spam bin for unassigned leads. `assigned` only via
+  `PATCH /leads/:id/assign`; `converted` only by saving an order with
+  `leadId` -- converted **inside the order's insert transaction**
+  (`lead-conversion.ts`), so an order without its conversion (or the reverse)
+  can't exist (`409 LEAD_NOT_CONVERTIBLE`). Stage changes lock the row
+  (`FOR UPDATE`) and accept a `version` (`409 LEAD_MODIFIED`).
+- **Badge:** `GET /leads/badge` -- owner: unassigned New leads; designer: their
+  leads waiting for Received + their open urgent ones. One indexed count.
+- **No whole-team lists:** the owner's Designers table is `GET /leads/designers`
+  (name search + page of 10), and picking a designer (filter, assign) uses the
+  type-ahead `GET /team-members?role=designer&q=&limit=8` -- so 300 designers
+  cost the same as 3.
+- **Repeat enquiries:** per phone, 24 h from the first: the 2nd merges into the
+  lead (history note, `enquiry_count` 2, **urgent**, reopens Lost/Discarded);
+  the 3rd+ stores nothing and gets a calm "already received" reply. Serialised
+  per phone with `pg_advisory_xact_lock(4202, hashtext(phone))`.
+- **The public endpoint** is the only unauthenticated write. Mounted at
+  `/api/v1/public` **before** the global JSON parser with an 8 kB limit;
+  5/IP/hour + 200/hour overall; strict schema; a honeypot field; a signed
+  open-time token (< 3 s = bot, forged/expired = reload); Cloudflare Turnstile
+  built in but **off** (`TURNSTILE_ENABLED`, guide:
+  `docs/guides/turn-on-turnstile.md`). Bot-like submissions get the normal
+  reply and are not stored. The reply never echoes data. All SQL is
+  parameterised. `npm run test:public-form -- --base=<api>/api/v1` checks it
+  without credentials or writes.
+- **Malformed / oversized JSON** anywhere in the API now answers 400
+  `MALFORMED_REQUEST` / 413 `PAYLOAD_TOO_LARGE` (previously a misleading 500
+  "database error").
+- **Tables** (`20261006000001_leads.sql`): `leads`, `lead_comments`,
+  `lead_events`, `lead_counters` -- RLS on with no policies (API only).
+  Indexes cover stage lists, a designer's leads/badge, the per-phone check and
+  trigram search; `npm run test:perf` audits all of it at 20k leads.
+
 ### Dashboard stats & revenue report
 
 `GET /orders/stats` (`DrizzleOrdersRepository.getStats`) computes
@@ -854,7 +916,17 @@ side enriches this: `PaymentsService.updatePayment` now records a full
 UI's year/month/week filters map to a `[from, to]` here). A composite index
 `audit_log (entity_type, created_at desc)` backs the equality+range+order
 access pattern. Registered before `/orders/{id}` so `ledger-events` isn't
-matched as an order id.
+matched as an order id. Days are the **shop's** days (`BUSINESS_TIMEZONE`), so
+a payment at 00:30 IST on 1 July files under July, not June.
+
+`GET /orders/ledger-events/export?from=&to=` (`getLedgerExport`, same
+audience) backs the Ledger Activity **Export CSV / Export PDF** buttons: every
+event of **one week or one month** in a single unpaged response (same rows and
+shape as the feed). Both dates are required; a window over 31 days (a year) is
+refused with `LEDGER_EXPORT_RANGE_INVALID`, and more than 5000 entries with
+`LEDGER_EXPORT_TOO_LARGE` instead of a partial file (`orders/domain/ledger-export.rules.ts`).
+The web builds the CSV in the browser and the PDF is a print page -- no new
+table, no migration.
 
 ### Authentication
 
@@ -1273,6 +1345,36 @@ sequenceDiagram
     API-->>Owner: 200 { events, total }  ("Show more" asks for the next offset)
 ```
 
+### A public enquiry becomes an order (Leads)
+
+```mermaid
+sequenceDiagram
+    participant C as Customer (needleye-web /enquiry, no login)
+    participant P as api/public-enquiries.routes.ts
+    participant Svc as LeadsService
+    participant Repo as DrizzleLeadsRepository
+    participant DB as Postgres
+    participant O as Owner / Designer (signed in)
+    participant Ord as OrdersService + repository
+
+    C->>P: GET /public/enquiry-form
+    P-->>C: { formToken (signed open time), turnstileSiteKey | null }
+    C->>P: POST /public/enquiries { name, phone, requirement, formToken, website }
+    P->>P: 8 kB body limit, 5/IP/h + 200/h, strict schema (else 413 / 429 / 400)
+    P->>Svc: submitPublicEnquiry
+    Svc->>Svc: honeypot / too fast -> "received", nothing stored; bad token -> 400; Turnstile if on
+    Svc->>Repo: submitEnquiry(normalised fields)
+    Repo->>DB: advisory lock(phone); latest lead for phone FOR UPDATE; create | merge (urgent) | limit
+    P-->>C: 201 received / 200 already_received (fixed wording, no data)
+
+    O->>Svc: PATCH /leads/:id/assign (owner) -> Assigned; designer badge +1
+    O->>Svc: PATCH /leads/:id/status { unattended } (designer "Received") -> badge -1
+    O->>Svc: POST /leads/:id/comments ... PATCH status attended / follow_up
+    O->>Ord: POST /orders { ...order, leadId } (from "Converted" -> Create order)
+    Ord->>DB: one transaction: insert order + history, convertLeadInTransaction (status in convertible stages, caller's lead) -> converted + event
+    Ord-->>O: 201 order (or 409 LEAD_NOT_CONVERTIBLE and no order)
+```
+
 ### Route map -- every endpoint, at a glance
 
 | Method & path                                 | Auth   | Capability                                             | Controller             | Service method                          | Repository method                                                                 |
@@ -1302,6 +1404,7 @@ sequenceDiagram
 | GET `/orders/revenue`                         | bearer | `reports:financial`                                    | orders.routes.ts       | `getMonthlyRevenue`                     | `getMonthlyRevenue` (registered before `/:id`)                                    |
 | GET `/orders/staff-report`                    | bearer | `reports:staff`                                        | orders.routes.ts       | `getStaffReport`                        | `getStaffReport` (one designer/master on demand; registered before `/:id`)        |
 | GET `/orders/ledger-events`                   | bearer | `reports:financial`                                    | orders.routes.ts       | `getLedgerEvents`                       | `getLedgerEvents` (payment audit trail; paginated; registered before `/:id`)      |
+| GET `/orders/ledger-events/export`            | bearer | `reports:financial`                                    | orders.routes.ts       | `getLedgerExport`                       | `getLedgerEvents` (one week/month, unpaged; > 31 days refused)                    |
 | GET `/orders/:id`                             | bearer | `orders:read`                                          | orders.routes.ts       | `getOrder`                              | `findById` row-scoped, else `findAnyById` (view-only outsider, payments stripped) |
 | PATCH `/orders/:id`                           | bearer | field-split, see below                                 | orders.routes.ts       | `updateOrder`                           | `findBasicById`, `update`                                                         |
 | PATCH `/orders/:id/status`                    | bearer | stage-split, see "Order status history & Kanban" below | orders.routes.ts       | `updateStatus`                          | `findBasicById`, `updateStatus`                                                   |
@@ -1315,6 +1418,17 @@ sequenceDiagram
 | GET `/reports/staff-activity`                | bearer | `reports:staff`                                        | reports.routes.ts      | `getStaffActivity`                      | `getStaffWorkload` (searched/filtered/paged in SQL, max 50; owner + accountant never listed) |
 | GET `/reports/activity-days`                 | bearer | `reports:staff`                                        | reports.routes.ts      | `getActivityDays`                       | -- (no DB; shop-timezone day list)                                                |
 | GET `/reports/activity`                      | bearer | `reports:staff`                                        | reports.routes.ts      | `getActivityDay`                        | `getActivityDay` (one shop day of audit_log, payment.* excluded, paginated)     |
+| GET `/leads`                                  | bearer | `leads:read` (designer: own)                           | leads.routes.ts        | `list`                                  | `list` (stage/urgent/q/designer filters, paged, max 50)                           |
+| POST `/leads`                                 | bearer | `leads:manage`                                         | leads.routes.ts        | `createManual`                          | `createManual`                                                                    |
+| GET `/leads/summary`                          | bearer | `leads:read`                                           | leads.routes.ts        | `summary`                               | `summary` (counts by stage + urgent)                                              |
+| GET `/leads/designers`                        | bearer | `leads:manage`                                         | leads.routes.ts        | `designerStats`                         | `designerStats` (name search + page, max 50; window-count total)                  |
+| GET `/leads/badge`                            | bearer | `leads:read`                                           | leads.routes.ts        | `badge`                                 | `badgeCount`                                                                      |
+| GET `/leads/:id`                              | bearer | `leads:read` (designer: own, else 404)                 | leads.routes.ts        | `detail`                                | `findById`, `listComments`, `listEvents`, `findSamePhone`                         |
+| PATCH `/leads/:id/assign`                     | bearer | `leads:manage`                                         | leads.routes.ts        | `assign`                                | `isActiveDesigner`, `assign` (FOR UPDATE)                                         |
+| PATCH `/leads/:id/status`                     | bearer | `leads:read` + stage rules                             | leads.routes.ts        | `changeStatus`                          | `changeStatus` (FOR UPDATE; rules re-checked on the locked row)                   |
+| POST `/leads/:id/comments`                    | bearer | `leads:read` (designer: own)                           | leads.routes.ts        | `addComment`                            | `addComment`                                                                      |
+| GET `/public/enquiry-form`                    | **none** | -- (120/IP/h)                                        | public-enquiries.routes.ts | `publicFormConfig`                  | --                                                                                |
+| POST `/public/enquiries`                      | **none** | -- (5/IP/h, 200/h, 8 kB)                             | public-enquiries.routes.ts | `submitPublicEnquiry`               | `submitEnquiry` (advisory lock per phone)                                         |
 | GET `/team-members`                           | bearer | -- (any authenticated role)                            | team-members.routes.ts | `listActive`                            | `findActive`                                                                      |
 
 `PATCH /orders/:id` isn't gated by a single capability at the router level --
@@ -1354,7 +1468,11 @@ calendar months -- backs `GET /orders/revenue`), `DELIVERY_DAY_CAPACITY`
 (orders that can be due on one day before booking it needs the Production
 Manager's OK, default 10 -- see "Delivery capacity"), `BUSINESS_TIMEZONE`
 (the shop's IANA timezone, default `Asia/Kolkata` -- where each day of the
-owner's activity feed starts and ends; see "Owner reports").
+owner's activity feed starts and ends; see "Owner reports"), and for the
+public enquiry form (all optional, safe defaults -- see "Leads"):
+`PUBLIC_FORM_SECRET`, `PUBLIC_ENQUIRY_RATE_LIMIT_MAX` (5),
+`PUBLIC_ENQUIRY_RATE_LIMIT_WINDOW_MS` (1 h), `PUBLIC_ENQUIRY_GLOBAL_MAX_PER_HOUR`
+(200), `TURNSTILE_ENABLED` (false), `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY`.
 
 ## Deployment
 

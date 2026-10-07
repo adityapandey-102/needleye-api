@@ -18,8 +18,8 @@ teamMembersRouter.get(
   "/",
   validateQuery(teamMemberQueryDtoSchema),
   asyncHandler(async (req, res) => {
-    const { role } = req.query as unknown as TeamMemberQueryDto;
-    const members = await teamMembersService.listActive(role);
+    const { role, q, limit } = req.query as unknown as TeamMemberQueryDto;
+    const members = await teamMembersService.listActive(role, { q, limit });
     res.json({ members });
   }),
 );

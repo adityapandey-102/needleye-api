@@ -1,14 +1,20 @@
 // Lightweight security scan against a running API. Safe, mostly read-only.
 // Checks: auth required, token tampering, security headers, SQL-injection
-// resilience, CORS allow-list, error-body hygiene, and (last) auth rate limiting.
+// resilience, CORS allow-list, error-body hygiene, the public enquiry form's
+// defences, and (last) auth rate limiting.
 //
 // Env: BASE, EMAIL, PASSWORD, RUN_RATELIMIT (default 1)
 // Flags: --base=<url> (overrides BASE; easier than env vars on Windows)
 //        --only-ratelimit (runs ONLY the rate-limit guard, which needs NO
 //        credentials -- so it can be fired against production without the
 //        owner password going anywhere. `npm run test:ratelimit`)
+//        --only-public-form (runs ONLY the public enquiry form checks -- no
+//        credentials, and it never stores a lead: every body it sends must be
+//        refused. Uses up the caller's 5-an-hour enquiry budget.
+//        `npm run test:public-form`)
 const argv = process.argv.slice(2);
 const ONLY_RATELIMIT = argv.includes("--only-ratelimit");
+const ONLY_PUBLIC_FORM = argv.includes("--only-public-form");
 const baseFlag = argv.find((a) => a.startsWith("--base="));
 const BASE = baseFlag ? baseFlag.slice("--base=".length) : (process.env.BASE ?? "http://localhost:4100/api/v1");
 const ORIGIN = BASE.replace(/\/api\/v1$/, "");
@@ -96,6 +102,50 @@ async function checkRateLimit() {
   );
 }
 
+/**
+ * The one unauthenticated write: POST /public/enquiries. Sends ONLY bodies the
+ * API must refuse (so nothing is ever stored), then keeps going until the
+ * per-IP limit answers 429. Checks: no 5xx on hostile input, strict schema,
+ * malformed JSON = 400, oversized = 413, a forged form token is refused, error
+ * bodies leak nothing, and flooding is cut off.
+ */
+async function checkPublicForm() {
+  const form = await fetch(`${BASE}/public/enquiry-form`);
+  const cfg = await form.json().catch(() => ({}));
+  check("Public form: GET /public/enquiry-form works without login", form.status === 200 && typeof cfg.formToken === "string", `status ${form.status}`);
+  check("Public form: config is never cached", (form.headers.get("cache-control") ?? "").includes("no-store"), form.headers.get("cache-control") ?? "none");
+
+  const post = (body, raw = false) =>
+    fetch(`${BASE}/public/enquiries`, { method: "POST", headers: { "Content-Type": "application/json" }, body: raw ? body : JSON.stringify(body) });
+  const base = { name: "Scan Person", phone: "9000000000", requirement: "security scan", formToken: cfg.formToken ?? "" };
+  let sent = 0;
+
+  const sqli = await post({ ...base, name: "x'); DROP TABLE leads;--" });
+  sent++;
+  const sqliBody = await sqli.json().catch(() => ({}));
+  check("Public form: SQL/script in the name is refused (400), not 5xx", sqli.status === 400, `status ${sqli.status} ${sqliBody.code ?? ""}`);
+  check("Public form: error body leaks no stack/secret", !JSON.stringify(sqliBody).match(/stack|service_role|password|secret|eyJ|select |insert /i));
+
+  const forged = await post({ ...base, formToken: `${Date.now() - 60_000}.forged-signature` });
+  sent++;
+  check("Public form: a forged form token is refused", forged.status === 400 || forged.status === 429, `status ${forged.status}`);
+
+  const malformed = await post("{not json", true);
+  sent++;
+  check("Public form: malformed JSON is 400 (not 500)", malformed.status === 400 || malformed.status === 429, `status ${malformed.status}`);
+
+  const huge = await post({ ...base, requirement: "y".repeat(20_000) });
+  check("Public form: an oversized body is refused (413)", huge.status === 413 || huge.status === 429, `status ${huge.status}`);
+
+  // Flooding: keep sending refused bodies until the per-IP limit cuts in.
+  let trippedAt = null;
+  for (let i = sent + 1; i <= 15 && trippedAt === null; i++) {
+    const res = await post({ ...base, phone: "bad" });
+    if (res.status === 429) trippedAt = i;
+  }
+  check("Public form: flooding from one IP is cut off (429)", trippedAt !== null, trippedAt ? `429 at request ${trippedAt}` : "no 429 in 15 requests -- check TRUST_PROXY");
+}
+
 function report() {
   console.table(results);
   console.log(`\n${pass} passed, ${fail} failed`);
@@ -107,6 +157,13 @@ async function main() {
   if (ONLY_RATELIMIT) {
     console.log(`Rate-limit guard only, against ${BASE}\n`);
     await checkRateLimit();
+    return report();
+  }
+
+  if (ONLY_PUBLIC_FORM) {
+    console.log(`Public enquiry form checks only, against ${BASE}
+`);
+    await checkPublicForm();
     return report();
   }
 
@@ -146,7 +203,10 @@ async function main() {
   check("Error body carries a requestId (traceable)", typeof err.requestId === "string" || err.requestId === undefined, "");
   check("Error body leaks no token/secret", !JSON.stringify(err).match(/service_role|password|secret|eyJ/i));
 
-  // 7. Auth rate limiting (run last — it trips the limiter on this instance).
+  // 7. The public enquiry form (no login) -- refused bodies only, nothing stored.
+  await checkPublicForm();
+
+  // 8. Auth rate limiting (run last — it trips the limiter on this instance).
   if (RUN_RATELIMIT) await checkRateLimit();
 
   report();

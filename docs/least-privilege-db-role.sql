@@ -55,7 +55,12 @@ grant select, insert, update, delete on
   public.order_status_history,
   public.payments,
   public.qr_login_tokens,
-  public.audit_log
+  public.audit_log,
+  -- Leads (migration 20261006000001, ADR 0007)
+  public.leads,
+  public.lead_counters,
+  public.lead_comments,
+  public.lead_events
 to needleye_app;
 
 -- 4) Sequences (future-proofing: none today, since every PK is a uuid default,

@@ -15,6 +15,8 @@ import { ordersRouter } from "./modules/orders/api/orders.routes";
 import { paymentsRouter } from "./modules/payments/api/payments.routes";
 import { teamMembersRouter } from "./modules/team-members/api/team-members.routes";
 import { reportsRouter } from "./modules/reports/api/reports.routes";
+import { leadsRouter } from "./modules/leads/api/leads.routes";
+import { publicEnquiriesRouter } from "./modules/leads/api/public-enquiries.routes";
 import { errorHandler, notFoundHandler } from "./common/middleware/error.middleware";
 import { openApiDocument } from "./docs/openapi";
 
@@ -70,6 +72,10 @@ export function createApp() {
     .map((o) => o.trim())
     .filter(Boolean);
   app.use(cors({ origin: allowedOrigins }));
+  // The public enquiry form (no login): mounted BEFORE the global JSON parser
+  // so its own tiny body limit applies -- an oversized body is refused (413)
+  // before any work is done. See modules/leads/api/public-enquiries.routes.ts.
+  app.use("/api/v1/public", express.json({ limit: "8kb" }), publicEnquiriesRouter);
   app.use(express.json());
 
   // Liveness: is the process up and serving? No dependencies checked -- an
@@ -108,6 +114,7 @@ export function createApp() {
   apiV1.use("/orders", ordersRouter);
   apiV1.use("/team-members", teamMembersRouter);
   apiV1.use("/reports", reportsRouter);
+  apiV1.use("/leads", leadsRouter);
   app.use("/api/v1", apiV1);
 
   app.use(notFoundHandler);

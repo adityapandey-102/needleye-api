@@ -15,6 +15,17 @@ export interface DueDateCapacityFacts {
 /** Throws to veto a write; see OrdersRepositoryPort.create/update. */
 export type DueDateCapacityGuard = (facts: DueDateCapacityFacts) => void;
 
+/**
+ * "This order is for that lead": the lead is marked Converted in the SAME
+ * transaction as the order insert (the Leads module's convertLeadInTransaction).
+ * If it can't be converted, nothing is saved.
+ */
+export interface LeadLink {
+  leadId: string;
+  actorId: string;
+  actor: "owner" | "designer";
+}
+
 /** Who is asking -- used to apply row-level visibility, mirroring the orders_select_scoped RLS policy. */
 export interface RowScope {
   role: Role;
@@ -226,9 +237,10 @@ export interface OrdersRepositoryPort {
    * `assertDueDateCapacity`, when given, runs inside that transaction AFTER a
    * per-date lock is taken, with how many orders already sit on the due date --
    * so two people booking the last slot at once serialise, and the second sees
-   * the first. It throws to veto the insert.
+   * the first. It throws to veto the insert. With `leadLink`, the lead is
+   * converted in the same transaction (or the whole create is refused).
    */
-  create(data: NewOrderRecord, assertDueDateCapacity?: DueDateCapacityGuard): Promise<OrderEntity>;
+  create(data: NewOrderRecord, assertDueDateCapacity?: DueDateCapacityGuard, leadLink?: LeadLink): Promise<OrderEntity>;
   /**
    * Updates the order and bumps its `version`. If `expectedVersion` is given,
    * the write is guarded on it (optimistic lock) and throws ORDER_MODIFIED

@@ -19,6 +19,7 @@
     "test:rbac": "node tests/rbac-matrix.mjs",
     "test:security": "node scripts/scale-test/security-scan.mjs",
     "test:ratelimit": "node scripts/scale-test/security-scan.mjs --only-ratelimit",
+    "test:public-form": "node scripts/scale-test/security-scan.mjs --only-public-form",
     "test:perf": "tsx scripts/perf/query-audit.ts",
     "test": "npm run test:unit && npm run test:integration",
     "db:generate": "drizzle-kit generate",

@@ -13,6 +13,21 @@ export function notFoundHandler(req: Request, res: Response) {
   });
 }
 
+/**
+ * express.json() (body-parser) failures carry a `type` and a 4xx `status`:
+ * a malformed body is the client's mistake (400), an oversized one 413 --
+ * never a 500, and never mistaken for a database error below.
+ */
+function bodyParserError(err: unknown): { status: number; code: string; message: string } | null {
+  if (typeof err !== "object" || err === null || !("type" in err)) return null;
+  const type = (err as { type?: unknown }).type;
+  if (type === "entity.too.large") return { status: 413, code: ERROR_CODES.PAYLOAD_TOO_LARGE, message: "The request is too large" };
+  if (type === "entity.parse.failed" || type === "charset.unsupported" || type === "encoding.unsupported") {
+    return { status: 400, code: ERROR_CODES.MALFORMED_REQUEST, message: "The request body isn't valid JSON" };
+  }
+  return null;
+}
+
 /** Postgrest/Supabase errors surface as plain objects with message/code/details/hint, not Error instances. */
 function isPostgrestLikeError(err: unknown): err is { message: string; code?: string; details?: string; hint?: string } {
   return typeof err === "object" && err !== null && "message" in err && typeof err.message === "string";
@@ -39,6 +54,13 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
   if (err instanceof ZodError) {
     req.log.warn({ ...logContext, err }, "Validation failed");
     res.status(400).json({ error: "Invalid input", code: ERROR_CODES.VALIDATION_ERROR, details: err.flatten(), requestId });
+    return;
+  }
+
+  const parseFailure = bodyParserError(err);
+  if (parseFailure) {
+    req.log.warn({ ...logContext, code: parseFailure.code }, "Request body rejected");
+    res.status(parseFailure.status).json({ error: parseFailure.message, code: parseFailure.code, requestId });
     return;
   }
 

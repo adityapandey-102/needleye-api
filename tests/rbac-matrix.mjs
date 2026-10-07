@@ -325,6 +325,38 @@ async function main() {
     403,
   );
 
+  console.log("\n--- leads:read (owner: all; designer: own) / leads:manage (owner only) ---");
+  const leadPhone = `9${String(stamp).slice(-9)}`;
+  const leadRes = await req(
+    "/leads",
+    { method: "POST", body: JSON.stringify({ customerName: "Rbac Lead", phone: leadPhone, requirement: "rbac", source: "walk_in", assignTo: designerA.id }) },
+    ownerToken,
+  );
+  check("POST /leads as owner_manager -> 201", leadRes.status, 201);
+  const leadId = leadRes.body?.lead?.id;
+  check("POST /leads as designer -> 403 (owner adds leads)", (await req("/leads", { method: "POST", body: JSON.stringify({ customerName: "X Y", phone: leadPhone, requirement: "", source: "walk_in" }) }, designerAToken)).status, 403);
+  check("GET /leads as owner_manager -> 200", (await req("/leads", {}, ownerToken)).status, 200);
+  check("GET /leads as designer -> 200 (their own)", (await req("/leads", {}, designerAToken)).status, 200);
+  check("GET /leads/:id as the assigned designer -> 200", (await req(`/leads/${leadId}`, {}, designerAToken)).status, 200);
+  check("GET /leads/:id as another designer -> 404 (not theirs, existence not leaked)", (await req(`/leads/${leadId}`, {}, designerBToken)).status, 404);
+  check("PATCH /leads/:id/assign as designer -> 403", (await req(`/leads/${leadId}/assign`, { method: "PATCH", body: JSON.stringify({ designerId: designerB.id }) }, designerAToken)).status, 403);
+  check("PATCH /leads/:id/status Received as the assigned designer -> 200", (await req(`/leads/${leadId}/status`, { method: "PATCH", body: JSON.stringify({ status: "unattended" }) }, designerAToken)).status, 200);
+  check("POST /leads/:id/comments as the assigned designer -> 201", (await req(`/leads/${leadId}/comments`, { method: "POST", body: JSON.stringify({ body: "rbac note" }) }, designerAToken)).status, 201);
+  for (const [role, token] of [
+    ["master_tailor", masterAToken],
+    ["accountant", accountantToken],
+    ["production_manager", pmToken],
+    ["worker", workerToken],
+  ]) {
+    check(`GET /leads as ${role} -> 403`, (await req("/leads", {}, token)).status, 403);
+    check(`GET /leads/badge as ${role} -> 403`, (await req("/leads/badge", {}, token)).status, 403);
+  }
+  check("GET /leads without a token -> 401", (await req("/leads")).status, 401);
+  check("GET /leads/designers as owner_manager -> 200", (await req("/leads/designers", {}, ownerToken)).status, 200);
+  check("GET /leads/designers as designer -> 403 (owner's table)", (await req("/leads/designers", {}, designerAToken)).status, 403);
+  // The public enquiry form needs no login (it only ever hands out a form token).
+  check("GET /public/enquiry-form without a token -> 200", (await req("/public/enquiry-form")).status, 200);
+
   const failed = results.filter((r) => !r.pass);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed.`);
   if (failed.length > 0) {

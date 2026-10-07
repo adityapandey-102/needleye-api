@@ -32,6 +32,10 @@ tags:
     description: Owner/Manager-only view of the team -- who is Working vs Idle, and the last 7 days of staff activity from the audit trail (payments excluded).
   - name: Team Members
     description: Lightweight designer/master-tailor lookup, backs selects and filters.
+  - name: Leads
+    description: Customer enquiries worked by designers until they become orders (ADR 0007). The owner sees every lead; a designer only their own.
+  - name: Public
+    description: The public enquiry form -- the only unauthenticated write. Rate-limited, strictly validated, 8 kB body limit (ADR 0007).
 
 security:
   - bearerAuth: []
@@ -765,7 +769,8 @@ paths:
         nothing is mutated. Paginated (the revenue page's year/month/week
         filters map to a `[from, to]` here). Registered before `/orders/{id}`
         so `ledger-events` isn't matched as an order id. Defaults to the last
-        12 months when the range is missing/invalid.
+        12 months when the range is missing/invalid. Days are the shop's days
+        (`BUSINESS_TIMEZONE`), not UTC's.
       parameters:
         - name: from
           in: query
@@ -789,6 +794,45 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/LedgerEventsResult" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /orders/ledger-events/export:
+    get:
+      tags: [Orders]
+      summary: Ledger Activity export -- one week or one month, unpaged
+      description: |
+        Owner/Manager and Accountant only (`reports:financial`). Every ledger
+        event of the window in ONE response (same rows and shape as
+        `/orders/ledger-events`, newest first) -- the web builds the CSV from
+        it and renders the printable PDF page. Weekly/monthly only: both dates
+        are required and real, and a window longer than 31 days (e.g. a year)
+        is refused with `LEDGER_EXPORT_RANGE_INVALID`. A window holding more
+        than 5000 entries is refused with `LEDGER_EXPORT_TOO_LARGE` rather
+        than returning a partial file. Shop-timezone days. No new storage --
+        it reads the existing `audit_log`.
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: Inclusive start date (YYYY-MM-DD) -- the week's Monday or the month's 1st.
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          required: true
+          description: Inclusive end date (YYYY-MM-DD), at most 31 days after `from` counting both ends.
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Every ledger event in the window (`limit` = the row ceiling, `offset` = 0) plus the shop `timeZone`
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LedgerExportResult" }
+        "400":
+          description: "`LEDGER_EXPORT_RANGE_INVALID` (missing/fake/backwards dates, or longer than 31 days) or `LEDGER_EXPORT_TOO_LARGE`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "403":
           $ref: "#/components/responses/Forbidden"
 
@@ -1121,11 +1165,19 @@ paths:
     get:
       tags: [Team Members]
       summary: Lightweight designer/master-tailor lookup
-      description: Backs the designer/master-tailor selects on the order form and the filter dropdowns on the orders list. Any authenticated role can read it (no capability gate beyond `requireAuth`).
+      description: Backs the designer/master-tailor selects on the order form and the filter dropdowns on the orders list. Any authenticated role can read it (no capability gate beyond `requireAuth`). With `q` + `limit` it backs the designer type-ahead (Leads filter and assign) -- a handful of matches instead of the whole team.
       parameters:
         - name: role
           in: query
           schema: { $ref: "#/components/schemas/Role" }
+        - name: q
+          in: query
+          description: Name contains (case-insensitive).
+          schema: { type: string, maxLength: 80 }
+        - name: limit
+          in: query
+          description: At most this many (1-20). Omitted = every active member, as before.
+          schema: { type: integer, minimum: 1, maximum: 20 }
       responses:
         "200":
           description: Active team members, optionally filtered by role
@@ -1227,6 +1279,328 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /leads:
+    get:
+      tags: [Leads]
+      summary: List leads (paged, searched, filtered)
+      description: Owner sees every lead; a designer only their own (`leads:read`). Urgent first, then newest. Max 50 a page.
+      parameters:
+        - name: status
+          in: query
+          description: "`open` = every stage that isn't converted / lost / discarded."
+          schema: { type: string, enum: [open, new, assigned, unattended, attended, follow_up, converted, lost, discarded] }
+        - { name: urgent, in: query, schema: { type: string, enum: ["true", "false"] } }
+        - { name: q, in: query, description: Search customer name, phone or lead number., schema: { type: string, maxLength: 80 } }
+        - { name: assignedTo, in: query, description: Owner only -- one designer's leads., schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: One page of leads
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  leads: { type: array, items: { $ref: "#/components/schemas/Lead" } }
+                  total: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Leads]
+      summary: Add a lead by hand (owner)
+      description: "`leads:manage`. A walk-in, phone call, Instagram message... Optionally assigned to an active designer at once."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [customerName, phone, requirement, source]
+              additionalProperties: false
+              properties:
+                customerName: { type: string, maxLength: 80, description: "Letters (any script), spaces, . ' -" }
+                phone: { type: string, description: A 10-digit Indian mobile in any common format; stored as 10 digits. }
+                requirement: { type: string, maxLength: 1000 }
+                source: { type: string, enum: [walk_in, phone_call, instagram, whatsapp, referral, other] }
+                assignTo: { type: string, format: uuid, nullable: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, properties: { lead: { $ref: "#/components/schemas/Lead" } } }
+        "400":
+          description: VALIDATION_ERROR, or LEAD_ASSIGNEE_INVALID (not an active designer)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /leads/summary:
+    get:
+      tags: [Leads]
+      summary: Counts per stage and urgent (the dashboard tiles)
+      responses:
+        "200":
+          description: The Leads dashboard tiles
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  byStatus: { type: object, additionalProperties: { type: integer } }
+                  urgent: { type: integer }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /leads/designers:
+    get:
+      tags: [Leads]
+      summary: The owner's Designers table -- searched and paged
+      description: "`leads:manage`. Designers who have leads, busiest first (open, then waiting), with their counts. Name search (contains) and a page -- never the whole team at once. Total comes from a window count (one query)."
+      parameters:
+        - { name: q, in: query, description: Designer name contains., schema: { type: string, maxLength: 80 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 10 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: One page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  designers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        designerId: { type: string, format: uuid }
+                        designerName: { type: string }
+                        open: { type: integer }
+                        waiting: { type: integer, description: Assigned but not yet received. }
+                        converted: { type: integer }
+                        lost: { type: integer }
+                  total: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /leads/badge:
+    get:
+      tags: [Leads]
+      summary: The red badge count
+      description: "Owner: unassigned New leads. Designer: their leads waiting for Received, plus their open urgent ones. `Cache-Control: no-store`. The web refreshes it on open, reopen and reload, and every 10 minutes."
+      responses:
+        "200":
+          description: Count
+          content:
+            application/json:
+              schema: { type: object, properties: { count: { type: integer } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /leads/{id}:
+    get:
+      tags: [Leads]
+      summary: One lead with comments, history and the caller's allowed actions
+      description: A designer asking for someone else's lead gets 404 (existence never leaks).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The lead
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lead: { $ref: "#/components/schemas/Lead" }
+                  comments: { type: array, items: { $ref: "#/components/schemas/LeadComment" } }
+                  events: { type: array, items: { $ref: "#/components/schemas/LeadEvent" } }
+                  samePhone: { type: array, description: Owner only -- other leads from this phone., items: { type: object } }
+                  actions:
+                    type: object
+                    properties:
+                      nextStatuses: { type: array, items: { type: string } }
+                      canAssign: { type: boolean }
+                      canConvert: { type: boolean }
+                      canComment: { type: boolean }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /leads/{id}/assign:
+    patch:
+      tags: [Leads]
+      summary: Assign or reassign to a designer (owner)
+      description: Sets the stage to Assigned (the designer must tap Received). Closed leads can't be assigned (409 LEAD_CLOSED). `version` is the optimistic lock (409 LEAD_MODIFIED).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [designerId]
+              additionalProperties: false
+              properties:
+                designerId: { type: string, format: uuid }
+                version: { type: integer }
+      responses:
+        "200":
+          description: Assigned
+          content:
+            application/json:
+              schema: { type: object, properties: { lead: { $ref: "#/components/schemas/Lead" } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: LEAD_CLOSED or LEAD_MODIFIED
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /leads/{id}/status:
+    patch:
+      tags: [Leads]
+      summary: Move a lead to another stage
+      description: |
+        Rules in leads/domain/lead-status.rules.ts. Designer (own leads):
+        assigned -> unattended (Received); unattended -> attended / follow_up / lost;
+        attended -> follow_up / lost; follow_up -> attended / follow_up / lost.
+        Owner: new -> discarded; any working stage; lost -> unattended (reopen);
+        discarded -> new (restore). Never `assigned` (use assign) or
+        `converted` (save an order with leadId). `lost` needs `lostReason`;
+        `followUpOn` can't be in the past. Contacting the customer clears urgent.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              additionalProperties: false
+              properties:
+                status: { type: string, enum: [new, unattended, attended, follow_up, lost, discarded] }
+                followUpOn: { type: string, format: date, nullable: true }
+                lostReason: { type: string, maxLength: 300, nullable: true }
+                version: { type: integer }
+      responses:
+        "200":
+          description: Moved
+          content:
+            application/json:
+              schema: { type: object, properties: { lead: { $ref: "#/components/schemas/Lead" } } }
+        "400":
+          description: VALIDATION_ERROR, or LEAD_STATUS_FORBIDDEN (assigned / converted)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: LEAD_STATUS_FORBIDDEN -- not a move this role can make
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /leads/{id}/comments:
+    post:
+      tags: [Leads]
+      summary: Add a comment (append-only)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              additionalProperties: false
+              properties:
+                body: { type: string, minLength: 1, maxLength: 2000 }
+      responses:
+        "201":
+          description: Added
+          content:
+            application/json:
+              schema: { type: object, properties: { comment: { $ref: "#/components/schemas/LeadComment" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /public/enquiry-form:
+    get:
+      tags: [Public]
+      summary: What the open enquiry form needs before showing
+      description: No login. A signed open-time token (submissions under 3 s, or with a token over 2 h old, aren't stored) and, only while Turnstile is switched on, its site key. `Cache-Control no-store`. 120 per IP per hour.
+      security: []
+      responses:
+        "200":
+          description: Form config
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  formToken: { type: string }
+                  turnstileSiteKey: { type: string, nullable: true }
+
+  /public/enquiries:
+    post:
+      tags: [Public]
+      summary: A customer's enquiry (the only unauthenticated write)
+      description: |
+        No login. 5 per IP per hour, 200 per hour overall (429 RATE_LIMITED);
+        8 kB body limit (413 PAYLOAD_TOO_LARGE); malformed JSON is 400
+        MALFORMED_REQUEST. Strict schema. Honeypot `website` filled, or a
+        too-fast submit: the same "received" reply, nothing stored. Per phone,
+        the 1st enquiry creates a New lead; the 2nd within 24 h of the first
+        merges into it and marks it urgent; the 3rd and later get
+        `already_received` and nothing is stored. The reply never contains
+        data or ids.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, phone, requirement, formToken]
+              additionalProperties: false
+              properties:
+                name: { type: string, description: "Letters (any script), spaces, . ' - ; 2-80 chars" }
+                phone: { type: string, description: A 10-digit Indian mobile in any common format }
+                requirement: { type: string, maxLength: 1000 }
+                formToken: { type: string, maxLength: 128 }
+                website: { type: string, description: Honeypot -- people leave it empty }
+                turnstileToken: { type: string, description: Required only while Turnstile is switched on }
+      responses:
+        "201":
+          description: Received
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnquiryReply" }
+        "200":
+          description: Already received (3rd or later enquiry from this phone within 24 h)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnquiryReply" }
+        "400":
+          description: VALIDATION_ERROR, MALFORMED_REQUEST, ENQUIRY_FORM_EXPIRED (reload) or ENQUIRY_VERIFICATION_FAILED (Turnstile)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "413":
+          description: PAYLOAD_TOO_LARGE
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: RATE_LIMITED
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1275,6 +1649,57 @@ components:
           schema: { $ref: "#/components/schemas/Error" }
 
   schemas:
+    Lead:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        leadNumber: { type: string, example: LEAD-2026-031 }
+        customerName: { type: string }
+        phone: { type: string, example: "9876543210" }
+        requirement: { type: string }
+        source: { type: string, enum: [public_form, walk_in, phone_call, instagram, whatsapp, referral, other] }
+        status: { type: string, enum: [new, assigned, unattended, attended, follow_up, converted, lost, discarded] }
+        assignedTo: { type: string, format: uuid, nullable: true }
+        assignedToName: { type: string, nullable: true }
+        assignedAt: { type: string, format: date-time, nullable: true }
+        urgent: { type: boolean, description: A repeat enquiry not yet contacted. }
+        enquiryCount: { type: integer }
+        firstEnquiryAt: { type: string, format: date-time }
+        lastEnquiryAt: { type: string, format: date-time }
+        followUpOn: { type: string, format: date, nullable: true }
+        lostReason: { type: string, nullable: true }
+        convertedOrderId: { type: string, format: uuid, nullable: true }
+        convertedOrderNumber: { type: string, nullable: true }
+        createdBy: { type: string, format: uuid, nullable: true, description: Null means the public enquiry form. }
+        createdByName: { type: string, nullable: true }
+        version: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    LeadComment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        leadId: { type: string, format: uuid }
+        authorId: { type: string, format: uuid, nullable: true }
+        authorName: { type: string, nullable: true }
+        body: { type: string }
+        createdAt: { type: string, format: date-time }
+    LeadEvent:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [created, enquiry_merged, assigned, status_changed, converted] }
+        actorName: { type: string, nullable: true, description: Null means the public enquiry form. }
+        fromStatus: { type: string, nullable: true }
+        toStatus: { type: string, nullable: true }
+        assignedToName: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+    EnquiryReply:
+      type: object
+      properties:
+        result: { type: string, enum: [received, already_received] }
+        message: { type: string }
     Money:
       type: string
       pattern: '^-?\d+\.\d{2}$'
@@ -1694,6 +2119,15 @@ components:
         from: { type: string, format: date, description: Inclusive window start (echoes the resolved request). }
         to: { type: string, format: date, description: Inclusive window end. }
 
+    LedgerExportResult:
+      description: The whole week/month from GET /orders/ledger-events/export, plus the shop timezone its times are shown in.
+      allOf:
+        - $ref: "#/components/schemas/LedgerEventsResult"
+        - type: object
+          required: [timeZone]
+          properties:
+            timeZone: { type: string, example: Asia/Kolkata, description: "IANA zone of the shop (BUSINESS_TIMEZONE)." }
+
     CreateOrderRequest:
       type: object
       required:
@@ -1735,6 +2169,14 @@ components:
             date's day is full and the Production Manager agreed to take it
             anyway -- required to book a full day (else 409 DELIVERY_DAY_FULL),
             and audited as order.delivery_override when used.
+        leadId:
+          type: string
+          format: uuid
+          description: >-
+            Not stored on the order. "This order is for that lead": the lead is
+            marked Converted in the same transaction. If it can't be converted
+            (not the caller's, not yet received, already closed) nothing is
+            created -- 409 LEAD_NOT_CONVERTIBLE.
 
     UpdateOrderRequest:
       type: object

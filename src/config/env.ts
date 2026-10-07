@@ -61,6 +61,34 @@ const envSchema = z.object({
         return false;
       }
     }, "Must be an IANA timezone, e.g. Asia/Kolkata"),
+
+  // -- Public enquiry form (Leads) -- see docs/adr/0007 ------------------------
+  /**
+   * Signs the enquiry form's anti-bot timing token. Optional: when unset it's
+   * derived from SUPABASE_SERVICE_ROLE_KEY (stable across restarts/instances,
+   * never exposed). Set it to rotate the form tokens independently.
+   */
+  PUBLIC_FORM_SECRET: z.string().min(16).optional(),
+  /** Enquiries one IP may send per window (default 5 an hour). */
+  PUBLIC_ENQUIRY_RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(5),
+  PUBLIC_ENQUIRY_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).default(60 * 60 * 1000),
+  /** Ceiling on enquiries from EVERYONE per hour -- a flood from many IPs can't swamp the leads list. */
+  PUBLIC_ENQUIRY_GLOBAL_MAX_PER_HOUR: z.coerce.number().int().min(1).default(200),
+  /**
+   * Cloudflare Turnstile (the invisible "are you human" check) on the public
+   * form. Built in and OFF by default: to turn it on, set the two keys from the
+   * Cloudflare dashboard and TURNSTILE_ENABLED=true -- no code change. Guide:
+   * docs/guides/turn-on-turnstile.md.
+   */
+  TURNSTILE_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
+  TURNSTILE_SITE_KEY: z.string().default(""),
+  TURNSTILE_SECRET_KEY: z.string().default(""),
+}).refine((e) => !e.TURNSTILE_ENABLED || (e.TURNSTILE_SITE_KEY !== "" && e.TURNSTILE_SECRET_KEY !== ""), {
+  message: "TURNSTILE_ENABLED=true needs TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY",
+  path: ["TURNSTILE_ENABLED"],
 });
 
 const parsed = envSchema.safeParse(process.env);
