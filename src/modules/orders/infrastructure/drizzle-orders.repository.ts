@@ -245,6 +245,15 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         return eq(orders.productionStatus, "delivered");
       case "ready":
         return eq(orders.productionStatus, READY_STATUS);
+      // The dashboard pipeline's steps -- exactly the stages each step counts in getStats.
+      case "pipeline_design":
+        return inArray(orders.productionStatus, PIPELINE_STAGE_GROUPS.design);
+      case "pipeline_received":
+        return inArray(orders.productionStatus, PIPELINE_STAGE_GROUPS.received);
+      case "pipeline_production":
+        return inArray(orders.productionStatus, PIPELINE_STAGE_GROUPS.production);
+      case "pipeline_checks":
+        return inArray(orders.productionStatus, PIPELINE_STAGE_GROUPS.checks);
       case "delivered_this_month":
         // Same definition as getStats' deliveredThisMonth card. "= any(array(...))"
         // runs the subquery FIRST (a short range read of this month's delivery

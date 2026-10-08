@@ -51,7 +51,7 @@ export interface OrderListFilters {
   status?: string;
   designerId?: string;
   masterTailorId?: string;
-  /** Dashboard/list filter: active | production | completed | ready | delivered | delivered_this_month | pending_payment | payment_overdue | payment_upcoming | overdue | urgent | this_month. */
+  /** Dashboard/list filter: active | production | completed | ready | delivered | delivered_this_month | pending_payment | payment_overdue | payment_upcoming | overdue | urgent | this_month | not_priced | pipeline_design | pipeline_received | pipeline_production | pipeline_checks (the pipeline steps). */
   bucket?: string;
   /**
    * Only orders created on or after this shop day (YYYY-MM-DD, business

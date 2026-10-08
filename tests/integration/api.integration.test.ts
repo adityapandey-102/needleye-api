@@ -77,6 +77,10 @@ describe("API endpoints (integration)", () => {
     expect(await ids("timeline=due_soon&bookedYear=2025")).toEqual([soon]);
     expect(await ids("timeline=on_track&bookedYear=2025")).toEqual([later]);
     expect(await ids("status=design_pending&bookedYear=2025&bookedMonth=7")).toEqual([later]);
+    // The pipeline steps' lists, with a search on top (the dashboard's focused pages).
+    expect((await ids("bucket=pipeline_design&bookedYear=2025")).sort()).toEqual([overdue, soon, later].sort());
+    expect(await ids("bucket=pipeline_checks&bookedYear=2025")).toEqual([]);
+    expect(await ids("bucket=pipeline_design&bookedYear=2025&search=Filter%20Soon")).toEqual([soon]);
     for (const bad of ["timeline=soonish", "bookedYear=99", "bookedMonth=3", "bookedYear=2025&bookedMonth=13"]) {
       expect((await request(app).get(`/api/v1/orders?${bad}`).set("Authorization", ownerAuth)).status, bad).toBe(400);
     }

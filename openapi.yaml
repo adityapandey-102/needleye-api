@@ -554,8 +554,11 @@ paths:
             (reached Delivered since the 1st, shop timezone), `pending_payment`,
             `payment_overdue`, `payment_upcoming`, `overdue`, `urgent`,
             `this_month` (booked since the 1st, shop timezone), `not_priced`
-            (no price yet). The payment buckets only count orders that still
-            owe (unpaid / advance_paid).
+            (no price yet), and the dashboard pipeline's steps
+            `pipeline_design`, `pipeline_received`, `pipeline_production`,
+            `pipeline_checks` (the same stages each step counts). The payment
+            buckets only count orders that still owe (unpaid / advance_paid).
+            Combines with `search` and the other filters.
             Unknown values are ignored (no filtering).
           schema:
             type: string
