@@ -157,6 +157,9 @@ describe("Users & reports (integration)", () => {
     const auth = { Authorization: `Bearer ${session.accessToken}` };
     const stats = (await request(app).get("/api/v1/orders/stats").set(auth)).body as Record<string, number>;
     expect(stats).toMatchObject({ ready: 1, deliveredThisMonth: 1, completed: 2, inProduction: 0, active: 1 });
+    // The pipeline adds up to the active orders, Ready included.
+    const pipeline = (stats as unknown as { pipeline: Record<string, number> }).pipeline;
+    expect(pipeline).toEqual({ design: 0, received: 0, production: 0, checks: 0, ready: 1 });
 
     const ids = async (bucket: string) =>
       ((await request(app).get(`/api/v1/orders?bucket=${bucket}`).set(auth)).body as { orders: { id: string }[] }).orders.map((o) => o.id);

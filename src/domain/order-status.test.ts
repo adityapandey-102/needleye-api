@@ -3,6 +3,8 @@ import {
   CANONICAL_TO_GRANULAR,
   DESIGN_STAGE_STATUSES,
   GRANULAR_STATUS_VALUES,
+  PIPELINE_GROUPS,
+  PIPELINE_STAGE_GROUPS,
   PRODUCTION_STAGE_STATUSES,
   STAGE_CAPABILITY,
   STATUS_ALIASES,
@@ -141,5 +143,14 @@ describe("nextMainStage (what a scan advances to)", () => {
       const next = nextMainStage(from);
       if (next) expect(stageMoveRefusal(from, next)).toBeNull();
     }
+  });
+});
+
+describe("the dashboard pipeline", () => {
+  it("puts every stage except Delivered in exactly one group, in flow order", () => {
+    const grouped = PIPELINE_GROUPS.flatMap((g) => PIPELINE_STAGE_GROUPS[g]);
+    expect(grouped).toEqual(GRANULAR_STATUS_VALUES.filter((s) => s !== "delivered"));
+    expect(PIPELINE_STAGE_GROUPS.checks).toEqual(["quality_check", "alteration"]);
+    expect(PIPELINE_STAGE_GROUPS.ready).toEqual(["ready"]);
   });
 });

@@ -8,73 +8,73 @@ inserted in a transaction that is rolled back. Budget: ≤ 150 ms, no sequential
 
 | Query | Time (ms) | Queries/call | Big-table seq scans | Verdict |
 | --- | ---: | ---: | --- | --- |
-| orders list (owner, page) | 0.14 | 1 (page 50: 1) | none | ✅ |
-| orders count (owner) | 1.54 | 1 | orders (12,745 rows) | ✅ (expected: counts every order in the shop (unfiltered pager total)) |
-| orders search 'priya' | 16.37 | 1 | orders (12,745 rows) | ✅ (expected: trigram indexes exist; at 12k rows the planner judges one scan cheaper) |
-| orders search count | 15.61 | 1 | orders (12,745 rows) | ✅ (expected: trigram indexes exist; at 12k rows the planner judges one scan cheaper) |
-| orders bucket: overdue | 0.43 | 1 | none | ✅ |
+| orders list (owner, page) | 0.37 | 1 (page 50: 1) | none | ✅ |
+| orders count (owner) | 1.31 | 1 | orders (12,786 rows) | ✅ (expected: counts every order in the shop (unfiltered pager total)) |
+| orders search 'priya' | 0.48 | 1 | none | ✅ |
+| orders search count | 0.03 | 1 | none | ✅ |
+| orders bucket: overdue | 0.36 | 1 | none | ✅ |
 | orders bucket: pending_payment | 0.22 | 1 | none | ✅ |
-| orders bucket: ready | 0.28 | 1 | none | ✅ |
-| orders bucket: price not set | 0.13 | 1 | none | ✅ |
-| orders bucket: delivered this month | 0.34 | 1 | none | ✅ |
-| orders bucket count: delivered this month | 0.09 | 1 | none | ✅ |
-| orders kanban (last 2 months, page of 50) | 0.29 | 1 | none | ✅ |
-| orders kanban count (last 2 months) | 0.77 | 1 | none | ✅ |
-| orders list (designer's own) | 0.15 | 1 | none | ✅ |
-| order by id | 0.07 | 1 | none | ✅ |
-| order status history | 0.24 | 1 | none | ✅ |
+| orders bucket: ready | 0.25 | 1 | none | ✅ |
+| orders bucket: price not set | 0.12 | 1 | none | ✅ |
+| orders bucket: delivered this month | 0.56 | 1 | none | ✅ |
+| orders bucket count: delivered this month | 0.12 | 1 | none | ✅ |
+| orders kanban (last 2 months, page of 50) | 0.26 | 1 | none | ✅ |
+| orders kanban count (last 2 months) | 0.73 | 1 | none | ✅ |
+| orders list (designer's own) | 0.52 | 1 | none | ✅ |
+| order by id | 0.13 | 1 | none | ✅ |
+| order status history | 0.65 | 1 | none | ✅ |
 | order price history | 0.02 | 1 | none | ✅ |
-| payment sums for a page | 0.02 | 1 | none | ✅ |
-| dashboard stats (owner) #1 | 5.60 | 3 | orders (12,745 rows) | ✅ (expected: shop-wide dashboard totals: every order and payment is part of the answer) |
-| dashboard stats (owner) #2 | 6.80 | 3 | payments (24,147 rows), orders (12,745 rows) | ✅ (expected: shop-wide dashboard totals: every order and payment is part of the answer) |
-| dashboard stats (owner) #3 | 0.06 | 3 | none | ✅ |
-| dashboard stats (designer) #1 | 0.10 | 3 | none | ✅ |
-| dashboard stats (designer) #2 | 0.26 | 3 | none | ✅ |
-| dashboard stats (designer) #3 | 0.51 | 3 | none | ✅ |
-| revenue: this month's cards | 1.45 | 1 | none | ✅ |
-| revenue: a page of 12 months | 4.55 | 1 | none | ✅ |
-| revenue: range totals (2020 to now) | 1.44 | 1 | none | ✅ |
-| revenue: export (240 months) | 2.38 | 1 | none | ✅ |
-| revenue: books of a page of 12 months | 0.17 | 1 | none | ✅ |
-| revenue: books for the export (240 months) | 0.14 | 1 | none | ✅ |
+| payment sums for a page | 0.03 | 1 | none | ✅ |
+| dashboard stats (owner) #1 | 5.67 | 3 | orders (12,786 rows) | ✅ (expected: shop-wide dashboard totals: every order and payment is part of the answer) |
+| dashboard stats (owner) #2 | 7.43 | 3 | payments (24,158 rows), orders (12,786 rows) | ✅ (expected: shop-wide dashboard totals: every order and payment is part of the answer) |
+| dashboard stats (owner) #3 | 0.08 | 3 | none | ✅ |
+| dashboard stats (designer) #1 | 0.45 | 3 | none | ✅ |
+| dashboard stats (designer) #2 | 0.31 | 3 | none | ✅ |
+| dashboard stats (designer) #3 | 1.04 | 3 | none | ✅ |
+| revenue: this month's cards | 1.93 | 1 | none | ✅ |
+| revenue: a page of 12 months | 4.44 | 1 | none | ✅ |
+| revenue: range totals (2020 to now) | 1.32 | 1 | none | ✅ |
+| revenue: export (240 months) | 2.20 | 1 | none | ✅ |
+| revenue: books of a page of 12 months | 0.09 | 1 | none | ✅ |
+| revenue: books for the export (240 months) | 0.05 | 1 | none | ✅ |
 | revenue: a month's closes and reopens | 0.03 | 1 | none | ✅ |
-| revenue: latest check + last nightly #1 | 0.13 | 2 | none | ✅ |
-| revenue: latest check + last nightly #2 | 0.03 | 2 | none | ✅ |
-| revenue: the check (Verify now / nightly) #1 | 33.43 | 2 | none | ✅ |
-| revenue: the check (Verify now / nightly) #2 | 0.02 | 2 | none | ✅ |
-| staff report (one designer, month) #1 | 0.07 | 3 | none | ✅ |
+| revenue: latest check + last nightly #1 | 0.05 | 2 | none | ✅ |
+| revenue: latest check + last nightly #2 | 0.02 | 2 | none | ✅ |
+| revenue: the check (Verify now / nightly) #1 | 33.66 | 2 | none | ✅ |
+| revenue: the check (Verify now / nightly) #2 | 0.03 | 2 | none | ✅ |
+| staff report (one designer, month) #1 | 0.02 | 3 | none | ✅ |
 | staff report (one designer, month) #2 | 0.10 | 3 | none | ✅ |
-| staff report (one designer, month) #3 | 0.27 | 3 | none | ✅ |
-| ledger events page #1 | 0.22 | 2 | none | ✅ |
-| ledger events page #2 | 2.30 | 2 | payment_audit_log (24,113 rows) | ✅ (expected: the Year view counts a year of ledger events -- a third of this log at this size, so the planner may read it whole; a bigger log uses the created_at index) |
-| delivery load (2 months) | 0.22 | 1 | none | ✅ |
-| payments for an order | 0.04 | 1 | none | ✅ |
-| users list + search | 0.86 | 1 (page 50: 1) | none | ✅ |
-| users count | 0.56 | 1 | none | ✅ |
-| team members (designers) | 0.26 | 1 | none | ✅ |
-| reports: team status page | 14.93 | 1 (page 50: 1) | none | ✅ |
-| reports: team status search | 5.77 | 1 | none | ✅ |
-| reports: team status picker (masters) | 5.30 | 1 | none | ✅ |
-| reports: activity day (orders) | 2.31 | 1 | none | ✅ |
-| reports: activity day (stages) | 0.70 | 1 | none | ✅ |
-| reports: activity day (payments) | 0.50 | 1 | none | ✅ |
-| reports: activity day (leads) | 1.16 | 1 | none | ✅ |
-| reports: activity day (accounts) | 3.03 | 1 | none | ✅ |
-| reports: activity counts (one day) | 1.02 | 1 | none | ✅ |
-| leads list (owner, open, page) #1 | 1.30 | 2 | none | ✅ |
-| leads list (owner, open, page) #2 | 0.44 | 2 | none | ✅ |
-| leads list (designer's own, open) #1 | 0.08 | 2 | none | ✅ |
-| leads list (designer's own, open) #2 | 0.04 | 2 | none | ✅ |
-| leads search 'pri' #1 | 23.43 | 2 | leads (20,040 rows) | ✅ (expected: trigram indexes exist; a 3-letter OR search over name/phone/number is one scan at this size) |
-| leads search 'pri' #2 | 27.12 | 2 | leads (20,040 rows) | ✅ (expected: trigram indexes exist; a 3-letter OR search over name/phone/number is one scan at this size) |
-| leads summary (owner) | 5.48 | 1 | leads (20,040 rows) | ✅ (expected: counts every lead by stage -- the whole book is the answer) |
-| leads designers table (page of 10) | 6.31 | 1 | leads (20,040 rows) | ✅ (expected: one grouped pass over every assigned lead to rank designers; the page itself is 10 rows) |
-| leads designers table search | 6.39 | 1 | leads (20,040 rows) | ✅ (expected: one grouped pass over every assigned lead, then the name filter) |
-| designer type-ahead (team search) | 0.31 | 1 | none | ✅ |
-| leads summary (designer) | 0.12 | 1 | none | ✅ |
-| leads badge (owner) | 0.13 | 1 | none | ✅ |
+| staff report (one designer, month) #3 | 0.31 | 3 | none | ✅ |
+| ledger events page #1 | 0.21 | 2 | none | ✅ |
+| ledger events page #2 | 2.07 | 2 | payment_audit_log (24,126 rows) | ✅ (expected: the Year view counts a year of ledger events -- a third of this log at this size, so the planner may read it whole; a bigger log uses the created_at index) |
+| delivery load (2 months) | 0.16 | 1 | none | ✅ |
+| payments for an order | 0.02 | 1 | none | ✅ |
+| users list + search | 1.30 | 1 (page 50: 1) | none | ✅ |
+| users count | 0.58 | 1 | none | ✅ |
+| team members (designers) | 0.19 | 1 | none | ✅ |
+| reports: team status page | 25.12 | 1 (page 50: 1) | none | ✅ |
+| reports: team status search | 6.24 | 1 | none | ✅ |
+| reports: team status picker (masters) | 6.13 | 1 | none | ✅ |
+| reports: activity day (orders) | 4.08 | 1 | none | ✅ |
+| reports: activity day (stages) | 0.59 | 1 | none | ✅ |
+| reports: activity day (payments) | 0.68 | 1 | none | ✅ |
+| reports: activity day (leads) | 0.42 | 1 | none | ✅ |
+| reports: activity day (accounts) | 0.76 | 1 | none | ✅ |
+| reports: activity counts (one day) | 2.98 | 1 | none | ✅ |
+| leads list (owner, open, page) #1 | 2.22 | 2 | none | ✅ |
+| leads list (owner, open, page) #2 | 0.70 | 2 | none | ✅ |
+| leads list (designer's own, open) #1 | 0.05 | 2 | none | ✅ |
+| leads list (designer's own, open) #2 | 0.02 | 2 | none | ✅ |
+| leads search 'pri' #1 | 23.59 | 2 | leads (20,044 rows) | ✅ (expected: trigram indexes exist; a 3-letter OR search over name/phone/number is one scan at this size) |
+| leads search 'pri' #2 | 23.59 | 2 | leads (20,044 rows) | ✅ (expected: trigram indexes exist; a 3-letter OR search over name/phone/number is one scan at this size) |
+| leads summary (owner) | 10.33 | 1 | leads (20,044 rows) | ✅ (expected: counts every lead by stage -- the whole book is the answer) |
+| leads designers table (page of 10) | 6.40 | 1 | leads (20,044 rows) | ✅ (expected: one grouped pass over every assigned lead to rank designers; the page itself is 10 rows) |
+| leads designers table search | 6.62 | 1 | leads (20,044 rows) | ✅ (expected: one grouped pass over every assigned lead, then the name filter) |
+| designer type-ahead (team search) | 0.22 | 1 | none | ✅ |
+| leads summary (designer) | 0.11 | 1 | none | ✅ |
+| leads badge (owner) | 0.11 | 1 | none | ✅ |
 | leads badge (designer) | 0.04 | 1 | none | ✅ |
-| lead by id | 0.04 | 1 | none | ✅ |
+| lead by id | 0.03 | 1 | none | ✅ |
 | lead comments | 0.02 | 1 | none | ✅ |
-| lead history | 0.04 | 1 | none | ✅ |
-| leads from the same phone | 0.04 | 1 | none | ✅ |
+| lead history | 0.03 | 1 | none | ✅ |
+| leads from the same phone | 0.03 | 1 | none | ✅ |

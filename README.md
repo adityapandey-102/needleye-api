@@ -949,7 +949,10 @@ the owner -- that a designer works until it becomes an order or is closed.
 ### Dashboard stats & revenue report
 
 `GET /orders/stats` (`DrizzleOrdersRepository.getStats`) computes
-`total`/`active`/`completed`/`thisMonth`/`inProduction`/`overdue`/`urgent`
+`total`/`active`/`completed`/`thisMonth`/`inProduction`/`overdue`/`urgent`,
+the dashboard's `pipeline` (orders not yet delivered by group -- design,
+received, production, checks, ready -- `PIPELINE_STAGE_GROUPS` in
+`src/domain/order-status.ts`; they add up to `active`, visible to every role)
 plus the payment aggregates `pendingPayments`/`collectedRevenue`/`outstandingRevenue`
 entirely in Postgres -- one query with `COUNT(*) FILTER (WHERE ...)` for the
 order-level counts (`active`/`completed`/`inProduction` derived from the same

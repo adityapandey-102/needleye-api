@@ -1,6 +1,6 @@
 import type { PriceChangeDecision, PriceState } from "../../domain/order-pricing.rules";
 import type { OrderPriceChangeEntity } from "../../domain/order-price-change.entity";
-import type { GranularStatus, PaymentStatus, ProductCategory, Role } from "../../../../domain";
+import type { GranularStatus, PaymentStatus, PipelineGroup, ProductCategory, Role } from "../../../../domain";
 import type { OrderEntity } from "../../domain/order.entity";
 import type { OrderStatusHistoryEntity } from "../../domain/order-status-history.entity";
 
@@ -160,6 +160,8 @@ export interface OrderStatsRaw {
   /** Money as 2dp strings. */
   collectedRevenue: string;
   outstandingRevenue: string;
+  /** Orders not yet delivered, by pipeline group (they add up to `active`). */
+  pipeline: Record<PipelineGroup, number>;
 }
 
 /**

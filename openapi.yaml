@@ -2353,6 +2353,15 @@ components:
         outstandingRevenue:
           allOf: [{ $ref: "#/components/schemas/Money" }]
           description: "Absent for master_tailor. SUM(orders.total_amount) - collectedRevenue, floored at 0."
+        pipeline:
+          type: object
+          description: "Orders not yet delivered, by pipeline group -- they add up to active. Visible to all roles."
+          properties:
+            design: { type: integer, description: "Design Pending, Design Approved." }
+            received: { type: integer, description: "Production Manager Received." }
+            production: { type: integer, description: "Falls / Kutchu through Finishing." }
+            checks: { type: integer, description: "Quality Check / Trail, Alteration." }
+            ready: { type: integer, description: "Ready -- waiting for the customer." }
 
     LedgerFigures:
       type: object

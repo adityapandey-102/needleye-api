@@ -22,6 +22,7 @@ import { containsPattern } from "../../../common/database/like-pattern";
 import {
   CANONICAL_TO_GRANULAR,
   COMPLETED_CANONICAL_STAGES,
+  PIPELINE_STAGE_GROUPS,
   PRODUCTION_STAGE_STATUSES,
   READY_STATUS,
   granularLabel,
@@ -283,6 +284,11 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
           pendingPayments: sql<string>`count(*) filter (where ${inArray(orders.paymentStatus, [...OWED_PAYMENT_STATUSES])})`,
           notPriced: sql<string>`count(*) filter (where ${eq(orders.paymentStatus, "not_priced")})`,
           totalValue: sql<string>`coalesce(sum(${orders.totalAmount}), 0)`,
+          // The pipeline (ADR 0008 dashboard): four more counts in the same pass (ready is above).
+          pipelineDesign: sql<string>`count(*) filter (where ${inArray(orders.productionStatus, PIPELINE_STAGE_GROUPS.design)})`,
+          pipelineReceived: sql<string>`count(*) filter (where ${inArray(orders.productionStatus, PIPELINE_STAGE_GROUPS.received)})`,
+          pipelineProduction: sql<string>`count(*) filter (where ${inArray(orders.productionStatus, PIPELINE_STAGE_GROUPS.production)})`,
+          pipelineChecks: sql<string>`count(*) filter (where ${inArray(orders.productionStatus, PIPELINE_STAGE_GROUPS.checks)})`,
         })
         .from(orders)
         .where(condition);
@@ -335,6 +341,13 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
       notPriced: row ? Number(row.notPriced) : 0,
       collectedRevenue: toMoneyString(collectedRevenue),
       outstandingRevenue: toMoneyString(outstanding(totalValue, collectedRevenue)),
+      pipeline: {
+        design: row ? Number(row.pipelineDesign) : 0,
+        received: row ? Number(row.pipelineReceived) : 0,
+        production: row ? Number(row.pipelineProduction) : 0,
+        checks: row ? Number(row.pipelineChecks) : 0,
+        ready: row ? Number(row.ready) : 0,
+      },
     };
   }
 

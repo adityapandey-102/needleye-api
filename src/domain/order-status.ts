@@ -133,6 +133,29 @@ export const ALARMING_STATUS: GranularStatus = "alteration";
 /** Finished and waiting for the customer -- the only stage Delivered can follow. */
 export const READY_STATUS: GranularStatus = "ready";
 
+/** The dashboard's production pipeline, in flow order. */
+export const PIPELINE_GROUPS = ["design", "received", "production", "checks", "ready"] as const;
+export type PipelineGroup = (typeof PIPELINE_GROUPS)[number];
+
+/** Every stage from `from` to `to`, inclusive, in flow order. */
+function stagesBetween(from: GranularStatus, to: GranularStatus): GranularStatus[] {
+  return GRANULAR_STATUS_VALUES.filter((s) => STAGE_ORDER[s] >= STAGE_ORDER[from] && STAGE_ORDER[s] <= STAGE_ORDER[to]);
+}
+
+/**
+ * A REPORTING grouping (by position in the flow, like PRODUCTION_STAGE_STATUSES):
+ * every order not yet delivered is in exactly one group -- design, with the
+ * production manager, on the floor (Falls/Kutchu..Finishing), final checks
+ * (Quality Check, Alteration) or ready for the customer.
+ */
+export const PIPELINE_STAGE_GROUPS: Record<PipelineGroup, GranularStatus[]> = {
+  design: stagesBetween("design_pending", "design_approved"),
+  received: stagesBetween("production_manager_received", "production_manager_received"),
+  production: stagesBetween("falls_kutchu", "finishing"),
+  checks: stagesBetween("quality_check", "alteration"),
+  ready: [READY_STATUS],
+};
+
 /** Why a move from `from` to `to` breaks the flow's shape, or null if it doesn't (role checks are separate). */
 export type StageMoveRefusal = "same_stage" | "backward" | "deliver_requires_ready";
 
