@@ -17,6 +17,7 @@ import * as orderAuditLogSchema from "../../modules/orders/infrastructure/order-
 import * as orderRelationsSchema from "../../modules/orders/infrastructure/order.relations";
 import * as auditLogSchema from "../audit/audit-log.schema";
 import * as leadsSchema from "../../modules/leads/infrastructure/leads.schema";
+import * as ledgerSchema from "../../modules/ledger/infrastructure/ledger.schema";
 
 /**
  * The one Postgres connection pool every repository queries through.
@@ -47,6 +48,7 @@ const schema = {
   ...orderRelationsSchema,
   ...auditLogSchema,
   ...leadsSchema,
+  ...ledgerSchema,
 };
 
 const pool = new Pool({

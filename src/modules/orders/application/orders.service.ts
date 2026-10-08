@@ -36,7 +36,6 @@ import type { OrderPriceChangeEntity } from "../domain/order-price-change.entity
 import type { OrderListItemResponseDto, OrderResponseDto } from "../api/dto/order.response.dto";
 import type { OrderStatusHistoryResponseDto } from "../api/dto/order-status-history.response.dto";
 import type { OrderStatsResponseDto } from "../api/dto/order-stats.response.dto";
-import type { RevenueResponseDto } from "../api/dto/revenue.response.dto";
 import type { StaffReportResponseDto } from "../api/dto/staff-report.response.dto";
 import type {
   LedgerEventsResponseDto,
@@ -263,16 +262,6 @@ export class OrdersService {
   async getStats(ctx: AuthContext): Promise<OrderStatsResponseDto> {
     const stats = await this.ordersRepository.getStats({ role: ctx.profile.role, userId: ctx.authUserId });
     return toOrderStatsResponseDto(stats, ctx.profile.role);
-  }
-
-  /** Monthly revenue report over an inclusive date range -- route-gated by reports:financial (owner_manager/accountant), whose scope is unscoped. */
-  async getRevenue(ctx: AuthContext, range: { from: string; to: string }): Promise<RevenueResponseDto> {
-    const periods = await this.ordersRepository.getMonthlyRevenue(
-      { role: ctx.profile.role, userId: ctx.authUserId },
-      env.ACCOUNTING_CYCLE_START_DAY,
-      range,
-    );
-    return { cycleStartDay: env.ACCOUNTING_CYCLE_START_DAY, from: range.from, to: range.to, periods };
   }
 
   /**

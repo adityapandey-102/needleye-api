@@ -73,6 +73,15 @@ replay of history. So for the initial cutover:
 > payment events to `audit_log` only, so anything done between this migration
 > and the new API lands only there (still kept, just not in the new logs). The
 > migration prints how many old payment rows it couldn't copy (expected 0).
+>
+> **`20261011000001_ledger_daily.sql` (ADR 0008, phase 4)** -- the daily ledger
+> and its triggers, backfilled from current orders and payments. Creating the
+> triggers locks orders and payments against writes until the migration
+> commits (seconds), so schedule it with the rest. Right after, check
+> `select sum(booked_total), sum(cash_collected) from ledger_daily` against
+> `select sum(total_amount) from orders` and `select sum(amount) from payments`
+> -- they must match. The API before this one serves the old `/orders/revenue`;
+> the new web needs the new API.
 
 ### 1a. Least-privilege runtime database role (recommended)
 
@@ -107,7 +116,7 @@ for the authoritative list and what each one is for:
 - [ ] `LOG_LEVEL` -- `info` is a reasonable prod default.
 - [ ] `SLOW_QUERY_MS` -- optional; queries slower than this (default 250ms) are logged at WARN.
 - [ ] `AUTH_RATE_LIMIT_WINDOW_MS` / `AUTH_RATE_LIMIT_MAX` -- optional; auth brute-force limits (default 15min / 30 attempts per IP). Depends on `TRUST_PROXY` being set correctly (above) to key on the real client IP.
-- [ ] `ACCOUNTING_CYCLE_START_DAY` -- optional; day of month the revenue cycle starts (1 = calendar months).
+- [ ] `ACCOUNTING_CYCLE_START_DAY` -- no longer read (ADR 0008: revenue is always calendar months); delete it from the host if it's set.
 - [ ] `DELIVERY_DAY_CAPACITY` -- optional; orders that can be due on one day before booking another needs the Production Manager's OK (default 10). The web calendar reads it from the API, so changing it needs no web redeploy.
 - [ ] `BUSINESS_TIMEZONE` -- optional; the shop's IANA timezone (default `Asia/Kolkata`). It sets where each day of the owner's activity feed (/reports) starts and ends. Leave it unset for India.
 - [ ] Public enquiry form (Leads, ADR 0007) -- all optional, safe defaults: `PUBLIC_FORM_SECRET` (signs the form's timing token; default derived from the service-role key), `PUBLIC_ENQUIRY_RATE_LIMIT_MAX` / `_WINDOW_MS` (5 per IP per hour), `PUBLIC_ENQUIRY_GLOBAL_MAX_PER_HOUR` (200). Leave `TURNSTILE_ENABLED=false` until you follow `docs/guides/turn-on-turnstile.md`. Per-IP limits need `TRUST_PROXY` right (above).

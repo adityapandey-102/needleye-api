@@ -33,6 +33,8 @@ import { DrizzleUsersRepository } from "../../src/modules/users/infrastructure/d
 import { DrizzleTeamMembersRepository } from "../../src/modules/team-members/infrastructure/drizzle-team-members.repository";
 import { DrizzleReportsRepository } from "../../src/modules/reports/infrastructure/drizzle-reports.repository";
 import { DrizzleLeadsRepository } from "../../src/modules/leads/infrastructure/drizzle-leads.repository";
+import { DrizzleLedgerRepository } from "../../src/modules/ledger/infrastructure/drizzle-ledger.repository";
+import { addMonths } from "../../src/modules/ledger/domain/ledger-month.rules";
 
 const TIME_BUDGET_MS = 150;
 /** A sequential scan over a table this big (actual rows read) fails the audit. */
@@ -127,6 +129,7 @@ async function main() {
   const team = new DrizzleTeamMembersRepository();
   const reports = new DrizzleReportsRepository();
   const leads = new DrizzleLeadsRepository();
+  const ledger = new DrizzleLedgerRepository();
   const leadId = await pick("select coalesce((select id::text from leads order by created_at desc limit 1), '00000000-0000-0000-0000-000000000000') as id");
   const W = { designerWindowDays: 45, floorWindowDays: 30 };
 
@@ -187,10 +190,13 @@ async function main() {
       run: () => orders.getStats(designer),
       expectedScan: SHOP_WIDE(["payments"], "one hash join over payments beats one index probe per order at this size"),
     },
+    // Revenue page (ADR 0008 phase 4): ledger_daily, a few hundred small rows -- kept by triggers.
+    { name: "revenue: this month's cards", run: () => ledger.sumRange(`${month}-01`, "2099-01-01") },
+    { name: "revenue: a page of 12 months", run: () => ledger.findMonths(Array.from({ length: 12 }, (_, i) => addMonths(month, -i))) },
+    { name: "revenue: range totals (2020 to now)", run: () => ledger.sumRange("2020-01-01", "2099-01-01") },
     {
-      name: "revenue report (year)",
-      run: () => orders.getMonthlyRevenue(owner, 1, { from: yearStart, to: today }),
-      expectedScan: SHOP_WIDE(["orders"], "shop-wide revenue for the year"),
+      name: "revenue: export (240 months)",
+      run: () => ledger.findMonths(Array.from({ length: 240 }, (_, i) => addMonths(month, -i))),
     },
     { name: "staff report (one designer, month)", run: () => orders.getStaffReport(designerId, { from: `${month}-01`, to: today }) },
     {

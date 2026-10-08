@@ -267,6 +267,11 @@ src/
       infrastructure/
         drizzle-team-members.repository.ts     # implements the port; reads `profiles` from modules/users/infrastructure/profile.schema.ts (see ADR 0003) -- no mapper file, the select already projects directly into entity shape
     reports/                         # owner-only (reports:staff) team view: Working/Idle + the 7-day activity feed in 5 categories -- read-only
+    ledger/                          # the Revenue page's numbers (reports:financial): ledger_daily, kept by DB triggers (ADR 0008 phase 4) -- read-only
+      api/ledger.routes.ts               # GET /ledger/summary, /ledger/months (paged + range totals), /ledger/months/export (<= 240 months)
+      application/ledger.service.ts      # this month in the shop's timezone; months newest first, zero-filled; outstanding derived
+      domain/ledger-month.rules.ts       # calendar-month maths, range rules (2000-01 .. this month), export cap
+      infrastructure/drizzle-ledger.repository.ts  # sums over ledger_daily (primary-key range scans)
       api/
         reports.routes.ts                # controller -- composition root: new ReportsService(new DrizzleReportsRepository(), { timeZone: env.BUSINESS_TIMEZONE })
         dto/reports.dto.ts                 # activity query schema (real date, page <= 100) + response shapes
@@ -967,13 +972,32 @@ and the list it opens always agree. The `payment_overdue`/`payment_upcoming`
 buckets (outstanding balance with a next-payment date past / still ahead) back
 the dedicated pending-payments page's Overdue / Upcoming filter.
 
-`GET /orders/revenue?from=YYYY-MM-DD&to=YYYY-MM-DD` (`getMonthlyRevenue`,
-`reports:financial` only) returns collected revenue grouped into accounting
-periods over an inclusive date window (the UI sends a whole-year span so an
-accountant can export any year range; defaults to the last 12 months). Period
-boundaries follow `ACCOUNTING_CYCLE_START_DAY` (1 = calendar months by default;
-e.g. 7 gives 7th-to-6th billing cycles), computed in SQL with `date_trunc` +
-`make_interval` over the `payments` ledger.
+### Revenue: the daily ledger (ADR 0008, phase 4)
+
+The Revenue page reads **`ledger_daily`** -- one row per shop day: orders
+booked (and how many are priced), the value booked, what has been paid so far
+on those orders (on any date), cash collected that day (payments dated that
+day, any order) and the payment count. **Database triggers keep it**:
+`orders_ledger` (a booking, a price change, a booking-date move -- which moves
+the order and what's been paid on it between days) and `payments_ledger`
+(record / edit / remove: cash on the payment's day, "paid so far" on its
+order's booking day). They run in the same transaction as the change, lock the
+touched days in date order (no deadlocks between two writes on the same days),
+are `SECURITY DEFINER` (the app has no write grant on the table) and `ENABLE
+ALWAYS` (they fire even under `session_replication_role = replica`, which the
+test cleanup uses). The migration created the triggers before backfilling in
+one transaction, so no write lands between the two.
+
+`GET /ledger/summary` is this month (shop timezone): total booked, paid so far,
+outstanding (= total - paid so far) and cash collected. `GET /ledger/months`
+returns any range of **calendar months** (2000-01 to this month), newest
+first, 12 a page by default (max 60), months with no activity as zeros, plus
+the whole range's totals -- two primary-key range reads per page.
+`GET /ledger/months/export` returns every month of a range (at most 240) for
+the CSV / PDF. Paid so far and cash collected don't add up to each other on
+purpose: a payment in April for a March order is April's cash and March's
+"paid so far". The old payday-cycle report (`GET /orders/revenue`,
+`ACCOUNTING_CYCLE_START_DAY`) is gone -- always calendar months.
 
 `GET /orders/ledger-events?from=&to=&limit=&offset=` (`getLedgerEvents`,
 `reports:financial` only) is the **payment audit trail** behind the revenue
@@ -1469,7 +1493,9 @@ sequenceDiagram
 | POST `/orders`                                | bearer | `orders:create`                                        | orders.routes.ts       | `createOrder`                           | `create`                                                                          |
 | GET `/orders/stats`                           | bearer | `orders:read`                                          | orders.routes.ts       | `getStats`                              | `getStats` (row-scoped; registered before `/:id`)                                 |
 | GET `/orders/delivery-load`                   | bearer | `orders:create`                                        | orders.routes.ts       | `getDeliveryLoad`                       | `countOrdersDueByDay` (shop-wide; registered before `/:id`)                       |
-| GET `/orders/revenue`                         | bearer | `reports:financial`                                    | orders.routes.ts       | `getMonthlyRevenue`                     | `getMonthlyRevenue` (registered before `/:id`)                                    |
+| GET `/ledger/summary`                         | bearer | `reports:financial`                                    | ledger.routes.ts       | `getSummary`                            | `sumRange` (this month)                                                         |
+| GET `/ledger/months`                          | bearer | `reports:financial`                                    | ledger.routes.ts       | `getMonths`                             | `findMonths` + `sumRange` (paged, max 60; range totals)                         |
+| GET `/ledger/months/export`                   | bearer | `reports:financial`                                    | ledger.routes.ts       | `getExport`                             | `findMonths` + `sumRange` (<= 240 months)                                       |
 | GET `/orders/staff-report`                    | bearer | `reports:staff`                                        | orders.routes.ts       | `getStaffReport`                        | `getStaffReport` (one designer/master on demand; registered before `/:id`)        |
 | GET `/orders/ledger-events`                   | bearer | `reports:financial`                                    | orders.routes.ts       | `getLedgerEvents`                       | `getLedgerEvents` (payment_audit_log; paginated; registered before `/:id`)       |
 | GET `/orders/ledger-events/export`            | bearer | `reports:financial`                                    | orders.routes.ts       | `getLedgerExport`                       | `getLedgerEvents` (one week/month, unpaged; > 31 days refused)                    |
@@ -1530,9 +1556,7 @@ these three are only read by `SupabaseAuthProvider`/`SupabaseStorageProvider`),
 `STORAGE_BUCKET_NAME`, `API_PORT`, `CORS_ALLOWED_ORIGIN` (must match
 wherever needleye-web is running/deployed), `WEB_APP_URL` (used only to
 build the link inside password-reset emails), `LOG_LEVEL` (`fatal` `error`
-`warn` `info` `debug` `trace`, default `info`), `ACCOUNTING_CYCLE_START_DAY`
-(day of month the monthly-revenue accounting period begins, 1-28, default 1 =
-calendar months -- backs `GET /orders/revenue`), `DELIVERY_DAY_CAPACITY`
+`warn` `info` `debug` `trace`, default `info`), `DELIVERY_DAY_CAPACITY`
 (orders that can be due on one day before booking it needs the Production
 Manager's OK, default 10 -- see "Delivery capacity"), `BUSINESS_TIMEZONE`
 (the shop's IANA timezone, default `Asia/Kolkata` -- where each day of the

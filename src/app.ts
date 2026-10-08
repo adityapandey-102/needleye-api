@@ -16,6 +16,7 @@ import { paymentsRouter } from "./modules/payments/api/payments.routes";
 import { teamMembersRouter } from "./modules/team-members/api/team-members.routes";
 import { reportsRouter } from "./modules/reports/api/reports.routes";
 import { leadsRouter } from "./modules/leads/api/leads.routes";
+import { ledgerRouter } from "./modules/ledger/api/ledger.routes";
 import { publicEnquiriesRouter } from "./modules/leads/api/public-enquiries.routes";
 import { errorHandler, notFoundHandler } from "./common/middleware/error.middleware";
 import { openApiDocument } from "./docs/openapi";
@@ -115,6 +116,7 @@ export function createApp() {
   apiV1.use("/team-members", teamMembersRouter);
   apiV1.use("/reports", reportsRouter);
   apiV1.use("/leads", leadsRouter);
+  apiV1.use("/ledger", ledgerRouter);
   app.use("/api/v1", apiV1);
 
   app.use(notFoundHandler);

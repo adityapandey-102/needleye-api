@@ -364,10 +364,12 @@ async function main() {
   check("GET /orders/stats as owner_manager -> 200", (await req("/orders/stats", {}, ownerToken)).status, 200);
   check("GET /orders/stats as master_tailor -> 200", (await req("/orders/stats", {}, masterAToken)).status, 200);
   check("GET /orders/stats as worker -> 200", (await req("/orders/stats", {}, workerToken)).status, 200);
-  check("GET /orders/revenue as owner_manager -> 200", (await req("/orders/revenue", {}, ownerToken)).status, 200);
-  check("GET /orders/revenue as accountant -> 200", (await req("/orders/revenue", {}, accountantToken)).status, 200);
-  check("GET /orders/revenue as designer -> 403", (await req("/orders/revenue", {}, designerAToken)).status, 403);
-  check("GET /orders/revenue as production_manager -> 403", (await req("/orders/revenue", {}, pmToken)).status, 403);
+  check("GET /ledger/summary as owner_manager -> 200", (await req("/ledger/summary", {}, ownerToken)).status, 200);
+  check("GET /ledger/summary as accountant -> 200", (await req("/ledger/summary", {}, accountantToken)).status, 200);
+  check("GET /ledger/months as accountant -> 200", (await req("/ledger/months", {}, accountantToken)).status, 200);
+  check("GET /ledger/months as designer -> 403", (await req("/ledger/months", {}, designerAToken)).status, 403);
+  check("GET /ledger/summary as production_manager -> 403", (await req("/ledger/summary", {}, pmToken)).status, 403);
+  check("GET /ledger/months/export as master_tailor -> 403", (await req("/ledger/months/export?from=2026-01&to=2026-02", {}, masterAToken)).status, 403);
   check(
     "GET /orders/staff-report as owner_manager -> 200",
     (await req(`/orders/staff-report?staffId=${designerA.id}&month=2026-07`, {}, ownerToken)).status,

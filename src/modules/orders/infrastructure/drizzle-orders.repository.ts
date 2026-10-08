@@ -49,7 +49,6 @@ import type {
   OrderBasicInfo,
   OrderImageInfo,
   OrderStatsRaw,
-  RevenuePeriod,
   StaffReportRaw,
   StaffWeeklyPoint,
   LedgerEventsResult,
@@ -337,46 +336,6 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
       collectedRevenue: toMoneyString(collectedRevenue),
       outstandingRevenue: toMoneyString(outstanding(totalValue, collectedRevenue)),
     };
-  }
-
-  async getMonthlyRevenue(scope: RowScope, cycleStartDay: number, range: { from: string; to: string }): Promise<RevenuePeriod[]> {
-    // Accounting period of a payment: shift paid_at back by (startDay-1) days,
-    // truncate to the month, then shift forward again -- so startDay=1 is the
-    // calendar month and startDay=7 runs 7th -> next 7th. Grouped + ordered by
-    // that computed period start (select position 1), oldest first.
-    const shift = sql`make_interval(days => ${cycleStartDay - 1})`;
-    const periodStart = sql<string>`(date_trunc('month', ${payments.paidAt} - ${shift}) + ${shift})::date`;
-
-    // Row scope (unscoped for the financial roles this endpoint is gated to) +
-    // the requested inclusive date window on paid_at.
-    const condition = and(
-      this.rowScopeCondition(scope),
-      sql`${payments.paidAt} >= ${range.from}`,
-      sql`${payments.paidAt} <= ${range.to}`,
-    );
-
-    let rows;
-    try {
-      rows = await db
-        .select({
-          periodStart,
-          collected: sql<string>`coalesce(sum(${payments.amount}), 0)`,
-          paymentCount: sql<string>`count(*)`,
-        })
-        .from(payments)
-        .innerJoin(orders, eq(orders.id, payments.orderId))
-        .where(condition)
-        .groupBy(sql`1`)
-        .orderBy(sql`1 asc`);
-    } catch (error) {
-      throw new InternalError("Failed to load revenue report", error);
-    }
-
-    return rows.map((r) => ({
-      periodStart: r.periodStart,
-      collected: toMoneyString(r.collected),
-      paymentCount: Number(r.paymentCount),
-    }));
   }
 
   async getStaffReport(staffId: string, range: { from: string; to: string }): Promise<StaffReportRaw | null> {

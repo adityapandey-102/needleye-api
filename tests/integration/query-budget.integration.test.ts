@@ -53,6 +53,7 @@ describe("query budget: no N+1, bounded pages (integration)", () => {
     ["orders search", (l) => `/api/v1/orders?search=a&limit=${l}`],
     ["users", (l) => `/api/v1/users?limit=${l}`],
     ["ledger events", (l) => `/api/v1/orders/ledger-events?from=2020-01-01&to=${today}&limit=${l}`],
+    ["revenue months", (l) => `/api/v1/ledger/months?from=2020-01&limit=${Math.min(l, 60)}`],
     ["team status", (l) => `/api/v1/reports/staff-activity?limit=${l}`],
     ["activity day", (l) => `/api/v1/reports/activity?day=${today}&limit=${l}`],
   ];

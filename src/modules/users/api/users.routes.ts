@@ -3,6 +3,8 @@ import { requireAuth } from "../../../common/middleware/auth.middleware";
 import { requireCapability } from "../../../common/middleware/capability.middleware";
 import { asyncHandler } from "../../../common/http/async-handler";
 import { validateBody } from "../../../common/http/validate.middleware";
+import { uuidParam } from "../../../common/http/uuid-param";
+import { ERROR_CODES } from "../../../common/errors/error-codes";
 import { createUserDtoSchema, type CreateUserDto } from "./dto/create-user.dto";
 import { updateUserDtoSchema, type UpdateUserDto } from "./dto/update-user.dto";
 import { UsersService } from "../application/users.service";
@@ -15,6 +17,7 @@ const usersService = new UsersService(new DrizzleUsersRepository(authProvider));
 export const usersRouter = Router();
 
 usersRouter.use(requireAuth, requireCapability("users:manage"));
+usersRouter.param("id", uuidParam(ERROR_CODES.USER_NOT_FOUND, "User"));
 
 /** Clamp to a sane page window -- same bounds as the Orders list. */
 const DEFAULT_LIMIT = 20;

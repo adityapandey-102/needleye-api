@@ -226,25 +226,16 @@ describe("Users & reports (integration)", () => {
     expect((await request(app).get("/api/v1/orders?dueOn=2026-10-08").set("Authorization", auth)).status).toBe(200);
   });
 
-  it("returns a revenue report over a year range to owner_manager but forbids a designer", async () => {
+  it("the old payday-cycle revenue report is gone -- the Revenue page reads /ledger (calendar months)", async () => {
     const token = await ownerToken();
-    const ownerRes = await request(app)
-      .get("/api/v1/orders/revenue?from=2026-01-01&to=2026-12-31")
-      .set("Authorization", `Bearer ${token}`);
-    expect(ownerRes.status).toBe(200);
-    const report = ownerRes.body as { cycleStartDay: number; from: string; to: string; periods: unknown[] };
-    expect(typeof report.cycleStartDay).toBe("number");
-    expect(report.from).toBe("2026-01-01");
-    expect(report.to).toBe("2026-12-31");
-    expect(Array.isArray(report.periods)).toBe(true);
-
-    const designer = await createFixtureUser("designer", "Broke Designer");
-    createdUserIds.push(designer.id);
-    const session = await authProvider.signInWithPassword(designer.email, designer.password);
-    const designerRes = await request(app)
-      .get("/api/v1/orders/revenue")
-      .set("Authorization", `Bearer ${session.accessToken}`);
-    expect(designerRes.status).toBe(403);
+    expect((await request(app).get("/api/v1/orders/revenue").set("Authorization", `Bearer ${token}`)).status).toBe(404);
+    // ...and like any id that isn't a UUID, "revenue" names no order: 404, never a database error (500).
+    for (const path of ["/orders/abc", "/orders/abc/history", "/orders/abc/payments", "/users/abc"]) {
+      expect((await request(app).get(`/api/v1${path}`).set("Authorization", `Bearer ${token}`)).status, path).toBe(404);
+    }
+    const months = await request(app).get("/api/v1/ledger/months?from=2026-01&to=2026-03").set("Authorization", `Bearer ${token}`);
+    expect(months.status).toBe(200);
+    expect((months.body as { months: { month: string }[] }).months.map((m) => m.month)).toEqual(["2026-03", "2026-02", "2026-01"]);
   });
 
   it("returns a per-staff report to owner_manager (correct shape + month's weeks)", async () => {

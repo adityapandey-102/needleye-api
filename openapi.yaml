@@ -36,6 +36,8 @@ tags:
     description: Customer enquiries worked by designers until they become orders (ADR 0007). The owner sees every lead; a designer only their own.
   - name: Public
     description: The public enquiry form -- the only unauthenticated write. Rate-limited, strictly validated, 8 kB body limit (ADR 0007).
+  - name: Ledger
+    description: The Revenue page's numbers -- calendar months from the daily ledger the database keeps (ADR 0008, phase 4). Owner and Accountant (reports:financial).
 
 security:
   - bearerAuth: []
@@ -686,37 +688,6 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/OrderStats" }
-        "403":
-          $ref: "#/components/responses/Forbidden"
-
-  /orders/revenue:
-    get:
-      tags: [Orders]
-      summary: Monthly collected-revenue report over a date range
-      description: |
-        Owner/Manager and Accountant only (`reports:financial`). Collected
-        revenue grouped into accounting periods over an inclusive `[from, to]`
-        window (the UI sends a whole-year span), oldest period first. Period
-        boundaries follow `ACCOUNTING_CYCLE_START_DAY` (1 = calendar months by
-        default; e.g. 7 gives 7th-to-6th cycles). Computed in Postgres from the
-        `payments` ledger. Registered before `/orders/{id}` for the same
-        reason `stats` is. Defaults to the last 12 months when the range is
-        missing/invalid.
-      parameters:
-        - name: from
-          in: query
-          description: Inclusive start date (YYYY-MM-DD). Defaults to the first of the month 11 months ago.
-          schema: { type: string, format: date }
-        - name: to
-          in: query
-          description: Inclusive end date (YYYY-MM-DD). Defaults to today.
-          schema: { type: string, format: date }
-      responses:
-        "200":
-          description: The revenue report
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/RevenueReport" }
         "403":
           $ref: "#/components/responses/Forbidden"
 
@@ -1386,6 +1357,75 @@ paths:
               schema: { $ref: "#/components/schemas/ActivityDay" }
         "400":
           description: Not a real date, not one of the last 7 days, or an unknown category
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /ledger/summary:
+    get:
+      tags: [Ledger]
+      summary: This month's four numbers
+      description: |
+        This calendar month (in the shop's timezone): total booked (orders
+        booked this month, as priced now), paid so far on those orders (on any
+        date), outstanding (total - paid so far) and cash collected (money
+        received this month, from any order). Read from `ledger_daily`, which
+        database triggers keep in step with every order and payment write.
+      responses:
+        "200":
+          description: This month's figures
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LedgerSummary" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /ledger/months:
+    get:
+      tags: [Ledger]
+      summary: Calendar months of a range, newest first, paged -- with the range's totals
+      description: |
+        Every month in `[from, to]` (YYYY-MM, 2000-01 up to this month), newest
+        first; a month with no activity reads as zeros. `total` is the number
+        of months; `totals` sums the WHOLE range (not just the page). Two
+        reads of `ledger_daily` per page. Defaults: this year so far.
+      parameters:
+        - { name: from, in: query, schema: { type: string, pattern: '^\d{4}-(0[1-9]|1[0-2])$', example: "2020-01" } }
+        - { name: to, in: query, schema: { type: string, pattern: '^\d{4}-(0[1-9]|1[0-2])$', example: "2026-10" } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 60, default: 12 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: One page of months and the range's totals
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LedgerMonthsPage" }
+        "400":
+          description: "LEDGER_MONTHS_RANGE_INVALID -- not YYYY-MM, backwards, or outside 2000-01..this month; or a limit over 60"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /ledger/months/export:
+    get:
+      tags: [Ledger]
+      summary: Every month of a range, unpaged -- the CSV / PDF export
+      description: Same figures as GET /ledger/months, for every month of the range (at most 240 months), plus the range's totals and the shop's timezone.
+      parameters:
+        - { name: from, in: query, required: true, schema: { type: string, pattern: '^\d{4}-(0[1-9]|1[0-2])$' } }
+        - { name: to, in: query, required: true, schema: { type: string, pattern: '^\d{4}-(0[1-9]|1[0-2])$' } }
+      responses:
+        "200":
+          description: The range's months and totals
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LedgerMonthsExport" }
+        "400":
+          description: LEDGER_MONTHS_RANGE_INVALID -- as for /ledger/months, or over 240 months
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2180,24 +2220,52 @@ components:
           allOf: [{ $ref: "#/components/schemas/Money" }]
           description: "Absent for master_tailor. SUM(orders.total_amount) - collectedRevenue, floored at 0."
 
-    RevenueReport:
+    LedgerFigures:
       type: object
-      description: Monthly collected-revenue report from GET /orders/revenue (reports:financial).
+      description: "A period's figures, summed from ledger_daily. Money as 2dp strings."
       properties:
-        cycleStartDay: { type: integer, minimum: 1, maximum: 28, description: "Day of month each accounting period begins (ACCOUNTING_CYCLE_START_DAY; 1 = calendar months)." }
-        from: { type: string, format: date, description: Inclusive start of the requested window (echoed from the request). }
-        to: { type: string, format: date, description: Inclusive end of the requested window (echoed from the request). }
-        periods:
-          type: array
-          description: Accounting periods, oldest first.
-          items:
-            type: object
-            properties:
-              periodStart: { type: string, format: date, description: First day of the accounting period. }
-              collected:
-                allOf: [{ $ref: "#/components/schemas/Money" }]
-                description: SUM(payments.amount) with paid_at in this period.
-              paymentCount: { type: integer, description: Number of ledger entries in this period. }
+        ordersBooked: { type: integer }
+        ordersNotPriced: { type: integer, description: "Booked orders without a price yet (not in total)." }
+        total: { allOf: [{ $ref: "#/components/schemas/Money" }], description: "Value of the orders booked in the period, as priced now." }
+        paidSoFar: { allOf: [{ $ref: "#/components/schemas/Money" }], description: "Paid so far, on any date, on those orders." }
+        outstanding: { allOf: [{ $ref: "#/components/schemas/Money" }], description: "total - paidSoFar." }
+        cashCollected: { allOf: [{ $ref: "#/components/schemas/Money" }], description: "Money received in the period, from any order." }
+        paymentsCount: { type: integer }
+
+    LedgerMonth:
+      allOf:
+        - { $ref: "#/components/schemas/LedgerFigures" }
+        - type: object
+          properties:
+            month: { type: string, example: "2026-10", description: "YYYY-MM -- always a calendar month." }
+
+    LedgerSummary:
+      type: object
+      properties:
+        month: { type: string, example: "2026-10" }
+        asOf: { type: string, format: date, description: "The shop's today." }
+        timeZone: { type: string, example: Asia/Kolkata }
+        figures: { $ref: "#/components/schemas/LedgerFigures" }
+
+    LedgerMonthsPage:
+      type: object
+      properties:
+        from: { type: string, example: "2020-01" }
+        to: { type: string, example: "2026-10" }
+        months: { type: array, items: { $ref: "#/components/schemas/LedgerMonth" } }
+        total: { type: integer, description: Months in the range. }
+        limit: { type: integer }
+        offset: { type: integer }
+        totals: { $ref: "#/components/schemas/LedgerFigures" }
+
+    LedgerMonthsExport:
+      type: object
+      properties:
+        from: { type: string }
+        to: { type: string }
+        timeZone: { type: string }
+        months: { type: array, items: { $ref: "#/components/schemas/LedgerMonth" } }
+        totals: { $ref: "#/components/schemas/LedgerFigures" }
 
     StaffReport:
       type: object

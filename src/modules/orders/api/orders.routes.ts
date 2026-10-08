@@ -6,6 +6,7 @@ import { asyncHandler } from "../../../common/http/async-handler";
 import { BadRequestError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
 import { validateBody } from "../../../common/http/validate.middleware";
+import { uuidParam } from "../../../common/http/uuid-param";
 import { createOrderDtoSchema, type CreateOrderDto } from "./dto/create-order.dto";
 import { updateOrderDtoSchema, type UpdateOrderDto } from "./dto/update-order.dto";
 import { updateOrderStatusDtoSchema, type UpdateOrderStatusDto } from "./dto/update-order-status.dto";
@@ -44,6 +45,8 @@ function parseOrdersPage(query: Request["query"]): { limit: number; offset: numb
 }
 
 ordersRouter.use(requireAuth);
+// An :id that isn't a UUID names no order -> 404 (not a database error).
+ordersRouter.param("id", uuidParam(ERROR_CODES.ORDER_NOT_FOUND, "Order"));
 
 ordersRouter.get(
   "/",
@@ -86,28 +89,6 @@ ordersRouter.get(
   }),
 );
 
-// Financial revenue report over an inclusive [from, to] date window --
-// Owner/Manager + Accountant only. Defaults to the last 12 months when the
-// range is missing/invalid; the accountant can pick any year span from the UI.
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-ordersRouter.get(
-  "/revenue",
-  requireCapability("reports:financial"),
-  asyncHandler(async (req, res) => {
-    // Defaults are the SHOP's dates (business timezone), not UTC's -- see common/time/business-date.ts.
-    const today = businessToday(new Date(), env.BUSINESS_TIMEZONE);
-    const toRaw = req.query.to;
-    const fromRaw = req.query.from;
-    const to = typeof toRaw === "string" && ISO_DATE.test(toRaw) ? toRaw : today;
-    const defaultFrom = monthStartMonthsBack(today, 11);
-    let from = typeof fromRaw === "string" && ISO_DATE.test(fromRaw) ? fromRaw : defaultFrom;
-    // Guard against an inverted range (from after to).
-    if (from > to) from = defaultFrom <= to ? defaultFrom : to;
-    const revenue = await ordersService.getRevenue({ profile: req.profile!, authUserId: req.authUserId! }, { from, to });
-    res.json(revenue);
-  }),
-);
-
 // Per-staff workload report -- Owner/Manager only. Registered before "/:id"
 // so "staff-report" isn't matched as an order id. `staffId` is required; the
 // weekly breakdown covers `month` (YYYY-MM), defaulting to the current month
@@ -131,6 +112,7 @@ ordersRouter.get(
 // "/:id" so "ledger-events" isn't matched as an order id. Defaults to the last
 // 12 months; paginated (the revenue page's year/month/week filters map to a
 // [from, to] here and page through the results).
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 ordersRouter.get(
   "/ledger-events",
   requireCapability("reports:financial"),

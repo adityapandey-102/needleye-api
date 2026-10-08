@@ -3,6 +3,8 @@ import { requireAuth } from "../../../common/middleware/auth.middleware";
 import { requireCapability } from "../../../common/middleware/capability.middleware";
 import { asyncHandler } from "../../../common/http/async-handler";
 import { validateBody } from "../../../common/http/validate.middleware";
+import { requireUuidParam, uuidParam } from "../../../common/http/uuid-param";
+import { ERROR_CODES } from "../../../common/errors/error-codes";
 import { createPaymentDtoSchema, type CreatePaymentDto } from "./dto/create-payment.dto";
 import { updatePaymentDtoSchema, type UpdatePaymentDto } from "./dto/update-payment.dto";
 import { PaymentsService } from "../application/payments.service";
@@ -17,7 +19,8 @@ const paymentsService = new PaymentsService(new DrizzlePaymentsRepository());
  */
 export const paymentsRouter = Router({ mergeParams: true });
 
-paymentsRouter.use(requireAuth);
+paymentsRouter.use(requireAuth, requireUuidParam("orderId", ERROR_CODES.ORDER_NOT_FOUND, "Order"));
+paymentsRouter.param("paymentId", uuidParam(ERROR_CODES.PAYMENT_NOT_FOUND, "Payment"));
 
 paymentsRouter.get(
   "/",

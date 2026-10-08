@@ -38,7 +38,6 @@ const envSchema = z.object({
    */
   TRUST_PROXY: z.string().default("loopback"),
   /** Day-of-month the monthly accounting/revenue cycle starts (1 = calendar month; e.g. 7 = 7th → next 7th). */
-  ACCOUNTING_CYCLE_START_DAY: z.coerce.number().int().min(1).max(28).default(1),
   /**
    * How many orders may share one delivery (due) date before the day counts as
    * full. Booking onto a full day needs the creator's explicit "confirmed with

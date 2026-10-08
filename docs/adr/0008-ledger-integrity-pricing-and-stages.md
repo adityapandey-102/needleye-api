@@ -12,7 +12,7 @@ Production rollout happens only when the owner asks (see "Rollout").
 | 1 | Marking and Ready stages; Alteration <-> Ready loop; Delivered only from Ready; dashboard cards | built |
 | 2 | Pricing and payment rules (orders without a price, raise / discount, locks) + price history | built |
 | 3 | Separate payment and order audit logs, daily-activity categories | built |
-| 4 | Ledger daily totals, calendar months, Revenue page cards + paged month table + export | planned |
+| 4 | Ledger daily totals, calendar months, Revenue page cards + paged month table + export | built |
 | 5 | Nightly reconciliation, closing the books | planned |
 
 ## Context
@@ -220,6 +220,35 @@ can't silently change. A review of the current code found:
    (e.g. January 2020 to now) with range totals calculated by the API, and
    **CSV and PDF export** of the chosen range. It replaces the unpaged *Monthly
    Revenue History* table.
+
+### How phase 4 is built
+
+- **Days, not months, in the table.** `ledger_daily` holds one row per shop day
+  (booking_date and paid_at are shop days already); months are sums of days,
+  so any range is a primary-key range read -- the speed audit measures a
+  240-month export at about 5 ms over 3 years of synthetic data.
+- **Booked by `booking_date`**, the order's business date (editable). Moving it
+  moves the order -- its value and what's been paid on it -- to the new day.
+  Pricing an order later raises its booking month's total then: Total is "the
+  orders booked that month, as priced now".
+- **Kept by the database, not the app.** Triggers on orders and payments apply
+  each change as a delta in the change's own transaction, locking the touched
+  days in date order. They are `SECURITY DEFINER` with no app write grant, so
+  totals move only through orders and payments, and `ENABLE ALWAYS` so even a
+  replica-mode session (the test cleanup) can't make them drift. An upsert is
+  not used: Postgres checks the table's "never negative" constraints against
+  the proposed (delta) row of an upsert, so missing days are created as zeros
+  and the deltas applied as an update -- the checks then judge the totals.
+- **No drift from the backfill:** the migration creates the triggers first
+  (which locks orders and payments against writes until commit) and then
+  backfills, in one transaction.
+- **API:** a new `ledger` module -- `GET /ledger/summary`, `GET /ledger/months`
+  (newest first, default 12 a page, max 60, zero-filled, with the whole range's
+  totals), `GET /ledger/months/export` (at most 240 months). The old
+  `GET /orders/revenue` and `ACCOUNTING_CYCLE_START_DAY` are removed.
+- Found on the way: an order / payment / user id that isn't a UUID answered
+  **500** (Postgres refused the uuid cast). Those routes now check the id first
+  and answer 404.
 
 ## Decisions -- verification and closing the books (phase 5)
 

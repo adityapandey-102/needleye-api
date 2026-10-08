@@ -162,16 +162,6 @@ export interface OrderStatsRaw {
   outstandingRevenue: string;
 }
 
-/** One accounting period's collected revenue, for the monthly revenue report. */
-export interface RevenuePeriod {
-  /** First day of the accounting period (YYYY-MM-DD). */
-  periodStart: string;
-  /** SUM(payments.amount) with paid_at inside this period. Money as a 2dp string. */
-  collected: string;
-  /** Number of payment entries recorded in this period. */
-  paymentCount: number;
-}
-
 /**
  * A designer/master-tailor's workload snapshot for the staff report. The
  * "this week" throughput fields (bookedThisWeek/completedThisWeek) are
@@ -239,8 +229,6 @@ export interface OrdersRepositoryPort {
   /** Loads an order ignoring row scope -- backs the authenticated view-only path (any logged-in user can read a single order, payments stripped by the presenter). */
   findAnyById(id: string): Promise<OrderEntity | null>;
   getStats(scope: RowScope): Promise<OrderStatsRaw>;
-  /** Collected revenue grouped into accounting periods (most recent first), for the revenue report. */
-  getMonthlyRevenue(scope: RowScope, cycleStartDay: number, range: { from: string; to: string }): Promise<RevenuePeriod[]>;
   /**
    * Per-staff workload report (Owner/Manager only). Returns null if the id
    * isn't an active designer/master_tailor. Computes the current-state counts +
