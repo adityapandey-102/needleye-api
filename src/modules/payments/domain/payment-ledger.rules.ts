@@ -60,3 +60,29 @@ export function assertPaidAtNotFuture(paidAt: string, shopToday: string): void {
     throw new BadRequestError("A payment can't be dated in the future.", ERROR_CODES.PAYMENT_DATE_INVALID);
   }
 }
+
+/** The months a payment change touches -- its date before (edit, remove) and after (record, edit) -- each once, in order. */
+export function paymentMonths(...days: (string | null | undefined)[]): string[] {
+  return [...new Set(days.filter((d): d is string => Boolean(d)).map((d) => d.slice(0, 7)))].sort();
+}
+
+/** "2026-09" -> "September 2026". */
+function monthName(month: string): string {
+  const [y, m] = month.split("-").map(Number);
+  return new Date(Date.UTC(y!, m! - 1, 1)).toLocaleString("en-IN", { month: "long", year: "numeric", timeZone: "UTC" });
+}
+
+/**
+ * No payment dated in a month whose books are closed can be added, edited or
+ * removed (ADR 0008 phase 5) -- the month's cash stays what was reported. The
+ * Owner can reopen the month.
+ */
+export function assertMonthOpen(month: string, isClosed: boolean): void {
+  if (isClosed) {
+    throw new ConflictError(
+      `The books for ${monthName(month)} are closed -- payments dated in it can't be added, changed or removed. The Owner can reopen the month.`,
+      ERROR_CODES.PAYMENT_MONTH_CLOSED,
+      { month },
+    );
+  }
+}

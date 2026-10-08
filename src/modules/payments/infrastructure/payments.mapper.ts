@@ -18,6 +18,7 @@ export type PaymentRow = {
   notes: string | null;
   createdAt: Date;
   recorderFullName: string | null;
+  monthClosed: boolean;
 };
 
 export class PaymentsMapper {
@@ -32,6 +33,7 @@ export class PaymentsMapper {
       recordedByName: row.recorderFullName ?? undefined,
       notes: row.notes,
       createdAt: row.createdAt.toISOString(),
+      monthClosed: row.monthClosed,
     };
   }
 }

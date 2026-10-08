@@ -21,6 +21,9 @@ export const CAPABILITIES = [
   "payments:correct", // edit or delete a recorded payment (before delivery only)
   "payments:read",
   "reports:financial",
+  // Closing the books (ADR 0008 phase 5): close = owner + accountant; reopen = owner only.
+  "ledger:close",
+  "ledger:reopen",
   "reports:staff",
   "users:manage",
   // Leads: read = see leads (designer: only their own); manage = add, assign, discard, any stage (owner).
@@ -178,6 +181,22 @@ export const CAPABILITY_MATRIX: Record<Capability, Record<Role, CapabilityScope>
     designer: false,
     master_tailor: false,
     accountant: true,
+    production_manager: false,
+    worker: false,
+  },
+  "ledger:close": {
+    owner_manager: true,
+    designer: false,
+    master_tailor: false,
+    accountant: true,
+    production_manager: false,
+    worker: false,
+  },
+  "ledger:reopen": {
+    owner_manager: true,
+    designer: false,
+    master_tailor: false,
+    accountant: false,
     production_manager: false,
     worker: false,
   },

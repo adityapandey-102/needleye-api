@@ -82,6 +82,22 @@ replay of history. So for the initial cutover:
 > `select sum(total_amount) from orders` and `select sum(amount) from payments`
 > -- they must match. The API before this one serves the old `/orders/revenue`;
 > the new web needs the new API.
+>
+> **`20261012000001_close_books_and_reconciliation.sql` (ADR 0008, phase 5)** --
+> closing the books, the payments guard for closed months, the check, and the
+> nightly job. It enables **pg_cron** (`create extension if not exists pg_cron`;
+> hosted Supabase ships it -- if the push fails on it, enable pg_cron under
+> Database -> Extensions and push again) and schedules
+> `needleye-ledger-reconcile` at `30 20 * * *` UTC = 02:00 IST. It also revokes
+> the default PUBLIC EXECUTE on the ledger functions (including phase 4's
+> `ledger_apply`, which writes the register), so push it in the **same** run as
+> `20261011000001`. No month is closed by the migration; nothing changes for
+> the running app until someone closes a month. Afterwards:
+> - `select jobname, schedule from cron.job` shows the job;
+> - `select has_function_privilege('anon', 'public.ledger_apply(jsonb)', 'execute')` is `false`;
+> - on the Revenue page, **Verify now** says "Books verified" (if not, stop and
+>   look at the details before anyone closes a month);
+> - the next morning, the books bar says it was checked "(nightly)".
 
 ### 1a. Least-privilege runtime database role (recommended)
 

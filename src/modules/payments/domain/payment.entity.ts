@@ -17,6 +17,8 @@ export interface PaymentEntity {
   recordedByName?: string;
   notes: string | null;
   createdAt: string;
+  /** Dated in a month whose books are closed: it can't be edited or removed (ADR 0008 phase 5). */
+  monthClosed: boolean;
 }
 
 /**

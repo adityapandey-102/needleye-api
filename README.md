@@ -267,11 +267,13 @@ src/
       infrastructure/
         drizzle-team-members.repository.ts     # implements the port; reads `profiles` from modules/users/infrastructure/profile.schema.ts (see ADR 0003) -- no mapper file, the select already projects directly into entity shape
     reports/                         # owner-only (reports:staff) team view: Working/Idle + the 7-day activity feed in 5 categories -- read-only
-    ledger/                          # the Revenue page's numbers (reports:financial): ledger_daily, kept by DB triggers (ADR 0008 phase 4) -- read-only
-      api/ledger.routes.ts               # GET /ledger/summary, /ledger/months (paged + range totals), /ledger/months/export (<= 240 months)
-      application/ledger.service.ts      # this month in the shop's timezone; months newest first, zero-filled; outstanding derived
+    ledger/                          # the Revenue page's numbers (reports:financial): ledger_daily, kept by DB triggers (ADR 0008 phase 4); closing the books + the check (phase 5)
+      api/ledger.routes.ts               # GET /ledger/summary, /ledger/months (paged + range totals + books), /ledger/months/export (<= 240 months); GET /ledger/months/:month/closings, POST .../close (ledger:close), POST .../reopen (ledger:reopen); GET /ledger/reconciliations/latest, POST /ledger/reconciliations (Verify now)
+      application/ledger.service.ts      # this month in the shop's timezone; months newest first, zero-filled; outstanding derived; close / reopen / check
       domain/ledger-month.rules.ts       # calendar-month maths, range rules (2000-01 .. this month), export cap
-      infrastructure/drizzle-ledger.repository.ts  # sums over ledger_daily (primary-key range scans)
+      domain/ledger-closing.rules.ts     # only a finished month closes; close needs open, reopen needs closed (checked under the lock); reopen reason 3-500
+      domain/reconciliation.rules.ts     # nightly overdue after 26 h; one check at a time
+      infrastructure/drizzle-ledger.repository.ts  # sums over ledger_daily (primary-key range scans); closings appended under the month's exclusive lock; the check = ledger_reconcile()
       api/
         reports.routes.ts                # controller -- composition root: new ReportsService(new DrizzleReportsRepository(), { timeZone: env.BUSINESS_TIMEZONE })
         dto/reports.dto.ts                 # activity query schema (real date, page <= 100) + response shapes
@@ -999,6 +1001,37 @@ purpose: a payment in April for a March order is April's cash and March's
 "paid so far". The old payday-cycle report (`GET /orders/revenue`,
 `ACCOUNTING_CYCLE_START_DAY`) is gone -- always calendar months.
 
+### Closing the books and the nightly check (ADR 0008, phase 5)
+
+**Closing.** The Owner or Accountant closes a month that has ended
+(`POST /ledger/months/:month/close`, capability `ledger:close`); only the Owner
+reopens it, with a reason (`POST /ledger/months/:month/reopen`, `ledger:reopen`).
+Each close stores the month's figures at that moment in
+`ledger_month_closings` (append-only; every close and reopen is kept with who
+and when) -- the closing record. While a month is closed, no payment dated in
+it can be added, edited or removed: the payments repository answers **409
+`PAYMENT_MONTH_CLOSED`**, and the database trigger `payments_closed_month_guard`
+refuses it too. Closing freezes the month's cash collected, not its Outstanding:
+its orders can still be discounted or paid in an open month. A close and a
+payment can't cross: both take the month's advisory lock (4203; exclusive to
+close, shared to pay -- `src/common/database/ledger-month-lock.ts`), so a close
+waits for payments in flight and counts them, and a payment waiting on a close
+is then refused. Each month in `/ledger/months` carries its `books`
+(open / closed, ended, closed by and when); each payment carries `monthClosed`.
+
+**The check.** `ledger_reconcile()` recounts every day from the raw orders and
+payments and compares with `ledger_daily`; counts orders paid past their total
+and orders whose payment status doesn't match their payments; and confirms
+every closed month still holds the cash it was closed with. It only reads,
+apart from its result row in `ledger_reconciliations`. **pg_cron** runs it every
+night at 02:00 IST (job `needleye-ledger-reconcile`, `30 20 * * *` UTC) --
+inside the database, no separate server. "Verify now" on the Revenue page
+(`POST /ledger/reconciliations`) runs the same check; one at a time (409
+`LEDGER_CHECK_RUNNING`). `GET /ledger/reconciliations/latest` returns the
+latest result and flags the nightly job as overdue after 26 hours. The ledger
+functions aren't callable by Supabase's `anon` / `authenticated` roles: the
+migration revokes the default PUBLIC EXECUTE.
+
 `GET /orders/ledger-events?from=&to=&limit=&offset=` (`getLedgerEvents`,
 `reports:financial` only) is the **payment audit trail** behind the revenue
 page's "Ledger Activity" section: every payment recorded / edited / removed in
@@ -1313,7 +1346,7 @@ sequenceDiagram
     API-->>FE: 204
 ```
 
-### Record a payment (status derived + synced from the ledger)
+### Record a payment (one locked transaction; status derived from the payments)
 
 ```mermaid
 sequenceDiagram
@@ -1321,23 +1354,56 @@ sequenceDiagram
     participant PayAPI as api/payments.routes.ts
     participant PaySvc as PaymentsService
     participant PayRepo as DrizzlePaymentsRepository
+    participant DB as Postgres (transaction)
 
-    User->>PayAPI: POST /orders/:orderId/payments { amount, method, nextPaymentDate? }
+    User->>PayAPI: POST /orders/:orderId/payments { amount, method, paidAt?, nextPaymentDate? }
     PayAPI->>PaySvc: addPayment(ctx, orderId, dto)
     PaySvc->>PayRepo: findOrderContext(orderId)
-    PayRepo-->>PaySvc: { designerId, totalAmount }
     alt scope is "assigned" and caller isn't the order's designer
-        PaySvc-->>PayAPI: throws ForbiddenError
+        PaySvc-->>PayAPI: throws ForbiddenError (403)
     else access ok
-        PaySvc->>PayRepo: sumByOrderId(orderId)
-        PaySvc->>PaySvc: assertDoesNotExceedTotal(sum + amount, totalAmount)
-        Note over PaySvc: 400 PAYMENT_EXCEEDS_TOTAL if the new sum would overpay
-        PaySvc->>PayRepo: create(record)
-        PaySvc->>PaySvc: derivePaymentStatus(sum + amount, totalAmount)
-        PaySvc->>PayRepo: updateOrderLedgerState(orderId, { paymentStatus, nextPaymentDate })
-        Note over PayRepo: cross-module Infra->Infra write into the Orders-owned<br/>orders table (ADR 0003). Status: unpaid -> advance_paid -> fully_paid;<br/>next date cleared once fully paid, else set to the supplied date
+        PaySvc->>PaySvc: assertPaidAtNotFuture(paidAt, shop's today)
+        PaySvc->>PayRepo: recordPayment(record, nextPaymentDate)
+        PayRepo->>DB: BEGIN#59; SELECT total_amount, production_status FROM orders WHERE id = :id FOR UPDATE
+        Note over PayRepo: 409 PAYMENT_ORDER_NOT_PRICED if the order has no price (ADR 0008)
+        PayRepo->>DB: pg_advisory_xact_lock_shared(4203, month of paidAt)#59; then ledger_month_closed(paidAt)
+        Note over PayRepo: 409 PAYMENT_MONTH_CLOSED if that month's books are closed (phase 5)
+        PayRepo->>DB: SELECT sum(amount) FROM payments WHERE order_id = :id
+        Note over PayRepo: 400 PAYMENT_EXCEEDS_TOTAL if the new sum would overpay
+        PayRepo->>DB: INSERT INTO payments ... #59; INSERT INTO payment_audit_log ...
+        Note over DB: triggers: payments_closed_month_guard + payments_guard re-check#59;<br/>payments_ledger adds the cash to ledger_daily
+        PayRepo->>DB: UPDATE orders SET payment_status (derived), next_payment_date#59; COMMIT
         PayAPI-->>User: 201 { payment }
     end
+```
+
+### Close a month's books, and the nightly check (ADR 0008, phase 5)
+
+```mermaid
+sequenceDiagram
+    participant User as needleye-web (owner_manager / accountant)
+    participant API as api/ledger.routes.ts
+    participant Svc as LedgerService
+    participant Repo as DrizzleLedgerRepository
+    participant DB as Postgres
+    participant Cron as pg_cron (02:00 IST)
+
+    User->>API: POST /ledger/months/2026-09/close
+    API->>Svc: closeMonth("2026-09", userId)
+    Svc->>Svc: assertClosable -- 409 LEDGER_MONTH_NOT_FINISHED for this month or later
+    Svc->>Repo: closeMonth(month, userId, guard)
+    Repo->>DB: BEGIN#59; pg_advisory_xact_lock(4203, month) -- waits for payments in flight in the month
+    Repo->>DB: ledger_month_closed(month) -- guard: 409 LEDGER_MONTH_ALREADY_CLOSED
+    Repo->>DB: SELECT sums FROM ledger_daily for the month (includes the payments it waited for)
+    Repo->>DB: INSERT INTO ledger_month_closings (closed, figures, actor, request id)#59; COMMIT
+    API-->>User: 201 { closing }
+    Note over DB: from now on any payment change dated in September -- API or SQL -- is refused<br/>until the Owner reopens it (POST .../reopen with a reason)
+
+    Cron->>DB: select ledger_reconcile('nightly')
+    Note over DB: recount every day from orders + payments vs ledger_daily#59;<br/>overpaid orders#59; payment statuses#59; closed months vs their closing record
+    DB->>DB: INSERT INTO ledger_reconciliations (verified / problems)
+    User->>API: GET /ledger/reconciliations/latest (or POST /ledger/reconciliations = Verify now)
+    API-->>User: { latest, lastNightlyAt, nightlyOverdue }
 ```
 
 ### Change an order's status (Kanban drag or detail-page action)
@@ -1359,14 +1425,14 @@ sequenceDiagram
         Rules-->>Svc: throws ForbiddenError (403)
     else allowed
         Svc->>Repo: updateStatus(id, status, callerId)
-        Repo->>DB: BEGIN; SELECT production_status FROM orders WHERE id = :id FOR UPDATE
+        Repo->>DB: BEGIN#59; SELECT production_status FROM orders WHERE id = :id FOR UPDATE
         DB-->>Repo: current stage (row locked)
-        alt stageIndex(status) <= stageIndex(current)  (revert, re-apply, or lost race)
-            Repo-->>Svc: throws ConflictError (409 ORDER_STATUS_NOT_FORWARD)
-        else forward move
+        alt not forward (except Ready -> Alteration), or Delivered not from Ready (ADR 0008)
+            Repo-->>Svc: throws ConflictError (409 ORDER_STATUS_NOT_FORWARD / ORDER_DELIVER_REQUIRES_READY)
+        else allowed move
             Repo->>DB: UPDATE orders SET production_status, updated_by
             Repo->>DB: INSERT INTO order_status_history (status, label, changed_by)
-            Note over Repo,DB: one transaction + row lock -- forward-only, race-safe, no duplicate history
+            Note over Repo,DB: one transaction + row lock -- race-safe, no duplicate history
             DB-->>Repo: committed
             Repo-->>Svc: OrderEntity
             Svc-->>API: OrderResponseDto
@@ -1392,7 +1458,7 @@ sequenceDiagram
     User->>API: POST /orders { dueDate: D, ..., confirmedWithProductionManager? }
     API->>Svc: createOrder(ctx, body)  (flag stripped from the order fields)
     Svc->>Repo: create(data, guard)
-    Repo->>DB: BEGIN; pg_advisory_xact_lock(4201, hashtext(D))
+    Repo->>DB: BEGIN#59; pg_advisory_xact_lock(4201, hashtext(D))
     Repo->>DB: SELECT count(*) FROM orders WHERE due_date = D
     DB-->>Repo: booked
     Repo->>Rules: guard({ booked, previousDueDate: null })
@@ -1405,7 +1471,7 @@ sequenceDiagram
         Repo->>DB: COMMIT (lock released) -- the order and its log row together
         Svc-->>User: 201 { order }
     end
-    Note over Repo,DB: PATCH /orders/:id is the same, plus SELECT due_date FOR UPDATE first; unchanged date = no check
+    Note over Repo,DB: PATCH /orders/:id is the same, plus SELECT due_date FOR UPDATE first#59; unchanged date = no check
 ```
 
 ### Owner reports (team status + lazily loaded daily activity)
@@ -1429,11 +1495,11 @@ sequenceDiagram
     API-->>Owner: 200 { windows, staff[] }
 
     Owner->>API: GET /reports/activity-days
-    API-->>Owner: 200 { timeZone, today, days[7] }  (no DB; days are closed in the UI)
+    API-->>Owner: 200 { timeZone, today, days[7] }  (no DB#59; days are closed in the UI)
     Owner->>API: GET /reports/activity?day=D&category=C  (when day D is opened, and when tab C is chosen)
     Svc->>Rules: assertActivityDay(D, today in BUSINESS_TIMEZONE) -- else 400
     Svc->>Repo: getActivityDay(D, tz, C, limit, offset) + getActivityCounts(D, tz)
-    Repo->>DB: C's own log where created_at in [D 00:00, D+1 00:00) shop time; one count per log
+    Repo->>DB: C's own log where created_at in [D 00:00, D+1 00:00) shop time#59; one count per log
     API-->>Owner: 200 { category, counts, events, total }  ("Show more" asks for the next offset)
 ```
 
@@ -1454,12 +1520,12 @@ sequenceDiagram
     C->>P: POST /public/enquiries { name, phone, requirement, formToken, website }
     P->>P: 8 kB body limit, 5/IP/h + 200/h, strict schema (else 413 / 429 / 400)
     P->>Svc: submitPublicEnquiry
-    Svc->>Svc: honeypot / too fast -> "received", nothing stored; bad token -> 400; Turnstile if on
+    Svc->>Svc: honeypot / too fast -> "received", nothing stored#59; bad token -> 400#59; Turnstile if on
     Svc->>Repo: submitEnquiry(normalised fields)
-    Repo->>DB: advisory lock(phone); latest lead for phone FOR UPDATE; create | merge (urgent) | limit
+    Repo->>DB: advisory lock(phone)#59; latest lead for phone FOR UPDATE#59; create | merge (urgent) | limit
     P-->>C: 201 received / 200 already_received (fixed wording, no data)
 
-    O->>Svc: PATCH /leads/:id/assign (owner) -> Assigned; designer badge +1
+    O->>Svc: PATCH /leads/:id/assign (owner) -> Assigned#59; designer badge +1
     O->>Svc: PATCH /leads/:id/status { unattended } (designer "Received") -> badge -1
     O->>Svc: POST /leads/:id/comments ... PATCH status attended / follow_up
     O->>Ord: POST /orders { ...order, leadId } (from "Converted" -> Create order)

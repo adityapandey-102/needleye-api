@@ -8,6 +8,7 @@ import { profiles } from "../../users/infrastructure/profile.schema";
 import { payments } from "./payments.schema";
 import { paymentAuditLog, type PaymentAuditAction } from "./payment-audit-log.schema";
 import { getRequestContext } from "../../../common/context/request-context";
+import { LEDGER_MONTH_LOCK_NAMESPACE } from "../../../common/database/ledger-month-lock";
 import { AppError, InternalError, NotFoundError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
 import { addMoney, subtractMoney, toMoneyString } from "../../../common/money/money";
@@ -16,9 +17,11 @@ import { addMoney, subtractMoney, toMoneyString } from "../../../common/money/mo
 // write, so they can't be raced. Mirrors OrdersRepository.updateStatus.
 import {
   assertDoesNotExceedTotal,
+  assertMonthOpen,
   assertOrderPriced,
   assertPaymentsCorrectable,
   derivePaymentStatus,
+  paymentMonths,
 } from "../domain/payment-ledger.rules";
 import { PaymentsMapper, type PaymentRow } from "./payments.mapper";
 import type { PaymentEntity, OrderLedgerContext } from "../domain/payment.entity";
@@ -76,6 +79,22 @@ async function loadPaymentValues(tx: TxLike, orderId: string, paymentId: string)
   return row ? { amount: toMoneyString(row.amount), method: row.method, paidAt: row.paidAt, notes: row.notes } : null;
 }
 
+/**
+ * Refuses the change if any month it touches is closed (ADR 0008 phase 5) --
+ * checked under that month's SHARED lock, in month order; closing a month takes
+ * it exclusively. The database guard (payments_closed_month_guard) takes the
+ * same lock and re-checks -- a backstop for writes that don't come through here.
+ */
+async function assertMonthsOpen(tx: TxLike, ...days: (string | null | undefined)[]): Promise<void> {
+  for (const month of paymentMonths(...days)) {
+    const day = `${month}-01`;
+    await tx.execute(sql`select pg_advisory_xact_lock_shared(${LEDGER_MONTH_LOCK_NAMESPACE}::int, public.ledger_month_key(${day}::date))`);
+    // A separate statement, so it sees a close that committed while we waited for the lock.
+    const res = await tx.execute<{ closed: boolean }>(sql`select public.ledger_month_closed(${day}::date) as closed`);
+    assertMonthOpen(month, res.rows[0]?.closed === true);
+  }
+}
+
 const PAYMENT_ROW_SELECT = {
   id: payments.id,
   orderId: payments.orderId,
@@ -86,6 +105,9 @@ const PAYMENT_ROW_SELECT = {
   notes: payments.notes,
   createdAt: payments.createdAt,
   recorderFullName: profiles.fullName,
+  // One index lookup per payment of one order -- the same definition of
+  // "closed" the database guard uses.
+  monthClosed: sql<boolean>`public.ledger_month_closed(${payments.paidAt})`,
 };
 
 /**
@@ -211,6 +233,7 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
         // raced into an overpaid ledger.
         const { total } = await this.lockOrder(tx, record.orderId);
         assertOrderPriced(total); // 409 PAYMENT_ORDER_NOT_PRICED -- price first (ADR 0008)
+        await assertMonthsOpen(tx, record.paidAt); // 409 PAYMENT_MONTH_CLOSED (phase 5)
         const newSum = addMoney(await this.sumInTx(tx, record.orderId), record.amount);
         assertDoesNotExceedTotal(newSum, total); // 400 PAYMENT_EXCEEDS_TOTAL
 
@@ -264,6 +287,7 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
         assertOrderPriced(total); // a recorded payment implies a price; belt and braces
         const existing = await loadPaymentValues(tx, orderId, paymentId);
         if (!existing) return false;
+        await assertMonthsOpen(tx, existing.paidAt, data.paidAt); // neither the old nor the new month may be closed
 
         const patch: Partial<typeof payments.$inferInsert> = {};
         if (data.amount !== undefined) patch.amount = toMoneyString(data.amount);
@@ -313,6 +337,7 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
         assertPaymentsCorrectable(productionStatus); // 409 once delivered (ADR 0008)
         const existing = await loadPaymentValues(tx, orderId, paymentId);
         if (!existing) return false;
+        await assertMonthsOpen(tx, existing.paidAt);
 
         await tx.delete(payments).where(eq(payments.id, paymentId));
         // The removed payment's values are kept in the log (the row itself is gone).

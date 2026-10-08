@@ -37,7 +37,7 @@ tags:
   - name: Public
     description: The public enquiry form -- the only unauthenticated write. Rate-limited, strictly validated, 8 kB body limit (ADR 0007).
   - name: Ledger
-    description: The Revenue page's numbers -- calendar months from the daily ledger the database keeps (ADR 0008, phase 4). Owner and Accountant (reports:financial).
+    description: The Revenue page's numbers -- calendar months from the daily ledger the database keeps (ADR 0008, phase 4) -- plus closing the books and the check that the register matches the receipts (phase 5). Owner and Accountant (reports:financial).
 
 security:
   - bearerAuth: []
@@ -1174,7 +1174,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: PAYMENT_ORDER_NOT_PRICED -- set the order total first
+          description: "PAYMENT_ORDER_NOT_PRICED -- set the order total first; PAYMENT_MONTH_CLOSED -- paidAt is in a month whose books are closed"
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1209,7 +1209,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: PAYMENT_LOCKED_AFTER_DELIVERY -- the order is delivered
+          description: "PAYMENT_LOCKED_AFTER_DELIVERY -- the order is delivered; PAYMENT_MONTH_CLOSED -- the payment's month, or the month it would move to, is closed"
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1217,7 +1217,7 @@ paths:
     delete:
       tags: [Payments]
       summary: Remove a payment entry
-      description: Gated by `payments:correct` -- owner and accountant only. Refused with 409 `PAYMENT_LOCKED_AFTER_DELIVERY` once the order is delivered (ADR 0008). Re-derives the order's payment status.
+      description: Gated by `payments:correct` -- owner and accountant only. Refused with 409 `PAYMENT_LOCKED_AFTER_DELIVERY` once the order is delivered, or `PAYMENT_MONTH_CLOSED` when the payment is dated in a closed month (ADR 0008). Re-derives the order's payment status.
       parameters:
         - $ref: "#/components/parameters/OrderIdPath"
         - $ref: "#/components/parameters/PaymentId"
@@ -1228,7 +1228,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: Would leave a fully_paid order's ledger not matching its total_amount
+          description: "PAYMENT_LOCKED_AFTER_DELIVERY -- the order is delivered; PAYMENT_MONTH_CLOSED -- the payment is dated in a closed month"
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1431,6 +1431,139 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  /ledger/months/{month}/closings:
+    get:
+      tags: [Ledger]
+      summary: A month's books -- its figures now, and every close and reopen
+      description: |
+        The latest close's `figures` are the month's closing record; compare
+        them with `figuresNow`. Total, paid so far and outstanding follow the
+        month's orders and can change after closing; cash collected and the
+        payment count can't (ADR 0008 phase 5).
+      parameters:
+        - { name: month, in: path, required: true, schema: { type: string, pattern: '^\d{4}-(0[1-9]|1[0-2])$', example: "2026-09" } }
+      responses:
+        "200":
+          description: The month's books
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LedgerMonthClosings" }
+        "400":
+          description: LEDGER_MONTHS_RANGE_INVALID -- not YYYY-MM
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /ledger/months/{month}/close:
+    post:
+      tags: [Ledger]
+      summary: Close a finished month's books
+      description: |
+        `ledger:close` -- Owner and Accountant. Stores the month's figures as
+        they are now (the closing record). From then on no payment dated in the
+        month can be added, edited or removed -- by the API (409
+        `PAYMENT_MONTH_CLOSED`) or directly in the database. Takes the month's
+        lock exclusively, so it waits for payment changes already in flight in
+        the month and counts them.
+      parameters:
+        - { name: month, in: path, required: true, schema: { type: string, pattern: '^\d{4}-(0[1-9]|1[0-2])$', example: "2026-09" } }
+      responses:
+        "201":
+          description: Closed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { closing: { $ref: "#/components/schemas/LedgerClosing" } }
+        "400":
+          description: LEDGER_MONTHS_RANGE_INVALID -- not YYYY-MM
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: "LEDGER_MONTH_NOT_FINISHED -- this month or later; LEDGER_MONTH_ALREADY_CLOSED"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /ledger/months/{month}/reopen:
+    post:
+      tags: [Ledger]
+      summary: Reopen a closed month, with a reason
+      description: "`ledger:reopen` -- Owner only. The reason (3-500 characters) is kept with the reopen; the closing record stays."
+      parameters:
+        - { name: month, in: path, required: true, schema: { type: string, pattern: '^\d{4}-(0[1-9]|1[0-2])$', example: "2026-09" } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 3, maxLength: 500, example: "A cash payment was entered with the wrong date" }
+      responses:
+        "201":
+          description: Reopened
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { closing: { $ref: "#/components/schemas/LedgerClosing" } }
+        "400":
+          description: "LEDGER_REOPEN_REASON_REQUIRED; LEDGER_MONTHS_RANGE_INVALID -- not YYYY-MM"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: LEDGER_MONTH_NOT_CLOSED
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /ledger/reconciliations/latest:
+    get:
+      tags: [Ledger]
+      summary: The latest check of the register, and whether the nightly one is on schedule
+      description: |
+        The check recounts every day from the raw orders and payments and
+        compares with the register, counts overpaid orders and wrong payment
+        statuses, and confirms every closed month still holds the cash it was
+        closed with. It runs every night at 02:00 IST (pg_cron) and on demand.
+      responses:
+        "200":
+          description: The latest check
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LedgerVerification" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /ledger/reconciliations:
+    post:
+      tags: [Ledger]
+      summary: Verify now -- run the check
+      description: The same check the nightly job runs. It only reads, apart from its own result row. One check at a time.
+      responses:
+        "201":
+          description: The check that just ran
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LedgerVerification" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: LEDGER_CHECK_RUNNING -- another check is running; try again in a moment
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /leads:
     get:
@@ -2081,6 +2214,7 @@ components:
         recordedByName: { type: string }
         notes: { type: string, nullable: true }
         createdAt: { type: string, format: date-time }
+        monthClosed: { type: boolean, description: "Dated in a month whose books are closed -- it can't be edited or removed (ADR 0008 phase 5)." }
 
     CreatePaymentRequest:
       type: object
@@ -2238,6 +2372,95 @@ components:
         - type: object
           properties:
             month: { type: string, example: "2026-10", description: "YYYY-MM -- always a calendar month." }
+            books: { $ref: "#/components/schemas/LedgerMonthBooks" }
+
+    LedgerMonthBooks:
+      type: object
+      description: "A month's books (ADR 0008 phase 5): closed when its latest close/reopen was a close."
+      properties:
+        status: { type: string, enum: [open, closed], description: "closed: no payment dated in the month can be added, edited or removed." }
+        ended: { type: boolean, description: "The month has ended, so it can be closed (this month never has)." }
+        closedAt: { type: string, format: date-time, nullable: true }
+        closedByName: { type: string, nullable: true }
+
+    LedgerClosing:
+      type: object
+      description: One close or reopen of a month.
+      properties:
+        id: { type: string, format: uuid }
+        month: { type: string, example: "2026-09" }
+        action: { type: string, enum: [closed, reopened] }
+        figures:
+          type: object
+          allOf: [{ $ref: "#/components/schemas/LedgerFigures" }]
+          nullable: true
+          description: "The month's figures at closing -- the closing record (closed only)."
+        reason: { type: string, nullable: true, description: "Why it was reopened (reopened only)." }
+        actorName: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    LedgerMonthClosings:
+      type: object
+      properties:
+        month: { type: string, example: "2026-09" }
+        books: { $ref: "#/components/schemas/LedgerMonthBooks" }
+        figuresNow: { $ref: "#/components/schemas/LedgerFigures" }
+        history: { type: array, items: { $ref: "#/components/schemas/LedgerClosing" }, description: "Closes and reopens, newest first (at most 50)." }
+        total: { type: integer, description: "How many closes and reopens there are in all." }
+
+    LedgerReconciliation:
+      type: object
+      description: "One run of the check: the register against a recount of every order and payment, plus money rules."
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [nightly, manual] }
+        requestedByName: { type: string, nullable: true }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+        durationMs: { type: integer }
+        status: { type: string, enum: [verified, problems] }
+        daysChecked: { type: integer }
+        mismatchedDays: { type: integer }
+        mismatches:
+          type: array
+          description: Up to 50 mismatched days, newest first.
+          items:
+            type: object
+            properties:
+              day: { type: string, format: date }
+              fields:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    field: { type: string, enum: [ordersBooked, ordersPriced, total, paidSoFar, cashCollected, paymentsCount] }
+                    register: { type: string }
+                    actual: { type: string }
+        overpaidOrders: { type: integer, description: "Orders paid more than their total (the database refuses this; expected 0)." }
+        statusMismatches: { type: integer, description: "Orders whose payment status doesn't match their payments." }
+        closedMonthDrift: { type: integer, description: "Closed months whose cash no longer matches their closing record." }
+        closedMonths:
+          type: array
+          items:
+            type: object
+            properties:
+              month: { type: string }
+              closedCash: { $ref: "#/components/schemas/Money" }
+              cashNow: { $ref: "#/components/schemas/Money" }
+              closedPayments: { type: integer }
+              paymentsNow: { type: integer }
+
+    LedgerVerification:
+      type: object
+      properties:
+        timeZone: { type: string, example: Asia/Kolkata }
+        latest:
+          type: object
+          allOf: [{ $ref: "#/components/schemas/LedgerReconciliation" }]
+          nullable: true
+          description: The most recent check of any kind; null before the first.
+        lastNightlyAt: { type: string, format: date-time, nullable: true }
+        nightlyOverdue: { type: boolean, description: "Over 26 hours since the last nightly check -- the schedule has stopped." }
 
     LedgerSummary:
       type: object
@@ -2386,7 +2609,7 @@ components:
         # paymentStatus is NOT accepted -- it is derived from the ledger.
         totalAmount:
           type: string
-          pattern: '^d+(.d{1,2})?$'
+          pattern: '^\d+(\.\d{1,2})?$'
           nullable: true
           default: null
           description: >-
@@ -2440,7 +2663,7 @@ components:
         # paymentStatus is NOT accepted -- derived from the ledger.
         totalAmount:
           type: string
-          pattern: '^d+(.d{1,2})?$'
+          pattern: '^\d+(\.\d{1,2})?$'
           nullable: true
           description: "A decimal string (a number is also accepted) or null. Accepted only UNCHANGED (ignored); a different value is 400 ORDER_PRICE_USE_PRICING -- use PUT /orders/{id}/price."
         nextPaymentDate: { type: string, format: date, nullable: true, description: "When the next payment is expected (payment-due tracking). Null to clear." }

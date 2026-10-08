@@ -70,12 +70,22 @@ revoke update, delete, truncate on public.order_price_history from needleye_app;
 -- Same for the split audit logs (ADR 0008 phase 3, migration 20261010000001).
 grant select, insert on public.order_audit_log, public.payment_audit_log to needleye_app;
 revoke update, delete, truncate on public.order_audit_log, public.payment_audit_log from needleye_app;
+-- The daily ledger is read-only for the app: database triggers write it (phase 4, 20261011000001).
+grant select on public.ledger_daily to needleye_app;
+-- Closing the books (phase 5, 20261012000001): closings are appended, never
+-- changed; check results are written only by ledger_reconcile().
+grant select, insert on public.ledger_month_closings to needleye_app;
+revoke update, delete, truncate on public.ledger_month_closings from needleye_app;
+grant select on public.ledger_reconciliations to needleye_app;
 
 -- 4) Sequences (future-proofing: none today, since every PK is a uuid default,
 --    but any serial column added later needs this) and functions (the
 --    order-number BEFORE INSERT trigger calls set_order_number()).
 grant usage, select on all sequences in schema public to needleye_app;
 grant execute on all functions in schema public to needleye_app;
+-- ...except ledger_apply, which writes the daily register: only the ledger
+-- triggers call it, as its owner (migration 20261012000001 also does this).
+revoke execute on function public.ledger_apply(jsonb) from needleye_app;
 
 -- 5) Keep it working as the schema evolves: anything the migration owner
 --    creates later automatically grants the same access to needleye_app, so a

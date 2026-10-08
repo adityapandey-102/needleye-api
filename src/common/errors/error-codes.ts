@@ -69,6 +69,15 @@ export const ERROR_CODES = {
   LEDGER_EXPORT_TOO_LARGE: "LEDGER_EXPORT_TOO_LARGE",
   /** Revenue months range isn't YYYY-MM, is backwards, outside 2000..this month, or (export) over 240 months. */
   LEDGER_MONTHS_RANGE_INVALID: "LEDGER_MONTHS_RANGE_INVALID",
+  /** Closing a month that hasn't ended yet (this month or later). */
+  LEDGER_MONTH_NOT_FINISHED: "LEDGER_MONTH_NOT_FINISHED",
+  LEDGER_MONTH_ALREADY_CLOSED: "LEDGER_MONTH_ALREADY_CLOSED",
+  /** Reopening a month that isn't closed. */
+  LEDGER_MONTH_NOT_CLOSED: "LEDGER_MONTH_NOT_CLOSED",
+  /** Reopening a closed month needs a reason (3-500 characters). */
+  LEDGER_REOPEN_REASON_REQUIRED: "LEDGER_REOPEN_REASON_REQUIRED",
+  /** "Verify now" while another check (nightly or manual) is still running. */
+  LEDGER_CHECK_RUNNING: "LEDGER_CHECK_RUNNING",
 
   // -- Images -----------------------------------------------------------------
   IMAGE_INVALID_SLOT: "IMAGE_INVALID_SLOT",
@@ -87,6 +96,8 @@ export const ERROR_CODES = {
   PAYMENT_LOCKED_AFTER_DELIVERY: "PAYMENT_LOCKED_AFTER_DELIVERY",
   /** The payment date is in the future (shop timezone). */
   PAYMENT_DATE_INVALID: "PAYMENT_DATE_INVALID",
+  /** The payment's month (before or after the change) is closed in the books (ADR 0008 phase 5). */
+  PAYMENT_MONTH_CLOSED: "PAYMENT_MONTH_CLOSED",
 
   // -- Leads ------------------------------------------------------------------
   LEAD_NOT_FOUND: "LEAD_NOT_FOUND",

@@ -116,6 +116,7 @@ const SHOP_WIDE = (tables: string[], why: string) => ({ tables, why });
 async function main() {
   const designerId = await pick("select id from profiles where role = 'designer' and active limit 1");
   const masterId = await pick("select id from profiles where role = 'master_tailor' and active limit 1");
+  const ownerId = await pick("select id from profiles where role = 'owner_manager' and active limit 1");
   const orderId = await pick("select id from orders order by created_at desc limit 1");
   const owner = { role: "owner_manager" as const, userId: designerId };
   const designer = { role: "designer" as const, userId: designerId };
@@ -197,6 +198,19 @@ async function main() {
     {
       name: "revenue: export (240 months)",
       run: () => ledger.findMonths(Array.from({ length: 240 }, (_, i) => addMonths(month, -i))),
+    },
+    // Closing the books (ADR 0008 phase 5): each month's latest close, a month's history, the check.
+    { name: "revenue: books of a page of 12 months", run: () => ledger.findLatestClosings(Array.from({ length: 12 }, (_, i) => addMonths(month, -i))) },
+    {
+      name: "revenue: books for the export (240 months)",
+      run: () => ledger.findLatestClosings(Array.from({ length: 240 }, (_, i) => addMonths(month, -i))),
+    },
+    { name: "revenue: a month's closes and reopens", run: () => ledger.listClosings(month, 50) },
+    { name: "revenue: latest check + last nightly", run: () => ledger.findLatestReconciliations() },
+    {
+      name: "revenue: the check (Verify now / nightly)",
+      run: () => ledger.runReconciliation(ownerId),
+      expectedScan: SHOP_WIDE(["orders", "payments"], "the check recounts every order and payment by design -- nightly and on demand, never on a page load"),
     },
     { name: "staff report (one designer, month)", run: () => orders.getStaffReport(designerId, { from: `${month}-01`, to: today }) },
     {

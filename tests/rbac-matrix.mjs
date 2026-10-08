@@ -370,6 +370,25 @@ async function main() {
   check("GET /ledger/months as designer -> 403", (await req("/ledger/months", {}, designerAToken)).status, 403);
   check("GET /ledger/summary as production_manager -> 403", (await req("/ledger/summary", {}, pmToken)).status, 403);
   check("GET /ledger/months/export as master_tailor -> 403", (await req("/ledger/months/export?from=2026-01&to=2026-02", {}, masterAToken)).status, 403);
+
+  console.log("\n--- closing the books + the check (ADR 0008 phase 5) ---");
+  // January 2002: nothing else uses it. Reopen it first if an interrupted run left it closed.
+  const closeMonth = (token) => req("/ledger/months/2002-01/close", { method: "POST" }, token);
+  const reopenMonth = (token, reason) => req("/ledger/months/2002-01/reopen", { method: "POST", body: JSON.stringify({ reason }) }, token);
+  if ((await req("/ledger/months/2002-01/closings", {}, ownerToken)).body?.books?.status === "closed") await reopenMonth(ownerToken, "RBAC run reset");
+  check("POST /ledger/months/:month/close as designer -> 403", (await closeMonth(designerAToken)).status, 403);
+  check("POST /ledger/months/:month/close as production_manager -> 403", (await closeMonth(pmToken)).status, 403);
+  check("POST /ledger/months/:month/close as accountant -> 201", (await closeMonth(accountantToken)).status, 201);
+  check("POST /ledger/months/:month/close again as owner_manager -> 409 (already closed)", (await closeMonth(ownerToken)).status, 409);
+  check("GET /ledger/months/:month/closings as accountant -> 200", (await req("/ledger/months/2002-01/closings", {}, accountantToken)).status, 200);
+  check("GET /ledger/months/:month/closings as worker -> 403", (await req("/ledger/months/2002-01/closings", {}, workerToken)).status, 403);
+  check("POST /ledger/months/:month/reopen as accountant -> 403 (owner only)", (await reopenMonth(accountantToken, "RBAC check")).status, 403);
+  check("POST /ledger/months/:month/reopen as owner_manager without a reason -> 400", (await reopenMonth(ownerToken, "")).status, 400);
+  check("POST /ledger/months/:month/reopen as owner_manager -> 201", (await reopenMonth(ownerToken, "RBAC matrix run")).status, 201);
+  check("GET /ledger/reconciliations/latest as owner_manager -> 200", (await req("/ledger/reconciliations/latest", {}, ownerToken)).status, 200);
+  check("GET /ledger/reconciliations/latest as master_tailor -> 403", (await req("/ledger/reconciliations/latest", {}, masterAToken)).status, 403);
+  check("POST /ledger/reconciliations as accountant -> 201", (await req("/ledger/reconciliations", { method: "POST" }, accountantToken)).status, 201);
+  check("POST /ledger/reconciliations as designer -> 403", (await req("/ledger/reconciliations", { method: "POST" }, designerAToken)).status, 403);
   check(
     "GET /orders/staff-report as owner_manager -> 200",
     (await req(`/orders/staff-report?staffId=${designerA.id}&month=2026-07`, {}, ownerToken)).status,

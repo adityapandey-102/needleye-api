@@ -13,7 +13,7 @@ Production rollout happens only when the owner asks (see "Rollout").
 | 2 | Pricing and payment rules (orders without a price, raise / discount, locks) + price history | built |
 | 3 | Separate payment and order audit logs, daily-activity categories | built |
 | 4 | Ledger daily totals, calendar months, Revenue page cards + paged month table + export | built |
-| 5 | Nightly reconciliation, closing the books | planned |
+| 5 | Nightly reconciliation, closing the books | built |
 
 ## Context
 
@@ -146,7 +146,7 @@ can't silently change. A review of the current code found:
   which the local test role may set and the production runtime role can't.
 - **Payment date.** The API refuses a `paidAt` after the shop's today
   (`PAYMENT_DATE_INVALID`) or that isn't a real date. The web records payments
-  dated today, as before. "Not in a closed month" arrives with phase 5.
+  dated today, as before. Since phase 5, it also can't be in a closed month.
 
 ## Decisions -- audit logs (phase 3)
 
@@ -254,10 +254,70 @@ can't silently change. A review of the current code found:
 
 1. **Nightly reconciliation** at 02:00 shop time recomputes the ledger totals
    from the raw orders and payments and stores the result; the Revenue page
-   shows "verified" (or what didn't match).
-2. **Closing the books:** Owner or Accountant closes a month (a lock date);
-   only the Owner reopens it. A closed month accepts no new, edited or deleted
-   payments dated inside it.
+   shows "verified" (or what didn't match). **Verify now** runs the same check
+   on demand. It runs inside the database (pg_cron) -- no separate server.
+2. **Closing the books:** Owner or Accountant closes a month that has ended;
+   only the Owner reopens it, with a reason. A closed month accepts no new,
+   edited or deleted payments dated inside it.
+3. **A closing record.** Each close stores the month's figures at that moment
+   in a separate, append-only table; every close and reopen is kept, with who
+   and when (and the reopen's reason).
+4. **Closing freezes cash collected, not Outstanding.** The month's Total,
+   Paid so far and Outstanding keep following its orders (a discount, a later
+   payment dated in an open month); its cash collected and payment count can't
+   change while closed.
+5. **Nothing moves or is deleted.** A closed month keeps its daily register
+   rows (a few hundred small rows a year); the check covers every day,
+   including closed months, and also confirms each closed month still holds the
+   cash it was closed with.
+
+### How phase 5 is built
+
+- **Migration `20261012000001`**: `ledger_month_closings` (append-only; a
+  close carries orders booked / priced, total, paid so far, cash collected and
+  payment count; a reopen needs a reason), `ledger_reconciliations` (one row
+  per check, written only by the check), the payments guard, the check
+  function, and the nightly job.
+- **A month is closed when its latest close/reopen row says "closed"**
+  (`ledger_month_closed()`), so a reopen never deletes anything.
+- **A close and a payment can't cross.** Each calendar month has an advisory
+  lock (4203, year*12 + month). Closing takes it exclusively: it waits for
+  payment changes already in flight in that month, then reads the month's
+  figures (so the record includes them). A payment change takes it shared for
+  each month it touches -- the old date and the new one -- then checks the
+  month is open (a separate statement, so it sees a close that committed while
+  it waited) and answers **409 `PAYMENT_MONTH_CLOSED`** if not. The database
+  trigger `payments_closed_month_guard` takes the same lock and re-checks, so
+  even a direct SQL write can't change a closed month's payments.
+- **The check** (`ledger_reconcile()`, `SECURITY DEFINER`) recounts every
+  day from orders and payments and compares with `ledger_daily` (up to 50
+  mismatched days kept, with register vs actual per field); counts orders paid
+  past their total and orders whose payment status doesn't match their
+  payments; and compares each closed month's cash and payment count with its
+  closing record. It only reads, apart from its own result row. One check at a
+  time (try-lock 4204): a second "Verify now" meanwhile answers **409
+  `LEDGER_CHECK_RUNNING`**. The speed audit measures it at about 32 ms over 3
+  years of synthetic data.
+- **Nightly:** pg_cron job `needleye-ledger-reconcile`, `30 20 * * *` UTC =
+  02:00 IST. The Revenue page warns when the last nightly check is over 26
+  hours old.
+- **Who can call the functions.** Postgres lets everyone execute a new
+  function and Supabase serves public functions over its REST API, so the
+  migration revokes EXECUTE on `ledger_apply` (phase 4: only the ledger
+  triggers call it), `ledger_reconcile` and `ledger_month_closed` from
+  PUBLIC / anon / authenticated / service_role, and grants the last two to the
+  app role.
+- **API:** `GET /ledger/months/:month/closings`, `POST
+  /ledger/months/:month/close` (`ledger:close`: Owner, Accountant), `POST
+  /ledger/months/:month/reopen` (`ledger:reopen`: Owner; body `{reason}`),
+  `GET /ledger/reconciliations/latest`, `POST /ledger/reconciliations`. Each
+  month in `/ledger/months` and the export carries its `books`; each payment
+  carries `monthClosed`.
+- **Web:** a books-check bar with Verify now on the Revenue page; a Books
+  column (Closed / Close... / Running) opening one dialog that shows the
+  figures now, the closing record beside them, the history, and Close or
+  Reopen; payments in a closed month show "Month closed" instead of Remove;
+  the CSV gains a Books column and the PDF marks closed months.
 
 ## Rollout (production, only when the owner asks)
 

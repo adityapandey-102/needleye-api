@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   assertDoesNotExceedTotal,
+  assertMonthOpen,
   assertOrderPriced,
   assertPaidAtNotFuture,
   assertPaymentsCorrectable,
   derivePaymentStatus,
+  paymentMonths,
 } from "./payment-ledger.rules";
 import { BadRequestError, ConflictError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
@@ -79,5 +81,23 @@ describe("payment rules (ADR 0008)", () => {
     expect(() => assertPaidAtNotFuture("2026-10-10", "2026-10-09")).toThrow(BadRequestError);
     expect(() => assertPaidAtNotFuture("2026-10-09", "2026-10-09")).not.toThrow();
     expect(() => assertPaidAtNotFuture("2025-12-31", "2026-10-09")).not.toThrow();
+  });
+
+  it("closed books: the months a change touches, each once, in order (ADR 0008 phase 5)", () => {
+    expect(paymentMonths("2026-09-30", "2026-08-01")).toEqual(["2026-08", "2026-09"]);
+    expect(paymentMonths("2026-09-30", "2026-09-01")).toEqual(["2026-09"]);
+    expect(paymentMonths("2026-09-30", undefined)).toEqual(["2026-09"]);
+  });
+
+  it("closed books: no payment change in a closed month (409, names the month)", () => {
+    expect(() => assertMonthOpen("2026-09", false)).not.toThrow();
+    try {
+      assertMonthOpen("2026-09", true);
+      throw new Error("expected a refusal");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ConflictError);
+      expect((error as ConflictError).code).toBe(ERROR_CODES.PAYMENT_MONTH_CLOSED);
+      expect((error as ConflictError).message).toMatch(/September 2026 are closed/);
+    }
   });
 });
