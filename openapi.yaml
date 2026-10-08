@@ -583,6 +583,21 @@ paths:
             day's deliveries (owner / production manager dashboard). Row-scoped
             like the rest of the list. A date that isn't real is a 400.
           schema: { type: string, format: date }
+        - name: timeline
+          in: query
+          description: >
+            The timeline pill's state: delivered; overdue (past its due date);
+            urgent (due within 3 days); due_soon (in 3-7 days); on_track
+            (later). Anything else is a 400.
+          schema: { type: string, enum: [overdue, urgent, due_soon, on_track, delivered] }
+        - name: bookedYear
+          in: query
+          description: Only orders booked in this year (a range on booking_date, indexed).
+          schema: { type: integer, minimum: 2000, maximum: 2100 }
+        - name: bookedMonth
+          in: query
+          description: With bookedYear -- only orders booked in this month (1-12). Without bookedYear it's a 400.
+          schema: { type: integer, minimum: 1, maximum: 12 }
       responses:
         "200":
           description: A page of orders visible to the caller, plus the total count
@@ -665,6 +680,47 @@ paths:
               schema: { $ref: "#/components/schemas/DeliveryLoad" }
         "400":
           description: Not a real date, `to` before `from`, or a span over 200 days
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /orders/customer-lookup:
+    get:
+      tags: [Orders]
+      summary: Fetch customer details by phone (new-order form)
+      description: |
+        The new-order form's "Fetch customer details" button -- called only
+        when it's pressed, never while typing. Returns the newest orders (at
+        most 5) with exactly this phone, so the form can fill the customer's
+        name from the one picked. Roles that can create orders
+        (`orders:create`). Indexed (orders_phone_created_idx).
+      parameters:
+        - name: phone
+          in: query
+          required: true
+          schema: { type: string, pattern: "^\\d{10}$" }
+      responses:
+        "200":
+          description: Earlier orders with this phone, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  phone: { type: string }
+                  matches:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        orderId: { type: string, format: uuid }
+                        orderNumber: { type: string }
+                        customerName: { type: string }
+                        bookingDate: { type: string, format: date }
+        "400":
+          description: VALIDATION_ERROR -- not a 10-digit number
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -970,7 +1026,7 @@ paths:
   /orders/{id}/price:
     put:
       tags: [Orders]
-      summary: Set, raise or discount an order's price
+      summary: Set or correct an order's price
       description: |
         The ONLY way an order's total changes (ADR 0008). The server decides
         what the request means from the order's state, read under its row
@@ -980,14 +1036,18 @@ paths:
         | Order now | New total | Kind | Who | Reason |
         |---|---|---|---|---|
         | no price | any (Rs 0 = intentional free work) | `set` | the order's own designer, owner, accountant | optional |
-        | priced | higher | `raise` | owner, accountant | required (3-500 chars) |
-        | priced | lower | `discount` | owner, accountant | required; never below what's collected |
+        | priced | different (up or down) | `correction` | owner, accountant | required (3-500 chars); never below what's collected |
+
+        Delivery doesn't lock the price (owner, 2026-10-09); the BOOKS do: while
+        the order's booking month is closed, its price can't change (409
+        `ORDER_PRICE_MONTH_CLOSED`; the Owner can reopen the month). To go
+        below what's been collected, correct or remove a payment first.
 
         Refused: 403 `ORDER_PRICE_FORBIDDEN` (role / not your order), 409
-        `ORDER_PRICE_LOCKED` (delivered), 400 `ORDER_PRICE_UNCHANGED`,
+        `ORDER_PRICE_MONTH_CLOSED` (booking month closed), 400 `ORDER_PRICE_UNCHANGED`,
         `ORDER_PRICE_REASON_REQUIRED`, `ORDER_TOTAL_BELOW_PAID` (the message
-        states the largest discount possible). The payment status is
-        re-derived; a discount down to what's collected settles the order
+        says to correct or remove a payment first). The payment status is
+        re-derived; a correction down to what's collected settles the order
         (fully_paid, next payment date cleared). Database triggers refuse a
         locked or below-collected price on any other write path too.
       parameters:
@@ -1020,7 +1080,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: ORDER_PRICE_LOCKED -- the order is delivered
+          description: ORDER_PRICE_MONTH_CLOSED -- the order's booking month is closed in the books
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1028,7 +1088,7 @@ paths:
   /orders/{id}/price-history:
     get:
       tags: [Orders]
-      summary: An order's price history (set / raise / discount), newest first
+      summary: An order's price history (set / correction), newest first
       description: For roles that can see order money (`payments:read`), on orders in their row scope (a designer, their own; 404 otherwise). 403 for the PM, master tailor and worker.
       parameters:
         - $ref: "#/components/parameters/OrderId"
@@ -1185,8 +1245,8 @@ paths:
       summary: Edit a payment entry
       description: |
         Gated by `payments:correct` -- owner and accountant only (ADR 0008).
-        Refused with 409 `PAYMENT_LOCKED_AFTER_DELIVERY` once the order is
-        delivered (also enforced by a database trigger). Same overpayment and
+        Allowed before or after delivery (owner, 2026-10-09) -- refused with
+        409 `PAYMENT_MONTH_CLOSED` in a closed month. Same overpayment and
         payment-date rules as POST, evaluated against the edited values.
       parameters:
         - $ref: "#/components/parameters/OrderIdPath"
@@ -1209,7 +1269,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: "PAYMENT_LOCKED_AFTER_DELIVERY -- the order is delivered; PAYMENT_MONTH_CLOSED -- the payment's month, or the month it would move to, is closed"
+          description: "PAYMENT_MONTH_CLOSED -- the payment's month, or the month it would move to, is closed"
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1217,7 +1277,7 @@ paths:
     delete:
       tags: [Payments]
       summary: Remove a payment entry
-      description: Gated by `payments:correct` -- owner and accountant only. Refused with 409 `PAYMENT_LOCKED_AFTER_DELIVERY` once the order is delivered, or `PAYMENT_MONTH_CLOSED` when the payment is dated in a closed month (ADR 0008). Re-derives the order's payment status.
+      description: Gated by `payments:correct` -- owner and accountant only. Allowed before or after delivery; refused with 409 `PAYMENT_MONTH_CLOSED` when the payment is dated in a closed month (ADR 0008). Re-derives the order's payment status.
       parameters:
         - $ref: "#/components/parameters/OrderIdPath"
         - $ref: "#/components/parameters/PaymentId"
@@ -1228,7 +1288,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: "PAYMENT_LOCKED_AFTER_DELIVERY -- the order is delivered; PAYMENT_MONTH_CLOSED -- the payment is dated in a closed month"
+          description: "PAYMENT_MONTH_CLOSED -- the payment is dated in a closed month"
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1334,7 +1394,7 @@ paths:
 
         | category | log | kinds |
         |---|---|---|
-        | `orders` | order_audit_log + order_price_history | order.created, order.updated (`details.changes`: field -> {from, to}), order.image_deleted, price.set / price.raise / price.discount |
+        | `orders` | order_audit_log + order_price_history | order.created, order.updated (`details.changes`: field -> {from, to}), order.image_deleted, price.set / price.correction (older rows: price.raise / price.discount) |
         | `stages` | order_status_history (moves only) | stage.moved (`details.from`, `details.to`) |
         | `payments` | payment_audit_log | payment.created / payment.updated / payment.deleted (typed amount, method, paidAt, previous*) |
         | `leads` | lead_events | lead.created, lead.enquiry_merged, lead.assigned, lead.status_changed, lead.converted |
@@ -1465,9 +1525,13 @@ paths:
         `ledger:close` -- Owner and Accountant. Stores the month's figures as
         they are now (the closing record). From then on no payment dated in the
         month can be added, edited or removed -- by the API (409
-        `PAYMENT_MONTH_CLOSED`) or directly in the database. Takes the month's
-        lock exclusively, so it waits for payment changes already in flight in
-        the month and counts them.
+        `PAYMENT_MONTH_CLOSED`) or directly in the database -- and no order
+        booked in the month can be added, moved out or repriced (409
+        `ORDER_BOOKING_MONTH_CLOSED` / `ORDER_PRICE_MONTH_CLOSED`). Refused
+        while any of the month's orders has no price (409
+        `LEDGER_MONTH_HAS_UNPRICED`). Takes the month's lock exclusively, so it
+        waits for payment and order changes already in flight in the month and
+        counts them.
       parameters:
         - { name: month, in: path, required: true, schema: { type: string, pattern: '^\d{4}-(0[1-9]|1[0-2])$', example: "2026-09" } }
       responses:
@@ -1486,7 +1550,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: "LEDGER_MONTH_NOT_FINISHED -- this month or later; LEDGER_MONTH_ALREADY_CLOSED"
+          description: "LEDGER_MONTH_NOT_FINISHED -- this month or later; LEDGER_MONTH_ALREADY_CLOSED; LEDGER_MONTH_HAS_UNPRICED -- some of its orders have no price yet (price them first)"
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2131,14 +2195,14 @@ components:
         reason:
           type: string
           maxLength: 500
-          description: Required (3-500 characters) to raise or discount; optional for the first price.
+          description: Required (3-500 characters) for a correction; optional for the first price.
 
     PriceChange:
       type: object
       properties:
         id: { type: string, format: uuid }
         orderId: { type: string, format: uuid }
-        kind: { type: string, enum: [set, raise, discount] }
+        kind: { type: string, enum: [set, correction, raise, discount], description: "set = the first price; correction = any later change (older rows say raise / discount)." }
         previousTotal:
           type: string
           allOf: [{ $ref: "#/components/schemas/Money" }]
@@ -2447,7 +2511,7 @@ components:
                     actual: { type: string }
         overpaidOrders: { type: integer, description: "Orders paid more than their total (the database refuses this; expected 0)." }
         statusMismatches: { type: integer, description: "Orders whose payment status doesn't match their payments." }
-        closedMonthDrift: { type: integer, description: "Closed months whose cash no longer matches their closing record." }
+        closedMonthDrift: { type: integer, description: "Closed months whose cash, or booked orders and total, no longer match their closing record." }
         closedMonths:
           type: array
           items:
@@ -2458,6 +2522,10 @@ components:
               cashNow: { $ref: "#/components/schemas/Money" }
               closedPayments: { type: integer }
               paymentsNow: { type: integer }
+              closedOrders: { type: integer }
+              ordersNow: { type: integer }
+              closedTotal: { $ref: "#/components/schemas/Money" }
+              totalNow: { $ref: "#/components/schemas/Money" }
 
     LedgerVerification:
       type: object

@@ -1,5 +1,5 @@
 import { pgTable, uuid, text, timestamp, numeric } from "drizzle-orm/pg-core";
-import type { PriceChangeKind } from "../domain/order-pricing.rules";
+import type { PriceHistoryKind } from "../domain/order-pricing.rules";
 
 /**
  * The Orders module owns `order_price_history` -- every price set / raise /
@@ -11,7 +11,7 @@ import type { PriceChangeKind } from "../domain/order-pricing.rules";
 export const orderPriceHistory = pgTable("order_price_history", {
   id: uuid("id").primaryKey().defaultRandom(),
   orderId: uuid("order_id").notNull(),
-  kind: text("kind").notNull().$type<PriceChangeKind>(),
+  kind: text("kind").notNull().$type<PriceHistoryKind>(),
   previousTotal: numeric("previous_total", { precision: 12, scale: 2 }),
   newTotal: numeric("new_total", { precision: 12, scale: 2 }).notNull(),
   collected: numeric("collected", { precision: 12, scale: 2 }).notNull(),

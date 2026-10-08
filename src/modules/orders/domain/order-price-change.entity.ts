@@ -1,10 +1,11 @@
-import type { PriceChangeKind } from "./order-pricing.rules";
+import type { PriceHistoryKind } from "./order-pricing.rules";
 
 /** One row of an order's price history (ADR 0008). Money as 2dp strings. */
 export interface OrderPriceChangeEntity {
   id: string;
   orderId: string;
-  kind: PriceChangeKind;
+  /** set = the first price; correction (older rows: raise / discount) = any later change. */
+  kind: PriceHistoryKind;
   /** Null for the first price ("set"). */
   previousTotal: string | null;
   newTotal: string;

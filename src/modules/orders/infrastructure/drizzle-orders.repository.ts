@@ -29,7 +29,8 @@ import {
   type GranularStatus,
 } from "../../../domain";
 import { assertStageMove } from "../domain/order-status.rules";
-import { assertPricedForDelivery, type PriceChangeDecision, type PriceState } from "../domain/order-pricing.rules";
+import { assertBookingMonthOpen, assertPricedForDelivery, type PriceChangeDecision, type PriceState } from "../domain/order-pricing.rules";
+import { LEDGER_MONTH_LOCK_NAMESPACE } from "../../../common/database/ledger-month-lock";
 import { derivePaymentStatus } from "../domain/order-ledger.rules";
 import type { OrderPriceChangeEntity } from "../domain/order-price-change.entity";
 import { diffOrderFields, PERSON_FIELDS, type OrderAuditAction, type OrderFieldChanges } from "../domain/order-audit.rules";
@@ -48,6 +49,7 @@ import type {
   UpdateOrderRecord,
   NewImageRecord,
   OrderBasicInfo,
+  CustomerMatch,
   OrderImageInfo,
   OrderStatsRaw,
   StaffReportRaw,
@@ -59,6 +61,23 @@ import type {
 import { convertLeadInTransaction } from "../../leads/infrastructure/lead-conversion";
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
+ * Takes each booking month's SHARED lock (the one a close holds exclusively)
+ * and refuses if its books are closed (owner, 2026-10-09): no booking into or
+ * out of a closed month, no price change on an order booked in one. The
+ * database guard (orders_closed_month_guard) takes the same lock and re-checks.
+ */
+async function bookingMonthsOpen(tx: Tx, action: "price" | "booking", ...days: (string | null | undefined)[]): Promise<void> {
+  const months = [...new Set(days.filter((d): d is string => Boolean(d)).map((d) => d.slice(0, 7)))].sort();
+  for (const month of months) {
+    const day = `${month}-01`;
+    await tx.execute(sql`select pg_advisory_xact_lock_shared(${LEDGER_MONTH_LOCK_NAMESPACE}::int, public.ledger_month_key(${day}::date))`);
+    // A separate statement, so it sees a close that committed while we waited for the lock.
+    const res = await tx.execute<{ closed: boolean }>(sql`select public.ledger_month_closed(${day}::date) as closed`);
+    assertBookingMonthOpen(month, res.rows[0]?.closed === true, action);
+  }
+}
 
 /**
  * Namespace for the per-date advisory lock (first key of the two-int form), so
@@ -159,6 +178,15 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     conditions.push(this.bucketCondition(filters.bucket));
     // One delivery day's orders (orders_due_date_idx).
     if (filters.dueOn) conditions.push(eq(orders.dueDate, filters.dueOn));
+    conditions.push(this.timelineCondition(filters.timeline));
+    // Booking year / month: a plain range on booking_date (orders_booking_date_idx).
+    if (filters.bookedYear) {
+      const y = filters.bookedYear;
+      const m = filters.bookedMonth;
+      const from = m ? `${y}-${String(m).padStart(2, "0")}-01` : `${y}-01-01`;
+      const to = m ? (m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, "0")}-01`) : `${y + 1}-01-01`;
+      conditions.push(sql`${orders.bookingDate} >= ${from}::date and ${orders.bookingDate} < ${to}::date`);
+    }
     if (filters.createdFrom) {
       // Midnight of that day in the SHOP's timezone, as an instant -- a plain
       // range on created_at, so orders_created_at_idx applies.
@@ -168,6 +196,40 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     }
 
     return and(...conditions);
+  }
+
+  /** The timeline pill's states (web: getTimelineSummary), as a WHERE condition on the due date. */
+  private timelineCondition(timeline: OrderListFilters["timeline"]) {
+    const open = ne(orders.productionStatus, "delivered");
+    switch (timeline) {
+      case "delivered":
+        return eq(orders.productionStatus, "delivered");
+      case "overdue":
+        return and(open, sql`${orders.dueDate} < current_date`);
+      case "urgent":
+        return and(open, sql`${orders.dueDate} >= current_date and ${orders.dueDate} < current_date + 3`);
+      case "due_soon":
+        return and(open, sql`${orders.dueDate} >= current_date + 3 and ${orders.dueDate} <= current_date + 7`);
+      case "on_track":
+        return and(open, sql`${orders.dueDate} > current_date + 7`);
+      default:
+        return undefined;
+    }
+  }
+
+  async findCustomersByPhone(phone: string, limit: number): Promise<CustomerMatch[]> {
+    try {
+      // orders_phone_created_idx: the newest few for one phone.
+      const rows = await db
+        .select({ orderId: orders.id, orderNumber: orders.orderNumber, customerName: orders.customerName, bookingDate: orders.bookingDate })
+        .from(orders)
+        .where(eq(orders.phone, phone))
+        .orderBy(desc(orders.createdAt))
+        .limit(limit);
+      return rows;
+    } catch (error) {
+      throw new InternalError("Failed to look up the customer", error);
+    }
   }
 
   /** Translates a dashboard "bucket" (the filter a summary card links to) into a WHERE condition. */
@@ -598,6 +660,7 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     let insertedId: string;
     try {
       insertedId = await db.transaction(async (tx) => {
+        await bookingMonthsOpen(tx, "booking", data.bookingDate); // 409 -- not into a closed month
         const deliveryOverride = assertDueDateCapacity
           ? assertDueDateCapacity({ booked: await lockDayAndCount(tx, data.dueDate), previousDueDate: null })
           : undefined;
@@ -726,6 +789,10 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         if (expectedVersion !== undefined && current.version !== expectedVersion) {
           throw new ConflictError("This order was changed by someone else. Reload and try again.", ERROR_CODES.ORDER_MODIFIED);
         }
+        // Moving the booking date: neither the old month nor the new one may be closed.
+        if (data.bookingDate !== undefined && data.bookingDate !== current.bookingDate) {
+          await bookingMonthsOpen(tx, "booking", current.bookingDate, data.bookingDate);
+        }
 
         const deliveryOverride =
           assertDueDateCapacity && data.dueDate !== undefined
@@ -851,11 +918,15 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         // and a price change on the same order serialise: "collected" and the
         // current total can't move between the check and the write.
         const [row] = await tx
-          .select({ total: orders.totalAmount, productionStatus: orders.productionStatus, designerId: orders.designerId })
+          .select({ total: orders.totalAmount, designerId: orders.designerId, bookingDate: orders.bookingDate })
           .from(orders)
           .where(eq(orders.id, id))
           .for("update");
         if (!row) throw new NotFoundError("Order not found", ERROR_CODES.ORDER_NOT_FOUND);
+        // The booking month's lock (a close holds it exclusively), then whether it's closed.
+        const bookingMonth = row.bookingDate.slice(0, 7);
+        await tx.execute(sql`select pg_advisory_xact_lock_shared(${LEDGER_MONTH_LOCK_NAMESPACE}::int, public.ledger_month_key(${row.bookingDate}::date))`);
+        const closedRes = await tx.execute<{ closed: boolean }>(sql`select public.ledger_month_closed(${row.bookingDate}::date) as closed`);
         const [paid] = await tx
           .select({ sum: sql<string>`coalesce(sum(${payments.amount}), 0)` })
           .from(payments)
@@ -864,7 +935,13 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         const previousTotal = row.total === null ? null : toMoneyString(row.total);
         const collected = toMoneyString(paid?.sum ?? 0);
         const newTotal = toMoneyString(request.newTotal);
-        const decision = decide({ currentTotal: previousTotal, productionStatus: row.productionStatus, designerId: row.designerId, collected });
+        const decision = decide({
+          currentTotal: previousTotal,
+          designerId: row.designerId,
+          collected,
+          bookingMonth,
+          bookingMonthClosed: closedRes.rows[0]?.closed === true,
+        });
 
         const status = derivePaymentStatus(collected, newTotal);
         await tx

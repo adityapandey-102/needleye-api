@@ -10,6 +10,7 @@ import { toMoneyString } from "../../../common/money/money";
 import { profiles } from "../../users/infrastructure/profile.schema";
 import { ledgerDaily, ledgerMonthClosings, ledgerReconciliations } from "./ledger.schema";
 import { addMonths, monthStart } from "../domain/ledger-month.rules";
+import { assertAllPriced } from "../domain/ledger-closing.rules";
 import { LEDGER_FIELDS, type ClosedMonthDrift, type LedgerClosingEntity, type LedgerField, type ReconciliationEntity, type ReconciliationMismatch } from "../domain/ledger-closing.entity";
 import type { LedgerRepositoryPort, MonthToggleGuard } from "../application/ports/ledger-repository.port";
 import type { LedgerFigures, LedgerMonthEntity } from "../domain/ledger-month.entity";
@@ -128,6 +129,11 @@ function toDrift(raw: Record<string, unknown>): ClosedMonthDrift {
     cashNow: toMoneyString(scalar(raw.cashNow)),
     closedPayments: Number(scalar(raw.closedPayments)),
     paymentsNow: Number(scalar(raw.paymentsNow)),
+    // Older checks (before 2026-10-09) didn't record orders or totals.
+    closedOrders: Number(scalar(raw.closedOrders ?? raw.ordersNow)),
+    ordersNow: Number(scalar(raw.ordersNow)),
+    closedTotal: toMoneyString(scalar(raw.closedTotal ?? raw.totalNow)),
+    totalNow: toMoneyString(scalar(raw.totalNow)),
   };
 }
 
@@ -274,6 +280,8 @@ export class DrizzleLedgerRepository implements LedgerRepositoryPort {
             .from(ledgerDaily)
             .where(and(gte(ledgerDaily.day, day), lt(ledgerDaily.day, monthStart(addMonths(month, 1)))));
           const f = toFigures(row);
+          // Orders booked into the month take its lock too, so this count can't move now.
+          assertAllPriced(f.ordersBooked, f.ordersPriced); // 409 LEDGER_MONTH_HAS_UNPRICED
           figures = {
             ordersBooked: f.ordersBooked,
             ordersPriced: f.ordersPriced,

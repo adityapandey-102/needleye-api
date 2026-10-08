@@ -44,16 +44,6 @@ export function assertOrderPriced(totalAmount: string | null): asserts totalAmou
   }
 }
 
-/** Once delivered, an order's payments are final: no edits, no deletes (ADR 0008). */
-export function assertPaymentsCorrectable(productionStatus: string): void {
-  if (productionStatus === "delivered") {
-    throw new ConflictError(
-      "This order has been delivered -- its payments can no longer be edited or deleted.",
-      ERROR_CODES.PAYMENT_LOCKED_AFTER_DELIVERY,
-    );
-  }
-}
-
 /** A payment can't be dated in the future (the shop's today, YYYY-MM-DD strings compare as dates). */
 export function assertPaidAtNotFuture(paidAt: string, shopToday: string): void {
   if (paidAt > shopToday) {

@@ -3,10 +3,12 @@ import { ERROR_CODES } from "../../../common/errors/error-codes";
 import { isMonth } from "./ledger-month.rules";
 
 /**
- * Closing the books (ADR 0008, phase 5). The Owner or Accountant closes a
- * finished month; from then on no payment dated in it can be added, edited or
- * removed, so the month's cash collected stays what was reported. Only the
- * Owner reopens a month, with a reason. Every close and reopen is kept.
+ * Closing the books (ADR 0008, phase 5; widened 2026-10-09). The Owner or
+ * Accountant closes a finished month; from then on no payment dated in it can
+ * be added, edited or removed, and no order booked in it can be added, moved
+ * or repriced -- so the month's cash and its booked total stay what was
+ * reported. Only the Owner reopens a month, with a reason. Every close and
+ * reopen is kept.
  */
 export const REOPEN_REASON_MIN = 3;
 export const REOPEN_REASON_MAX = 500;
@@ -30,6 +32,21 @@ export function assertCanToggle(action: "close" | "reopen", isClosed: boolean): 
   }
   if (action === "reopen" && !isClosed) {
     throw new ConflictError("This month isn't closed.", ERROR_CODES.LEDGER_MONTH_NOT_CLOSED);
+  }
+}
+
+/**
+ * A month can't be closed while some of its orders have no price: once it's
+ * closed their price could never be set, so they could never be delivered.
+ */
+export function assertAllPriced(ordersBooked: number, ordersPriced: number): void {
+  const unpriced = ordersBooked - ordersPriced;
+  if (unpriced > 0) {
+    throw new ConflictError(
+      `${unpriced} ${unpriced === 1 ? "order booked in this month has" : "orders booked in this month have"} no price yet -- set ${unpriced === 1 ? "its price" : "their prices"} first, then close the month.`,
+      ERROR_CODES.LEDGER_MONTH_HAS_UNPRICED,
+      { unpriced },
+    );
   }
 }
 

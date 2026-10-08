@@ -60,6 +60,26 @@ export interface OrderListFilters {
   createdFrom?: string;
   /** Only orders DUE on this day (YYYY-MM-DD) -- the delivery calendar's day list. */
   dueOn?: string;
+  /**
+   * Timeline, as the order cards show it: delivered; overdue (past due);
+   * urgent (due within 3 days); due_soon (in 3-7 days); on_track (later).
+   */
+  timeline?: OrderTimelineFilter;
+  /** Booked in this year (and, with bookedMonth 1-12, that month) -- a range on booking_date. */
+  bookedYear?: number;
+  bookedMonth?: number;
+}
+
+export const ORDER_TIMELINE_FILTERS = ["overdue", "urgent", "due_soon", "on_track", "delivered"] as const;
+export type OrderTimelineFilter = (typeof ORDER_TIMELINE_FILTERS)[number];
+
+/** "Fetch customer details": an earlier order with the same phone. */
+export interface CustomerMatch {
+  orderId: string;
+  orderNumber: string;
+  customerName: string;
+  /** YYYY-MM-DD */
+  bookingDate: string;
 }
 
 /** Offset pagination for the orders list -- keeps the default list response bounded regardless of how many orders exist. */
@@ -242,6 +262,8 @@ export interface OrdersRepositoryPort {
   /** Paginated payment-ledger events (payment_audit_log: created/updated/deleted) in a date range, newest first -- backs the ledger-activity history. */
   getLedgerEvents(range: { from: string; to: string }, page: OrderListPage): Promise<LedgerEventsResult>;
   findBasicById(id: string): Promise<OrderBasicInfo | null>;
+  /** The newest orders for one phone number (exact match), at most `limit` -- the order form's "Fetch customer details". */
+  findCustomersByPhone(phone: string, limit: number): Promise<CustomerMatch[]>;
   /**
    * Orders per due date in [from, to] (inclusive, only days with at least one),
    * across EVERY order -- deliberately NOT row-scoped: delivery capacity is

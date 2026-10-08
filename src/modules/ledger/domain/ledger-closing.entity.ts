@@ -26,7 +26,7 @@ export interface ReconciliationMismatch {
   fields: { field: LedgerField; register: string; actual: string }[];
 }
 
-/** A closed month whose cash no longer matches its closing record. */
+/** A closed month whose cash, or booked orders and total, no longer match its closing record. */
 export interface ClosedMonthDrift {
   /** YYYY-MM */
   month: string;
@@ -34,6 +34,10 @@ export interface ClosedMonthDrift {
   cashNow: string;
   closedPayments: number;
   paymentsNow: number;
+  closedOrders: number;
+  ordersNow: number;
+  closedTotal: string;
+  totalNow: string;
 }
 
 /** One run of the check: the register against a recount of the receipts, plus money rules. */

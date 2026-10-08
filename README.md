@@ -318,7 +318,7 @@ src/
         order.entity.ts                      # OrderEntity, OrderImageEntity -- pure, no persistence/HTTP shape
         order-status-history.entity.ts         # OrderStatusHistoryEntity -- one row in the status audit trail
         order-edit.rules.ts                    # assertFieldsEditable/assertOwnershipForScopedEdit -- the RBAC field-splitting + ownership invariants, framework-free
-        order-pricing.rules.ts                   # decidePriceChange (set / raise / discount: who, reason, never below collected, locked once delivered), assertPricedForDelivery, assertEditKeepsTotal (ADR 0008)
+        order-pricing.rules.ts                   # decidePriceChange (set / correction: who, reason, never below collected, refused while the booking month is closed), assertBookingMonthOpen, assertPricedForDelivery, assertEditKeepsTotal (ADR 0008)
         order-ledger.rules.ts                    # derivePaymentStatus -- not_priced/unpaid/advance_paid/fully_paid from the ledger sum, seen from the Orders side (a small, deliberate duplicate of Payments' own copy -- Domain layers don't import across modules, see ADR 0003)
         order-status.rules.ts                      # assertCanChangeStage (four-tier stage RBAC) + assertCanSkipStages (no jumping past a stage the role can't set) for PATCH /orders/:id/status -- forward-only + no-skip enforced under the repository's row lock, see "Order status history & Kanban" below
         order-visibility.rules.ts                    # canViewPaymentFields -- master_tailor's zero payment-visibility rule
@@ -342,7 +342,7 @@ src/
         ports/payments-repository.port.ts   # the interface -- Application depends on this, never on the Drizzle adapter
       domain/
         payment.entity.ts                   # PaymentEntity, OrderLedgerContext -- pure, no persistence/HTTP shape
-        payment-ledger.rules.ts               # assertDoesNotExceedTotal (overpayment guard), assertOrderPriced, assertPaymentsCorrectable (locked once delivered), assertPaidAtNotFuture + derivePaymentStatus -- framework-free (decimal.js money, see common/money)
+        payment-ledger.rules.ts               # assertDoesNotExceedTotal (overpayment guard), assertOrderPriced, assertMonthOpen (closed months), assertPaidAtNotFuture + derivePaymentStatus -- framework-free (decimal.js money, see common/money)
       infrastructure/
         drizzle-payments.repository.ts        # implements the port; reads `orders` from Orders' schema and `profiles` from Users' schema (see ADR 0003)
         payments.schema.ts                      # this module's own Drizzle table def for `payments`
@@ -439,7 +439,8 @@ row and adding them up in Node.
 
 Two further list-path optimizations:
 
-- **`GET /orders` is offset-paginated** (`limit` default 20, max 100; `offset`; response is `{ orders, total, limit, offset }`). The list is the one endpoint whose result set grows without bound as orders accumulate, so it's capped rather than returning every order on every load. `DrizzleOrdersRepository.findMany` applies `limit`/`offset`; `countMany` returns the matching total (they share one `listConditions` builder so the page and its count can never disagree).
+- **`GET /orders` is offset-paginated** (`limit` default 20, max 100; `offset`; response is `{ orders, total, limit, offset }`). The list is the one endpoint whose result set grows without bound as orders accumulate, so it's capped rather than returning every order on every load. `DrizzleOrdersRepository.findMany` applies `limit`/`offset`; `countMany` returns the matching total (they share one `listConditions` builder so the page and its count can never disagree). Filters: `search`, `status` (production stage), `designerId`, `masterTailorId`, `bucket` (dashboard cards), `timeline` (`overdue` / `urgent` / `due_soon` / `on_track` / `delivered` -- the timeline pill's states), `bookedYear` + optional `bookedMonth` (a range on `booking_date`, `orders_booking_date_idx`); a malformed value is a 400.
+- **`GET /orders/customer-lookup?phone=`** (`orders:create`) backs the new-order form's "Fetch customer details" button: the newest 5 orders with exactly that phone (`orders_phone_created_idx`) -- called only when the button is pressed, never while typing.
 - **Signed image URLs are resolved in one batched storage call per response**, not one per image. `OrdersService.signImageUrls` collects every image path across the whole page and calls `StorageProvider.getSignedUrls` (Supabase's `createSignedUrls`) once -- previously a list of N orders made up to 4N round trips to Storage. The presenter is now a pure function that reads from the resulting path→url map.
 
 ### No shared package, on purpose
@@ -586,17 +587,25 @@ that Delivered needs pricing first.
 changes. `OrdersService.changePrice` hands `decidePriceChange`
 (`order-pricing.rules.ts`) to `DrizzleOrdersRepository.changePrice`, which
 runs it against the order **locked** (`FOR UPDATE` -- a payment locks the same
-row, so "collected" can't move underneath) and writes the new total, the
-re-derived status and one `order_price_history` row in the same transaction:
+row, so "collected" can't move underneath) and under its booking month's lock,
+and writes the new total, the re-derived status and one `order_price_history`
+row in the same transaction:
 
 | Order now | New total | Kind | Who | Reason |
 |---|---|---|---|---|
 | no price | any (₹0 = free work) | `set` | owner, accountant, the order's own designer (`orders:price:set`) | optional |
-| priced | higher | `raise` | owner, accountant (`orders:price:adjust`) | required |
-| priced | lower | `discount` | owner, accountant | required; never below what's collected |
+| priced | different, up or down | `correction` | owner, accountant (`orders:price:adjust`) | required; never below what's collected |
 
-A delivered order's price is locked (`409 ORDER_PRICE_LOCKED`), and
-`PATCH /orders/:id/status` refuses Delivered without a price
+(Older history rows say `raise` / `discount`; both read as corrections.) To go
+below what's been collected, correct or remove a payment first -- there is no
+discount or refund feature (the owner dropped it on 2026-10-09).
+
+**Delivery locks nothing; the books do.** While the order's **booking month**
+is closed its price can't change (`409 ORDER_PRICE_MONTH_CLOSED`), and no order
+can be booked into, or moved out of, a closed month
+(`409 ORDER_BOOKING_MONTH_CLOSED`) -- both under the month's shared lock, with
+the trigger `orders_closed_month_guard` underneath. `PATCH /orders/:id/status`
+still refuses Delivered without a price
 (`409 ORDER_PRICE_REQUIRED`, "Set the order total first"). A total given at
 booking (`POST /orders` with `totalAmount`) is recorded as the first `set`
 and needs the same right (the PM gets `403 ORDER_PRICE_FORBIDDEN`).
@@ -674,9 +683,9 @@ collected revenue):
 - **Payment side** -- `assertDoesNotExceedTotal` (`PAYMENT_EXCEEDS_TOTAL`, 400):
   a payment can't push the recorded sum over `total_amount`.
 - **Order side** -- `decidePriceChange` (`ORDER_TOTAL_BELOW_PAID`, 400): a
-  discount can't take `total_amount` below the sum already collected; the
-  message states the largest discount possible. No payment is ever removed to
-  make room (ADR 0008).
+  correction can't take `total_amount` below the sum already collected; the
+  message says to correct or remove a payment first. No payment is ever removed
+  to make room (ADR 0008).
 
 Currency comparisons round to the cent (`Math.round(amount * 100)`) to avoid
 float noise.
@@ -686,7 +695,8 @@ accountant, the order's own designer) and `payments:correct` gates `PATCH`/`DELE
 (owner and accountant only) on `/orders/:orderId/payments[/:paymentId]` at the
 router level (`requireCapability`). Under the order lock the repository also
 refuses a payment on an unpriced order (`409 PAYMENT_ORDER_NOT_PRICED`) and any
-edit/delete once the order is delivered (`409 PAYMENT_LOCKED_AFTER_DELIVERY`);
+change dated in a closed month (`409 PAYMENT_MONTH_CLOSED`) -- before or after
+delivery alike (delivery no longer locks payments);
 the service refuses a `paidAt` after the shop's today (`400 PAYMENT_DATE_INVALID`);
 a `designer`'s "assigned" scope is additionally checked in
 `PaymentsService.loadOrderForAccess` against the order's `designer_id` --
@@ -1014,8 +1024,12 @@ Each close stores the month's figures at that moment in
 and when) -- the closing record. While a month is closed, no payment dated in
 it can be added, edited or removed: the payments repository answers **409
 `PAYMENT_MONTH_CLOSED`**, and the database trigger `payments_closed_month_guard`
-refuses it too. Closing freezes the month's cash collected, not its Outstanding:
-its orders can still be discounted or paid in an open month. A close and a
+refuses it too. The month's **orders** are frozen too: none booked into it,
+moved out of it or repriced (`ORDER_BOOKING_MONTH_CLOSED` /
+`ORDER_PRICE_MONTH_CLOSED`), so its booked total stays what was reported. A
+month can't be closed while one of its orders has no price
+(`409 LEDGER_MONTH_HAS_UNPRICED` -- price them first). Its Outstanding can
+still shrink: a customer may pay later, in an open month. A close and a
 payment can't cross: both take the month's advisory lock (4203; exclusive to
 close, shared to pay -- `src/common/database/ledger-month-lock.ts`), so a close
 waits for payments in flight and counts them, and a payment waiting on a close

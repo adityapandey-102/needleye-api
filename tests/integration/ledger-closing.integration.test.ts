@@ -158,8 +158,9 @@ describe("closing the books (integration)", () => {
       .then(() => "deleted", (e: unknown) => constraintOf(e));
     expect(directDelete).toBe("payments_month_closed");
 
-    // Closing freezes cash, not the order: a discount still moves May's total and outstanding.
-    expect((await request(app).put(`/api/v1/orders/${id}/price`).set("Authorization", ownerAuth).send({ totalAmount: "9000", reason: "Closing test discount" })).status).toBe(200);
+    // Closing freezes May's orders too: their prices can't be corrected (2026-10-09).
+    const correction = await request(app).put(`/api/v1/orders/${id}/price`).set("Authorization", ownerAuth).send({ totalAmount: "9000", reason: "Closing test correction" });
+    expect([correction.status, (correction.body as { code: string }).code]).toEqual([409, "ORDER_PRICE_MONTH_CLOSED"]);
     const books = (await request(app).get("/api/v1/ledger/months/2003-05/closings").set("Authorization", accountantAuth)).body as {
       books: Books;
       figuresNow: { total: string; cashCollected: string };
@@ -167,7 +168,7 @@ describe("closing the books (integration)", () => {
       total: number;
     };
     expect(books.books.status).toBe("closed");
-    expect(Number(books.figuresNow.total)).toBe(Number(before.total) - 1000);
+    expect(books.figuresNow.total).toBe(before.total);
     expect(books.figuresNow.cashCollected).toBe(before.cashCollected);
     expect(books.history[0]).toMatchObject({ action: "closed", figures: { total: before.total } });
 

@@ -29,6 +29,70 @@ describe("API endpoints (integration)", () => {
     await closeDb();
   });
 
+  it("order list filters (stage, timeline, booking year / month) and the phone lookup for the new-order form", async () => {
+    const owner = await createFixtureUser("owner_manager", "Filters Owner");
+    const designer = await createFixtureUser("designer", "Filters Designer");
+    const master = await createFixtureUser("master_tailor", "Filters Master");
+    const pm = await createFixtureUser("production_manager", "Filters PM");
+    createdUserIds.push(owner.id, designer.id, master.id, pm.id);
+    const auth = async (u: { email: string; password: string }) => `Bearer ${(await authProvider.signInWithPassword(u.email, u.password)).accessToken}`;
+    const [ownerAuth, masterAuth, pmAuth] = await Promise.all([auth(owner), auth(master), auth(pm)]);
+    const phone = `7${String(Math.floor(Math.random() * 1e9)).padStart(9, "0")}`;
+    const iso = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
+
+    const create = async (customerName: string, bookingDate: string, dueDate: string) => {
+      const res = await request(app)
+        .post("/api/v1/orders")
+        .set("Authorization", ownerAuth)
+        .send({
+          customerName,
+          phone,
+          billNumber: `FLT-${Date.now()}-${Math.random()}`,
+          bookingDate,
+          dueDate,
+          designerId: designer.id,
+          masterTailorId: master.id,
+          productCategory: "saree",
+          orderDetails: "filters fixture",
+          productionStatus: "design_pending",
+        });
+      expect(res.status).toBe(201);
+      const id = (res.body as { order: { id: string } }).order.id;
+      createdOrderIds.push(id);
+      return id;
+    };
+    const overdue = await create("Filter Overdue", "2025-03-04", iso(-5));
+    const soon = await create("Filter Soon", "2025-03-20", iso(5));
+    const later = await create("Filter Later", "2025-07-01", iso(40));
+
+    const ids = async (query: string) => {
+      const res = await request(app).get(`/api/v1/orders?limit=100&${query}`).set("Authorization", ownerAuth);
+      expect(res.status, query).toBe(200);
+      return (res.body as { orders: { id: string }[] }).orders.map((o) => o.id).filter((id) => [overdue, soon, later].includes(id));
+    };
+    expect(await ids("bookedYear=2025&bookedMonth=3")).toEqual(expect.arrayContaining([overdue, soon]));
+    expect(await ids("bookedYear=2025&bookedMonth=3")).not.toContain(later);
+    expect((await ids("bookedYear=2025")).sort()).toEqual([overdue, soon, later].sort());
+    expect(await ids("timeline=overdue&bookedYear=2025")).toEqual([overdue]);
+    expect(await ids("timeline=due_soon&bookedYear=2025")).toEqual([soon]);
+    expect(await ids("timeline=on_track&bookedYear=2025")).toEqual([later]);
+    expect(await ids("status=design_pending&bookedYear=2025&bookedMonth=7")).toEqual([later]);
+    for (const bad of ["timeline=soonish", "bookedYear=99", "bookedMonth=3", "bookedYear=2025&bookedMonth=13"]) {
+      expect((await request(app).get(`/api/v1/orders?${bad}`).set("Authorization", ownerAuth)).status, bad).toBe(400);
+    }
+
+    // "Fetch customer details": newest first, only on request, only roles that create orders.
+    const lookup = await request(app).get(`/api/v1/orders/customer-lookup?phone=${phone}`).set("Authorization", pmAuth);
+    expect(lookup.status).toBe(200);
+    expect((lookup.body as { matches: { customerName: string }[] }).matches.map((m) => m.customerName)).toEqual([
+      "Filter Later",
+      "Filter Soon",
+      "Filter Overdue",
+    ]);
+    expect((await request(app).get(`/api/v1/orders/customer-lookup?phone=${phone}`).set("Authorization", masterAuth)).status).toBe(403);
+    expect((await request(app).get("/api/v1/orders/customer-lookup?phone=12345").set("Authorization", ownerAuth)).status).toBe(400);
+  });
+
   it("GET /health responds without authentication", async () => {
     const res = await request(app).get("/health");
     expect(res.status).toBe(200);
@@ -177,7 +241,7 @@ describe("API endpoints (integration)", () => {
     const ok = okRes.body as { order: { paymentStatus: string; totalAmount: string }; change: { kind: string; previousTotal: string } };
     expect(ok.order.paymentStatus).toBe("advance_paid");
     expect(ok.order.totalAmount).toBe("800.00");
-    expect(ok.change).toMatchObject({ kind: "discount", previousTotal: "1000.00" });
+    expect(ok.change).toMatchObject({ kind: "correction", previousTotal: "1000.00" });
   });
 
   it("advances an order into the Falls / Kutchu production stage (status + history both accept it)", async () => {

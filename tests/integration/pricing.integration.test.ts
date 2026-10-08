@@ -121,7 +121,7 @@ describe("pricing & payment rules (integration)", () => {
     expect(code(raise)).toBe("ORDER_PRICE_FORBIDDEN");
   });
 
-  it("raise and discount: owner / accountant with a reason; a discount never below what's collected", async () => {
+  it("corrections, up or down: owner / accountant with a reason; never below what's collected", async () => {
     const id = body<{ order: { id: string } }>(await newOrder()).order.id;
     expect((await price(id, "accountant", 10000)).status).toBe(200);
     expect((await pay(id, "designer", 4000)).status).toBe(201);
@@ -129,11 +129,12 @@ describe("pricing & payment rules (integration)", () => {
     const noReason = await price(id, "accountant", 12000);
     expect(noReason.status).toBe(400);
     expect(code(noReason)).toBe("ORDER_PRICE_REASON_REQUIRED");
-    expect(body<{ change: Json }>(await price(id, "accountant", 12000, "Extra embroidery")).change).toMatchObject({ kind: "raise" });
+    expect(body<{ change: Json }>(await price(id, "accountant", 12000, "Extra embroidery")).change).toMatchObject({ kind: "correction" });
 
-    const tooLow = await price(id, "owner", 3999, "Big discount");
+    const tooLow = await price(id, "owner", 3999, "Typed it wrong");
     expect(tooLow.status).toBe(400);
     expect(code(tooLow)).toBe("ORDER_TOTAL_BELOW_PAID");
+    expect(body<{ error: string }>(tooLow).error).toMatch(/correct or remove a payment first/);
     const unchanged = await price(id, "owner", 12000, "Same");
     expect(code(unchanged)).toBe("ORDER_PRICE_UNCHANGED");
 
@@ -143,7 +144,7 @@ describe("pricing & payment rules (integration)", () => {
     const history = body<{ history: { kind: string; reason: string | null; changedByName: string | null }[] }>(
       await request(app).get(`/api/v1/orders/${id}/price-history`).set(as("designer")),
     ).history;
-    expect(history.map((h) => h.kind)).toEqual(["discount", "raise", "set"]);
+    expect(history.map((h) => h.kind)).toEqual(["correction", "correction", "set"]);
     expect(history[0]).toMatchObject({ reason: "Settled at what was paid", changedByName: "Pricing Owner" });
     expect((await request(app).get(`/api/v1/orders/${id}/price-history`).set(as("master"))).status).toBe(403);
   });
@@ -181,7 +182,7 @@ describe("pricing & payment rules (integration)", () => {
     expect(fake.status).toBe(400);
   });
 
-  it("Delivered needs a price; delivery then locks the price and the payments (new payments still allowed)", async () => {
+  it("Delivered needs a price -- and delivery locks nothing: the price and payments can still be corrected", async () => {
     const id = body<{ order: { id: string } }>(await newOrder()).order.id;
     expect((await stage(id, "ready")).status).toBe(200);
     const unpriced = await stage(id, "delivered");
@@ -192,15 +193,41 @@ describe("pricing & payment rules (integration)", () => {
     const paymentId = body<{ payment: { id: string } }>(await pay(id, "designer", 1000)).payment.id;
     expect((await stage(id, "delivered")).status).toBe(200);
 
-    const locked = await price(id, "owner", 4500, "After delivery");
-    expect(locked.status).toBe(409);
-    expect(code(locked)).toBe("ORDER_PRICE_LOCKED");
-    const edit = await request(app).patch(`/api/v1/orders/${id}/payments/${paymentId}`).set(as("owner")).send({ amount: 1200 });
-    expect(edit.status).toBe(409);
-    expect(code(edit)).toBe("PAYMENT_LOCKED_AFTER_DELIVERY");
-    expect((await request(app).delete(`/api/v1/orders/${id}/payments/${paymentId}`).set(as("owner"))).status).toBe(409);
+    expect((await price(id, "owner", 4500, "Corrected after delivery")).status).toBe(200);
+    expect((await request(app).patch(`/api/v1/orders/${id}/payments/${paymentId}`).set(as("owner")).send({ amount: 1200 })).status).toBe(200);
+    expect((await request(app).delete(`/api/v1/orders/${id}/payments/${paymentId}`).set(as("owner"))).status).toBe(204);
     // The balance can still be collected after delivery.
-    expect((await pay(id, "designer", 4000)).status).toBe(201);
+    expect((await pay(id, "designer", 4500)).status).toBe(201);
+  });
+
+  it("the books lock it: a closed booking month freezes its orders' prices and bookings; a month with an unpriced order can't close", async () => {
+    const MONTH = "2003-12";
+    const closeMonth = (who = "accountant") => request(app).post(`/api/v1/ledger/months/${MONTH}/close`).set(as(who));
+    const id = body<{ order: { id: string } }>(await newOrder("owner", { bookingDate: `${MONTH}-10` })).order.id;
+
+    const unpricedClose = await closeMonth();
+    expect(unpricedClose.status).toBe(409);
+    expect(code(unpricedClose)).toBe("LEDGER_MONTH_HAS_UNPRICED");
+    expect((await price(id, "owner", 3000)).status).toBe(200);
+    expect((await closeMonth()).status).toBe(201);
+    try {
+      const corrected = await price(id, "owner", 3500, "Late correction");
+      expect(corrected.status).toBe(409);
+      expect(code(corrected)).toBe("ORDER_PRICE_MONTH_CLOSED");
+      const moved = await request(app).patch(`/api/v1/orders/${id}`).set(as("owner")).send({ bookingDate: "2004-01-05" });
+      expect(code(moved)).toBe("ORDER_BOOKING_MONTH_CLOSED");
+      const into = await newOrder("owner", { bookingDate: `${MONTH}-20` });
+      expect(into.status).toBe(409);
+      expect(code(into)).toBe("ORDER_BOOKING_MONTH_CLOSED");
+      // A payment TODAY on that order is fine -- today's month is open.
+      expect((await pay(id, "owner", 500)).status).toBe(201);
+      // ...and the database refuses a direct repricing too.
+      await expect(db.update(orders).set({ totalAmount: "3600.00" }).where(eq(orders.id, id))).rejects.toThrow();
+    } finally {
+      const reopened = await request(app).post(`/api/v1/ledger/months/${MONTH}/reopen`).set(as("owner")).send({ reason: "Integration test: done" });
+      expect(reopened.status).toBe(201);
+    }
+    expect((await price(id, "owner", 3500, "Corrected after reopening")).status).toBe(200);
   });
 
   it("the database refuses the same things when a write skips the API", async () => {
@@ -221,12 +248,6 @@ describe("pricing & payment rules (integration)", () => {
     // Price history is append-only.
     await expect(db.update(orderPriceHistory).set({ reason: "rewritten" }).where(eq(orderPriceHistory.orderId, id))).rejects.toThrow();
     await expect(db.delete(orderPriceHistory).where(eq(orderPriceHistory.orderId, id))).rejects.toThrow();
-    // Delivered locks the price and the payments.
-    await stage(id, "ready");
-    await stage(id, "delivered");
-    await expect(db.update(orders).set({ totalAmount: "2000.00" }).where(eq(orders.id, id))).rejects.toThrow();
-    await expect(db.update(payments).set({ amount: "700.00" }).where(eq(payments.orderId, id))).rejects.toThrow();
-    await expect(db.delete(payments).where(eq(payments.orderId, id))).rejects.toThrow();
     // ...and a not-priced order can't be delivered even by a direct write.
     const other = body<{ order: { id: string } }>(await newOrder()).order.id;
     await stage(other, "ready");

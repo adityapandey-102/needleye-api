@@ -156,6 +156,11 @@ async function main() {
       expectedScan: SHOP_WIDE(["orders"], "trigram indexes exist; at 12k rows the planner judges one scan cheaper"),
     },
     { name: "orders bucket: overdue", run: () => orders.findMany(owner, { bucket: "overdue" }, { limit: 20, offset: 0 }) },
+    // Order-list filters (2026-10-09): timeline, booking month (orders_booking_date_idx), and the phone lookup.
+    { name: "orders filter: timeline due soon", run: () => orders.findMany(owner, { timeline: "due_soon" }, { limit: 20, offset: 0 }) },
+    { name: "orders filter: booked in a month", run: () => orders.findMany(owner, { bookedYear: Number(month.slice(0, 4)), bookedMonth: Number(month.slice(5, 7)) }, { limit: 20, offset: 0 }) },
+    { name: "orders filter count: booked in a month", run: () => orders.countMany(owner, { bookedYear: Number(month.slice(0, 4)), bookedMonth: Number(month.slice(5, 7)) }) },
+    { name: "fetch customer details (by phone)", run: () => orders.findCustomersByPhone("9811122233", 5) },
     { name: "orders bucket: pending_payment", run: () => orders.findMany(owner, { bucket: "pending_payment" }, { limit: 20, offset: 0 }) },
     { name: "orders bucket: ready", run: () => orders.findMany(owner, { bucket: "ready" }, { limit: 20, offset: 0 }) },
     { name: "orders bucket: price not set", run: () => orders.findMany(owner, { bucket: "not_priced" }, { limit: 20, offset: 0 }) },

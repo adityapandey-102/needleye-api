@@ -100,9 +100,19 @@ export interface ReconciliationDto {
   overpaidOrders: number;
   /** Orders whose payment status doesn't match their payments. */
   statusMismatches: number;
-  /** Closed months whose cash no longer matches their closing record. */
+  /** Closed months whose cash, or booked orders and total, no longer match their closing record. */
   closedMonthDrift: number;
-  closedMonths: { month: string; closedCash: string; cashNow: string; closedPayments: number; paymentsNow: number }[];
+  closedMonths: {
+    month: string;
+    closedCash: string;
+    cashNow: string;
+    closedPayments: number;
+    paymentsNow: number;
+    closedOrders: number;
+    ordersNow: number;
+    closedTotal: string;
+    totalNow: string;
+  }[];
 }
 
 /** GET /ledger/reconciliations/latest and POST /ledger/reconciliations */

@@ -43,7 +43,7 @@ import type {
   LedgerAmountSnapshot,
   LedgerExportResponseDto,
 } from "../api/dto/ledger-events.response.dto";
-import type { LedgerEventRaw, LeadLink } from "./ports/orders-repository.port";
+import type { CustomerMatch, LedgerEventRaw, LeadLink } from "./ports/orders-repository.port";
 import { businessToday } from "../../../common/time/business-date";
 
 interface AuthContext {
@@ -102,6 +102,11 @@ export class OrdersService {
   private signImageUrls(entities: OrderEntity[]): Promise<Map<string, string>> {
     const paths = entities.flatMap((e) => e.images.map((img) => img.storagePath));
     return this.storageProvider.getSignedUrls(paths);
+  }
+
+  /** "Fetch customer details": the newest orders with this phone (at most 5) -- name, number, booking date. */
+  findCustomersByPhone(phone: string): Promise<CustomerMatch[]> {
+    return this.ordersRepository.findCustomersByPhone(phone, 5);
   }
 
   async listOrders(ctx: AuthContext, filters: OrderListFilters, page: OrderListPage): Promise<OrderListResult> {

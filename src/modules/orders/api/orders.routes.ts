@@ -15,6 +15,7 @@ import { deliveryLoadQuerySchema } from "./dto/delivery-load.dto";
 import { validateImageUpload } from "./orders.validation";
 import { OrdersService } from "../application/orders.service";
 import { DrizzleOrdersRepository } from "../infrastructure/drizzle-orders.repository";
+import { ORDER_TIMELINE_FILTERS, type OrderTimelineFilter } from "../application/ports/orders-repository.port";
 import { storageProvider } from "../../../common/storage/supabase-storage-provider";
 import { businessToday, monthStartMonthsBack } from "../../../common/time/business-date";
 import { env } from "../../../config/env";
@@ -52,7 +53,19 @@ ordersRouter.get(
   "/",
   requireCapability("orders:read"),
   asyncHandler(async (req, res) => {
-    const { search, status, designerId, masterTailorId, bucket, createdFrom, dueOn } = req.query;
+    const { search, status, designerId, masterTailorId, bucket, createdFrom, dueOn, timeline, bookedYear, bookedMonth } = req.query;
+    // Timeline and booking year / month: malformed values are a 400, never silently ignored.
+    if (timeline !== undefined && !(typeof timeline === "string" && (ORDER_TIMELINE_FILTERS as readonly string[]).includes(timeline))) {
+      throw new BadRequestError(`timeline must be one of: ${ORDER_TIMELINE_FILTERS.join(", ")}`, ERROR_CODES.VALIDATION_ERROR);
+    }
+    const year = bookedYear === undefined ? undefined : Number(bookedYear);
+    const month = bookedMonth === undefined ? undefined : Number(bookedMonth);
+    if (year !== undefined && !(Number.isInteger(year) && year >= 2000 && year <= 2100)) {
+      throw new BadRequestError("bookedYear must be a year (2000-2100)", ERROR_CODES.VALIDATION_ERROR);
+    }
+    if (month !== undefined && !(Number.isInteger(month) && month >= 1 && month <= 12 && year !== undefined)) {
+      throw new BadRequestError("bookedMonth must be 1-12, with bookedYear", ERROR_CODES.VALIDATION_ERROR);
+    }
     // Optional lower bound on the creation day (the Kanban's 2-month window). A
     // malformed date is a 400, never silently ignored (that would show everything).
     if (createdFrom !== undefined && !(typeof createdFrom === "string" && isRealIsoDate(createdFrom))) {
@@ -72,10 +85,26 @@ ordersRouter.get(
         bucket: typeof bucket === "string" ? bucket : undefined,
         createdFrom: typeof createdFrom === "string" ? createdFrom : undefined,
         dueOn: typeof dueOn === "string" ? dueOn : undefined,
+        timeline: timeline as OrderTimelineFilter | undefined,
+        bookedYear: year,
+        bookedMonth: month,
       },
       parseOrdersPage(req.query),
     );
     res.json(result);
+  }),
+);
+
+// "Fetch customer details" on the new-order form: earlier orders with this exact
+// phone, newest first -- only when the button is pressed. Registered before "/:id".
+const PHONE = /^\d{10}$/;
+ordersRouter.get(
+  "/customer-lookup",
+  requireCapability("orders:create"),
+  asyncHandler(async (req, res) => {
+    const phone = typeof req.query.phone === "string" ? req.query.phone : "";
+    if (!PHONE.test(phone)) throw new BadRequestError("Enter the 10-digit mobile number", ERROR_CODES.VALIDATION_ERROR);
+    res.json({ phone, matches: await ordersService.findCustomersByPhone(phone) });
   }),
 );
 

@@ -4,7 +4,6 @@ import {
   assertMonthOpen,
   assertOrderPriced,
   assertPaidAtNotFuture,
-  assertPaymentsCorrectable,
   derivePaymentStatus,
   paymentMonths,
 } from "./payment-ledger.rules";
@@ -70,11 +69,6 @@ describe("payment rules (ADR 0008)", () => {
     expect(() => assertOrderPriced(null)).toThrow(ConflictError);
     expect(() => assertOrderPriced(null)).toThrow(/Set the order total first/);
     expect(() => assertOrderPriced("0.00")).not.toThrow();
-  });
-
-  it("payments are final once the order is delivered (409)", () => {
-    expect(() => assertPaymentsCorrectable("delivered")).toThrow(ConflictError);
-    expect(() => assertPaymentsCorrectable("ready")).not.toThrow();
   });
 
   it("a payment can't be dated after the shop's today", () => {

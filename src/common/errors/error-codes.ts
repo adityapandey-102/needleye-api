@@ -49,8 +49,10 @@ export const ERROR_CODES = {
   ORDER_TOTAL_BELOW_PAID: "ORDER_TOTAL_BELOW_PAID",
   /** Delivered needs a price: set the order total first (ADR 0008). */
   ORDER_PRICE_REQUIRED: "ORDER_PRICE_REQUIRED",
-  /** The order is delivered -- its price is locked. */
-  ORDER_PRICE_LOCKED: "ORDER_PRICE_LOCKED",
+  /** The order's booking month is closed in the books -- its price can't change (owner, 2026-10-09). */
+  ORDER_PRICE_MONTH_CLOSED: "ORDER_PRICE_MONTH_CLOSED",
+  /** An order can't be booked into, or moved out of, a month whose books are closed. */
+  ORDER_BOOKING_MONTH_CLOSED: "ORDER_BOOKING_MONTH_CLOSED",
   /** The new total equals the current one -- nothing to change. */
   ORDER_PRICE_UNCHANGED: "ORDER_PRICE_UNCHANGED",
   /** Raising or discounting a price needs a reason (3-500 characters). */
@@ -72,6 +74,8 @@ export const ERROR_CODES = {
   /** Closing a month that hasn't ended yet (this month or later). */
   LEDGER_MONTH_NOT_FINISHED: "LEDGER_MONTH_NOT_FINISHED",
   LEDGER_MONTH_ALREADY_CLOSED: "LEDGER_MONTH_ALREADY_CLOSED",
+  /** Closing a month while some of its orders have no price -- price them first. */
+  LEDGER_MONTH_HAS_UNPRICED: "LEDGER_MONTH_HAS_UNPRICED",
   /** Reopening a month that isn't closed. */
   LEDGER_MONTH_NOT_CLOSED: "LEDGER_MONTH_NOT_CLOSED",
   /** Reopening a closed month needs a reason (3-500 characters). */
@@ -92,8 +96,6 @@ export const ERROR_CODES = {
   PAYMENT_EXCEEDS_TOTAL: "PAYMENT_EXCEEDS_TOTAL",
   /** No payments until the order has a price. */
   PAYMENT_ORDER_NOT_PRICED: "PAYMENT_ORDER_NOT_PRICED",
-  /** The order is delivered -- its payments can no longer be edited or deleted. */
-  PAYMENT_LOCKED_AFTER_DELIVERY: "PAYMENT_LOCKED_AFTER_DELIVERY",
   /** The payment date is in the future (shop timezone). */
   PAYMENT_DATE_INVALID: "PAYMENT_DATE_INVALID",
   /** The payment's month (before or after the change) is closed in the books (ADR 0008 phase 5). */

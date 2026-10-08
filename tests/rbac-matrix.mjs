@@ -181,7 +181,7 @@ async function main() {
   check("GET /orders/delivery-load as master_tailor -> 403", (await req(loadPath, {}, masterAToken)).status, 403);
   check("GET /orders/delivery-load as accountant -> 403", (await req(loadPath, {}, accountantToken)).status, 403);
 
-  console.log("\n--- pricing (ADR 0008): set = own designer / owner / accountant; raise + discount = owner / accountant ---");
+  console.log("\n--- pricing (ADR 0008, 2026-10-09): set = own designer / owner / accountant; correction (up or down) = owner / accountant ---");
   const unpricedRes = await req(
     "/orders",
     { method: "POST", body: JSON.stringify({ ...JSON.parse(createBody), billNumber: `BILL-UNPRICED-${stamp}` }) },
@@ -196,10 +196,21 @@ async function main() {
   check("PUT /orders/:id/price (first price) as worker -> 403", await setPrice(unpricedId, workerToken, "3000.00"), 403);
   check("PUT /orders/:id/price (first price) as unassigned designer -> 403", await setPrice(unpricedId, designerBToken, "3000.00"), 403);
   check("PUT /orders/:id/price (first price) as assigned designer -> 200", await setPrice(unpricedId, designerAToken, "3000.00"), 200);
-  check("PUT /orders/:id/price (raise) as assigned designer -> 403", await setPrice(unpricedId, designerAToken, "3500.00", "More work"), 403);
-  check("PUT /orders/:id/price (raise, no reason) as accountant -> 400", await setPrice(unpricedId, accountantToken, "3500.00"), 400);
-  check("PUT /orders/:id/price (raise) as accountant -> 200", await setPrice(unpricedId, accountantToken, "3500.00", "Extra lining"), 200);
-  check("PUT /orders/:id/price (discount) as owner_manager -> 200", await setPrice(unpricedId, ownerToken, "3200.00", "Festive offer"), 200);
+  check("PUT /orders/:id/price (correction) as assigned designer -> 403", await setPrice(unpricedId, designerAToken, "3500.00", "More work"), 403);
+  check("PUT /orders/:id/price (correction, no reason) as accountant -> 400", await setPrice(unpricedId, accountantToken, "3500.00"), 400);
+  check("PUT /orders/:id/price (correction up) as accountant -> 200", await setPrice(unpricedId, accountantToken, "3500.00", "Extra lining"), 200);
+  check("PUT /orders/:id/price (correction down) as owner_manager -> 200", await setPrice(unpricedId, ownerToken, "3200.00", "Typed it wrong"), 200);
+  console.log("\n--- fetch customer details (orders:create: owner / designer / PM) ---");
+  for (const [role, token, expected] of [
+    ["owner_manager", ownerToken, 200],
+    ["designer", designerAToken, 200],
+    ["production_manager", pmToken, 200],
+    ["accountant", accountantToken, 403],
+    ["master_tailor", masterAToken, 403],
+    ["worker", workerToken, 403],
+  ]) {
+    check(`GET /orders/customer-lookup as ${role} -> ${expected}`, (await req("/orders/customer-lookup?phone=9123456780", {}, token)).status, expected);
+  }
   check(
     "PATCH /orders/:id {totalAmount: different} as owner_manager -> 400 (prices change only via /price)",
     (await req(`/orders/${unpricedId}`, { method: "PATCH", body: JSON.stringify({ totalAmount: "9999.00" }) }, ownerToken)).status,
@@ -350,14 +361,14 @@ async function main() {
   check("PATCH status -> delivered from Ready as production_manager -> 200", await setStatus(orderId, "delivered", pmToken), 200);
   check("PATCH status -> alteration after Delivered as owner -> 409", await setStatus(orderId, "alteration", ownerToken), 409);
   check(
-    "PATCH a payment after Delivered as owner_manager -> 409 (payments locked)",
+    "PATCH a payment after Delivered as owner_manager -> 200 (delivery locks nothing; closed months do)",
     (await req(paymentPath, { method: "PATCH", body: JSON.stringify({ amount: "80.00" }) }, ownerToken)).status,
-    409,
+    200,
   );
   check(
-    "PUT /orders/:id/price after Delivered as owner_manager -> 409 (price locked)",
+    "PUT /orders/:id/price after Delivered as owner_manager -> 200 (a correction, while its month is open)",
     await setPrice(orderId, ownerToken, "6000.00", "Late change"),
-    409,
+    200,
   );
 
   console.log("\n--- dashboard + reports ---");

@@ -19,7 +19,6 @@ import {
   assertDoesNotExceedTotal,
   assertMonthOpen,
   assertOrderPriced,
-  assertPaymentsCorrectable,
   derivePaymentStatus,
   paymentMonths,
 } from "../domain/payment-ledger.rules";
@@ -282,8 +281,8 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
     let found: boolean;
     try {
       found = await db.transaction(async (tx) => {
-        const { total, productionStatus } = await this.lockOrder(tx, orderId);
-        assertPaymentsCorrectable(productionStatus); // 409 once delivered (ADR 0008)
+        // Delivery doesn't lock payments (owner, 2026-10-09) -- closed months do.
+        const { total } = await this.lockOrder(tx, orderId);
         assertOrderPriced(total); // a recorded payment implies a price; belt and braces
         const existing = await loadPaymentValues(tx, orderId, paymentId);
         if (!existing) return false;
@@ -333,8 +332,7 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
   async removePayment(orderId: string, paymentId: string, actorId: string): Promise<boolean> {
     try {
       return await db.transaction(async (tx) => {
-        const { total, productionStatus } = await this.lockOrder(tx, orderId);
-        assertPaymentsCorrectable(productionStatus); // 409 once delivered (ADR 0008)
+        const { total } = await this.lockOrder(tx, orderId);
         const existing = await loadPaymentValues(tx, orderId, paymentId);
         if (!existing) return false;
         await assertMonthsOpen(tx, existing.paidAt);

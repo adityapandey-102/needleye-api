@@ -14,6 +14,13 @@ Production rollout happens only when the owner asks (see "Rollout").
 | 3 | Separate payment and order audit logs, daily-activity categories | built |
 | 4 | Ledger daily totals, calendar months, Revenue page cards + paged month table + export | built |
 | 5 | Nightly reconciliation, closing the books | built |
+| 6 | Amendment (2026-10-09): price corrections, delivery locks nothing, the books lock orders too | built |
+
+**Amended 2026-10-09 by the owner** -- see "Amendment: simpler price rules"
+at the end. Where an earlier section says raise / discount, or that delivery
+locks the price or the payments, the amendment wins. A proposed customer-credit
+/ refund feature was built and then dropped by the owner the same day (the
+code is kept in a git stash, not in the tree).
 
 ## Context
 
@@ -318,6 +325,46 @@ can't silently change. A review of the current code found:
   figures now, the closing record beside them, the history, and Close or
   Reopen; payments in a closed month show "Month closed" instead of Remove;
   the CSV gains a Books column and the PDF marks closed months.
+
+## Amendment: simpler price rules (2026-10-09)
+
+The owner simplified pricing and moved every lock to the books:
+
+1. **One kind of change after the first price: a correction.** Up or down, by
+   the Owner or the Accountant, with a reason (3-500 characters).
+   `order_price_history.kind` is `set` or `correction`; older rows keep
+   `raise` / `discount` and read as corrections. There is no discount or
+   refund feature.
+2. **Never below what's been collected.** To lower a price further, first
+   correct or remove the payment that's wrong, then correct the price. The
+   message says so (`ORDER_TOTAL_BELOW_PAID`).
+3. **Delivery locks nothing.** A delivered order's price can be corrected and
+   its payments edited or removed. Delivered still needs a price.
+4. **The books are the lock.**
+   - A payment dated in a closed month can't be added, changed or removed
+     (unchanged since phase 5).
+   - An order booked in a closed month can't be repriced
+     (`ORDER_PRICE_MONTH_CLOSED`), and no order can be booked into, or moved
+     out of, a closed month (`ORDER_BOOKING_MONTH_CLOSED`). The API checks
+     under the month's shared lock (4203); the trigger
+     `orders_closed_month_guard` refuses the same writes underneath.
+   - A month can't be closed while one of its orders has no price
+     (`LEDGER_MONTH_HAS_UNPRICED`) -- otherwise that order could never be priced,
+     so never delivered. Price it, then close.
+   - So a closed month's booked orders and total are frozen as well as its
+     cash; the nightly check now compares all four with the closing record.
+     "Paid so far" on those orders can still grow (a customer paying later, in an
+     open month) -- that isn't drift.
+5. **The orders list** gains filters: stage, timeline (overdue / urgent /
+   due soon / on track / delivered) and booking year / month (indexed on
+   `booking_date`). **The new-order form** gets "Fetch customer details":
+   on a button press (never while typing), the newest orders with that exact
+   phone (indexed on `phone, created_at`); the user picks one and its customer
+   name is filled in.
+
+Migration: `20261013000001_price_corrections_and_books.sql` (additive: a wider
+kind check, replaced guard functions, one new trigger, two indexes, the check
+function replaced).
 
 ## Rollout (production, only when the owner asks)
 
