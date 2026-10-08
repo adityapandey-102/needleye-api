@@ -1,7 +1,7 @@
 /**
  * Response for GET /orders/ledger-events -- the payment-ledger activity feed
  * (owner_manager/accountant, `reports:financial`). Each event is one
- * append-only audit record for a payment being recorded, edited, or removed,
+ * payment_audit_log row (ADR 0008) for a payment being recorded, edited, or removed,
  * decoded into a display-ready shape: who did it, when, on which order, and
  * what changed. Backs the "Ledger Activity" history on the revenue page.
  */
@@ -9,6 +9,8 @@ export interface LedgerAmountSnapshot {
   /** Money as a 2dp string. */
   amount: string;
   method: string;
+  /** The payment's date (YYYY-MM-DD). */
+  paidAt: string;
 }
 
 export interface LedgerEventDto {

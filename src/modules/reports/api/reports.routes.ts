@@ -33,7 +33,7 @@ reportsRouter.get("/activity-days", (_req, res) => {
   res.json(reportsService.getActivityDays());
 });
 
-/** One day's activity (payment events excluded), paginated; loaded per day, on demand. */
+/** One day's activity in one category (?category=orders|stages|payments|leads|accounts), paged, with every category's count. */
 reportsRouter.get(
   "/activity",
   asyncHandler(async (req, res) => {

@@ -16,7 +16,7 @@ import { createFixtureUser, deleteFixtureOrder, deleteFixtureUser, closeDb, type
  * Batch E's owner Reports, against the real database: the Working / Idle rules
  * (designer = created an undelivered order in 45 days; floor = made the latest
  * stage move on an undelivered order in 30 days), the activity feed's
- * shop-timezone day boundaries and payment exclusion, and owner-only access.
+ * shop-timezone day boundaries and categories, and owner-only access.
  */
 describe("owner reports (integration)", () => {
   const app = createApp();
@@ -172,33 +172,41 @@ describe("owner reports (integration)", () => {
     expect(pct.rows.find((r) => r.id === designer.id)).toBeUndefined();
   });
 
-  it("activity days run midnight-to-midnight in the SHOP's timezone, and payment events are left out", async () => {
+  it("activity days run midnight-to-midnight in the SHOP's timezone; Sign-ins & accounts leaves out old order/payment rows", async () => {
     // 2026-09-20 in Kolkata = 2026-09-19T18:30Z .. 2026-09-20T18:30Z.
     const inserted = await db
       .insert(auditLog)
       .values([
-        { actorId: workerA.id, action: "order.status_changed", entityType: "order", createdAt: new Date("2026-09-19T18:30:00Z") }, // 00:00 IST on the 20th
-        { actorId: workerA.id, action: "order.status_changed", entityType: "order", createdAt: new Date("2026-09-20T18:29:59Z") }, // 23:59:59 IST on the 20th
-        { actorId: workerA.id, action: "order.status_changed", entityType: "order", createdAt: new Date("2026-09-19T18:29:59Z") }, // 23:59:59 IST on the 19th
-        { actorId: workerA.id, action: "payment.created", entityType: "payment", createdAt: new Date("2026-09-20T06:00:00Z") },
+        { actorId: workerA.id, action: "auth.login", entityType: "session", createdAt: new Date("2026-09-19T18:30:00Z") }, // 00:00 IST on the 20th
+        { actorId: workerA.id, action: "auth.login", entityType: "session", createdAt: new Date("2026-09-20T18:29:59Z") }, // 23:59:59 IST on the 20th
+        { actorId: workerA.id, action: "auth.login", entityType: "session", createdAt: new Date("2026-09-19T18:29:59Z") }, // 23:59:59 IST on the 19th
+        // A row in the pre-ADR-0008 shape: its content lives in the order / payment logs now.
+        { actorId: workerA.id, action: "order.status_changed", entityType: "order", createdAt: new Date("2026-09-20T06:00:00Z") },
       ])
       .returning({ id: auditLog.id });
     auditIds.push(...inserted.map((r) => r.id));
-    const [midnight, lastSecond, dayBefore, payment] = inserted.map((r) => r.id);
+    const [midnight, lastSecond, dayBefore, legacy] = inserted.map((r) => r.id);
 
-    const day = await reportsRepo.getActivityDay({
+    const events = await reportsRepo.getActivityDay({
       day: "2026-09-20",
       timeZone: "Asia/Kolkata",
-      excludePrefixes: ["payment."],
+      category: "accounts",
       limit: 100_000,
       offset: 0,
     });
-    const ids = day.events.map((e) => e.id);
+    const ids = events.map((e) => e.id);
     expect(ids).toContain(midnight);
     expect(ids).toContain(lastSecond);
     expect(ids).not.toContain(dayBefore);
-    expect(ids).not.toContain(payment);
-    expect(day.events.find((e) => e.id === midnight)).toMatchObject({ actorName: nameOf.get(workerA.id), actorRole: "worker" });
+    expect(ids).not.toContain(legacy);
+    expect(events.find((e) => e.id === midnight)).toMatchObject({
+      category: "accounts",
+      kind: "auth.login",
+      actorName: nameOf.get(workerA.id),
+      actorRole: "worker",
+    });
+    const counts = await reportsRepo.getActivityCounts("2026-09-20", "Asia/Kolkata");
+    expect(counts.accounts).toBeGreaterThanOrEqual(2);
   });
 
   it("the endpoints are owner-only", async () => {
@@ -212,10 +220,14 @@ describe("owner reports (integration)", () => {
     const days = await request(app).get("/api/v1/reports/activity-days").set("Authorization", ownerAuth);
     const dayList = days.body as { today: string; days: string[] };
     expect(dayList.days).toHaveLength(7);
-    const today = await request(app).get(`/api/v1/reports/activity?day=${dayList.today}`).set("Authorization", ownerAuth);
+    const today = await request(app).get(`/api/v1/reports/activity?day=${dayList.today}&category=payments`).set("Authorization", ownerAuth);
     expect(today.status).toBe(200);
-    const { events } = today.body as { events: { action: string }[] };
-    expect(events.every((e) => !e.action.startsWith("payment."))).toBe(true);
+    const body = today.body as { category: string; counts: Record<string, number>; events: { kind: string }[]; total: number };
+    expect(body.category).toBe("payments");
+    expect(Object.keys(body.counts).sort()).toEqual(["accounts", "leads", "orders", "payments", "stages"]);
+    expect(body.total).toBe(body.counts.payments);
+    expect(body.events.every((e) => e.kind.startsWith("payment."))).toBe(true);
+    expect((await request(app).get(`/api/v1/reports/activity?day=${dayList.today}&category=nope`).set("Authorization", ownerAuth)).status).toBe(400);
 
     expect((await request(app).get("/api/v1/reports/activity?day=2020-01-01").set("Authorization", ownerAuth)).status).toBe(400);
     expect((await request(app).get("/api/v1/reports/activity?day=2026-02-31").set("Authorization", ownerAuth)).status).toBe(400);

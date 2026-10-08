@@ -266,7 +266,7 @@ src/
         team-member.entity.ts                # TeamMemberEntity -- an intentionally empty domain-rules layer is honest for a pure lookup, not a failure of the pattern
       infrastructure/
         drizzle-team-members.repository.ts     # implements the port; reads `profiles` from modules/users/infrastructure/profile.schema.ts (see ADR 0003) -- no mapper file, the select already projects directly into entity shape
-    reports/                         # owner-only (reports:staff) team view: Working/Idle + the 7-day activity feed -- read-only
+    reports/                         # owner-only (reports:staff) team view: Working/Idle + the 7-day activity feed in 5 categories -- read-only
       api/
         reports.routes.ts                # controller -- composition root: new ReportsService(new DrizzleReportsRepository(), { timeZone: env.BUSINESS_TIMEZONE })
         dto/reports.dto.ts                 # activity query schema (real date, page <= 100) + response shapes
@@ -274,10 +274,10 @@ src/
         reports.service.ts                 # applies the rules; injectable clock so "today" is testable
         ports/reports-repository.port.ts
       domain/
-        staff-activity.rules.ts            # tracked roles, 45/30-day Working windows, shop-timezone "today", the 7-day window, payment.* exclusion
+        staff-activity.rules.ts            # tracked roles, 45/30-day Working windows, shop-timezone "today", the 7-day window, ACTIVITY_CATEGORIES
         staff-activity.entity.ts
       infrastructure/
-        drizzle-reports.repository.ts      # two raw-SQL reads over profiles / orders / order_status_history / audit_log (see ADR 0003)
+        drizzle-reports.repository.ts      # raw-SQL reads over profiles / orders / the order, stage, price and payment logs / leads / audit_log (see ADR 0003)
     leads/                           # enquiries worked by designers until they become orders (ADR 0007) + the PUBLIC enquiry form
       api/
         leads.routes.ts                  # signed-in: list / summary / badge / detail / add / assign / status / comments (leads:read, leads:manage) -- composition root
@@ -526,7 +526,9 @@ of needing a logger threaded through every function signature.
 ### Operational hardening (request IDs, audit, optimistic locking, DB role)
 
 - **Request IDs** -- see "Logging" above: one id per request, on the response header, every log line, and the error response body.
-- **Audit logging** (`common/audit/`): a business audit trail, separate from the developer-facing application logs. `AuditLogger` is an interface (`audit-logger.ts`); `DrizzleAuditLogger` writes to the `audit_log` table (`supabase/migrations/20260726000001_audit_log.sql`), filling in the actor and request id from the request context. Business services record important actions through it -- login/logout, password change, user create/update/deactivate/password-regen/QR, order create/update/status-change/image-delete, payment create/update/delete (action strings in `audit-actions.ts`). Best-effort by contract: a failed audit write is logged and swallowed, never breaking the business action. To send audit events somewhere else later (an external audit sink), write one new class implementing `AuditLogger` -- no service changes. There's no audit-read endpoint in scope; `audit_log` has no anon/authenticated grant.
+- **Audit logging** -- separate logs, separate from the developer-facing application logs (ADR 0008, phase 3):
+  - **Money and orders have typed logs written in the SAME transaction as the change** (so a change can't happen without its record, and a rolled-back change leaves none): `payment_audit_log` (every payment recorded / edited / removed -- typed amount, method, paid-on date, notes, plus the previous values for an edit; written by `DrizzlePaymentsRepository`), `order_audit_log` (order created / edited / reference image removed -- an edit stores each CHANGED field as `{from, to}`, with names for a designer / master tailor change; a full-day delivery override rides on the create / edit row; written by `DrizzleOrdersRepository`), `order_price_history` (phase 2) and `order_status_history` (now with `from_status`). All four are append-only (`append_only_log()` / price-history triggers; a cascade from an order delete is the only exception) and carry the request id. Migration `20261010000001` copied the content of the older `order.*` / `payment.*` `audit_log` rows into them (the originals stay, untouched).
+  - **`audit_log`** (`common/audit/`) keeps sign-ins, sign-outs, password changes, account and QR-card events. `AuditLogger` is an interface (`audit-logger.ts`); `DrizzleAuditLogger` writes the table (`supabase/migrations/20260726000001_audit_log.sql`), filling in the actor and request id from the request context. Best-effort by contract: a failed write is logged and swallowed, never breaking the action. To send these somewhere else later, write one new class implementing `AuditLogger` -- no service changes. None of the logs has an anon/authenticated grant.
 - **Optimistic locking on order edits**: `orders.version` (integer, `supabase/migrations/20260726000002_orders_version.sql`) is returned on every order and echoed back by the edit form as `version` in `PATCH /orders/:id`. The repository bumps `version` on every update and, when a version is supplied, guards the write on it (`WHERE id = ? AND version = ?`); a second concurrent edit still holding the old version affects 0 rows and is rejected with `409 ORDER_MODIFIED` -- "someone changed this, reload" -- rather than silently clobbering the first edit. A dedicated integer column (not `updated_at`) avoids timestamp-precision round-tripping between Postgres and JS.
 - **Orphaned-file prevention** (`OrdersService`): replacing an image deletes the previous storage object once the DB points at the new one; deleting an image removes the DB row **first**, then the storage object -- so a storage failure can only leave an invisible orphaned object, never a dangling DB row that renders as a broken image. Storage-delete failures are logged, not surfaced, so cleanup never fails an otherwise-successful operation.
 - **Least-privilege DB role** (`docs/least-privilege-db-role.sql`): a template (run once by an admin at cutover, not an auto-applied migration -- it holds a password and creates a role) that provisions `needleye_app`: `LOGIN`, **not** superuser/createdb/createrole, with `SELECT/INSERT/UPDATE/DELETE` on exactly the business tables (plus sequence/function grants and default privileges for future tables). It keeps `BYPASSRLS` on purpose -- the app connects directly to Postgres (not via PostgREST), so the `auth.uid()`-based RLS meant for the Data-API path would evaluate to NULL and deny everything; the app is the trusted server enforcing authz at the application layer, exactly as Supabase's own `service_role` does. This separates **runtime** credentials (the app's `DATABASE_URL` → `needleye_app`, data access only, cannot run DDL) from **migration** credentials (the Supabase CLI / an owner role). No application code changes -- the app only ever knew a connection string.
@@ -857,17 +859,24 @@ gated by `reports:staff`, which only `owner_manager` has.
     page size; "last seen" is probed only for the rows on the page. The Staff
     Report's person picker uses the same endpoint with `role=`.
   - `openOrders` is how many orders qualify. `lastSeenAt` is their latest
-    audited action of any kind. The windows live in
+    action in ANY log (audit_log, the order / payment / stage / price logs,
+    lead_events -- one indexed top-1 probe each). The windows live in
     `domain/staff-activity.rules.ts`, and the response echoes them so the UI
     never hard-codes them.
 - **`GET /reports/activity-days`** returns today and the 6 days before it, in
   the shop's timezone. It doesn't query the database.
-- **`GET /reports/activity?day&limit&offset`** returns one day of the audit
-  trail, newest first, paginated (at most 100 per page). Each event carries the
-  actor's name and role, plus the order number or account name.
-  - `payment.*` events are excluded: those are the Revenue & Ledger feed.
+- **`GET /reports/activity?day&category&limit&offset`** returns one day of ONE
+  category, newest first, paginated (at most 100 per page), plus `counts` for
+  all five categories (the web's tabs). Each category reads its own log:
+  `orders` (order_audit_log + order_price_history), `stages`
+  (order_status_history moves), `payments` (payment_audit_log), `leads`
+  (lead_events), `accounts` (audit_log `auth.*` / `user.*` -- the older
+  order/payment rows there are left out). Each event carries the actor's name
+  and role, the order / lead number or account name, and the category's facts
+  in `details` (an edit's changes, a price's before/after and reason, a stage's
+  from/to, a payment's typed values).
   - A day outside the last 7 gets a 400. The web loads each day only when the
-    owner opens it.
+    owner opens it, and each tab only when chosen.
 - **Days are shop days.** `BUSINESS_TIMEZONE` (default `Asia/Kolkata`) defines
   midnight. The repository turns the day into a UTC range
   (`(day::date)::timestamp at time zone tz` up to the next day), so the
@@ -880,8 +889,11 @@ Indexes (from the query audit, see `docs/performance/`): the partial
 `20260925000001_reporting_indexes.sql`. The staff report's weekly "completed"
 count uses the partial `order_status_history_completed_idx`
 (`20260925000002_completed_events_index.sql`).
-`order.updated` audit metadata lists the fields the form *submitted*, not only
-the ones that changed, so the web feed just says "Edited order …".
+Each log has a `created_at` index for the day range and an
+`(actor, created_at)` index for "last seen" (`20261010000001`). An order edit
+logs only the fields that actually changed (`diffOrderFields`, against the row
+locked for the edit), so the feed can say "Due date: 20 Oct → 25 Oct". Rows
+copied from before the split only named the fields the form submitted.
 
 ### Leads and the public enquiry form
 
@@ -968,14 +980,11 @@ e.g. 7 gives 7th-to-6th billing cycles), computed in SQL with `date_trunc` +
 page's "Ledger Activity" section: every payment recorded / edited / removed in
 the window, newest first, decoded for display (who, when, which order, and what
 changed — before/after amounts for an edit, a signed amount for a
-record/removal). It reads the append-only `audit_log` (`entity_type =
-'payment'`), joining `profiles` for the actor name and `orders` for the order
-number via the event's `metadata->>'orderId'`; nothing is mutated. The write
-side enriches this: `PaymentsService.updatePayment` now records a full
-`before`/`after` snapshot so an edit is legible in the feed. Paginated (the
-UI's year/month/week filters map to a `[from, to]` here). A composite index
-`audit_log (entity_type, created_at desc)` backs the equality+range+order
-access pattern. Registered before `/orders/{id}` so `ledger-events` isn't
+record/removal) -- with each payment's paid-on date. It reads
+`payment_audit_log` (typed values, written in each payment's own transaction,
+ADR 0008), joining `profiles` for the actor name and `orders` for the order
+number; nothing is mutated. Paginated (the UI's year/month/week filters map to a
+`[from, to]` here); `payment_audit_log (created_at)` backs the range. Registered before `/orders/{id}` so `ledger-events` isn't
 matched as an order id. Days are the **shop's** days (`BUSINESS_TIMEZONE`), so
 a payment at 00:30 IST on 1 July files under July, not June.
 
@@ -1352,7 +1361,7 @@ sequenceDiagram
     participant Rules as delivery-capacity.rules.ts
     participant Repo as DrizzleOrdersRepository
     participant DB as Postgres (transaction)
-    participant Audit as audit_log
+    participant Audit as order_audit_log
 
     User->>API: GET /orders/delivery-load?from=D&to=D (as the date is picked)
     API-->>User: 200 { capacity, nearCapacity, days }  (the UI shows available / full)
@@ -1367,10 +1376,9 @@ sequenceDiagram
         Rules-->>Repo: throws ConflictError (409 DELIVERY_DAY_FULL, {dueDate, booked, capacity})
         Repo-->>User: 409 (rolled back) -> the web reopens the full-day dialog
     else room left, or confirmed with the Production Manager
-        Repo->>DB: INSERT INTO orders ...; COMMIT (lock released)
-        opt the day was full (override used)
-            Svc->>Audit: order.delivery_override {dueDate, capacity, bookedBefore}
-        end
+        Repo->>DB: INSERT INTO orders ...
+        Repo->>Audit: INSERT "created" (details.deliveryOverride {dueDate, capacity, bookedBefore} when the day was full)
+        Repo->>DB: COMMIT (lock released) -- the order and its log row together
         Svc-->>User: 201 { order }
     end
     Note over Repo,DB: PATCH /orders/:id is the same, plus SELECT due_date FOR UPDATE first; unchanged date = no check
@@ -1398,11 +1406,11 @@ sequenceDiagram
 
     Owner->>API: GET /reports/activity-days
     API-->>Owner: 200 { timeZone, today, days[7] }  (no DB; days are closed in the UI)
-    Owner->>API: GET /reports/activity?day=D  (only when the owner opens day D)
+    Owner->>API: GET /reports/activity?day=D&category=C  (when day D is opened, and when tab C is chosen)
     Svc->>Rules: assertActivityDay(D, today in BUSINESS_TIMEZONE) -- else 400
-    Svc->>Repo: getActivityDay(D, tz, exclude "payment.", limit, offset)
-    Repo->>DB: audit_log where created_at in [D 00:00, D+1 00:00) shop time, action not like 'payment.%'
-    API-->>Owner: 200 { events, total }  ("Show more" asks for the next offset)
+    Svc->>Repo: getActivityDay(D, tz, C, limit, offset) + getActivityCounts(D, tz)
+    Repo->>DB: C's own log where created_at in [D 00:00, D+1 00:00) shop time; one count per log
+    API-->>Owner: 200 { category, counts, events, total }  ("Show more" asks for the next offset)
 ```
 
 ### A public enquiry becomes an order (Leads)
@@ -1463,7 +1471,7 @@ sequenceDiagram
 | GET `/orders/delivery-load`                   | bearer | `orders:create`                                        | orders.routes.ts       | `getDeliveryLoad`                       | `countOrdersDueByDay` (shop-wide; registered before `/:id`)                       |
 | GET `/orders/revenue`                         | bearer | `reports:financial`                                    | orders.routes.ts       | `getMonthlyRevenue`                     | `getMonthlyRevenue` (registered before `/:id`)                                    |
 | GET `/orders/staff-report`                    | bearer | `reports:staff`                                        | orders.routes.ts       | `getStaffReport`                        | `getStaffReport` (one designer/master on demand; registered before `/:id`)        |
-| GET `/orders/ledger-events`                   | bearer | `reports:financial`                                    | orders.routes.ts       | `getLedgerEvents`                       | `getLedgerEvents` (payment audit trail; paginated; registered before `/:id`)      |
+| GET `/orders/ledger-events`                   | bearer | `reports:financial`                                    | orders.routes.ts       | `getLedgerEvents`                       | `getLedgerEvents` (payment_audit_log; paginated; registered before `/:id`)       |
 | GET `/orders/ledger-events/export`            | bearer | `reports:financial`                                    | orders.routes.ts       | `getLedgerExport`                       | `getLedgerEvents` (one week/month, unpaged; > 31 days refused)                    |
 | GET `/orders/:id`                             | bearer | `orders:read`                                          | orders.routes.ts       | `getOrder`                              | `findById` row-scoped, else `findAnyById` (view-only outsider, payments stripped) |
 | PATCH `/orders/:id`                           | bearer | field-split, see below                                 | orders.routes.ts       | `updateOrder`                           | `findBasicById`, `update`                                                         |
@@ -1477,7 +1485,7 @@ sequenceDiagram
 | DELETE `/orders/:orderId/payments/:paymentId` | bearer | `payments:manage`                                      | payments.routes.ts     | `deletePayment`                         | `findOrderContext`, `findById`, `sumByOrderId`, `delete`                          |
 | GET `/reports/staff-activity`                | bearer | `reports:staff`                                        | reports.routes.ts      | `getStaffActivity`                      | `getStaffWorkload` (searched/filtered/paged in SQL, max 50; owner + accountant never listed) |
 | GET `/reports/activity-days`                 | bearer | `reports:staff`                                        | reports.routes.ts      | `getActivityDays`                       | -- (no DB; shop-timezone day list)                                                |
-| GET `/reports/activity`                      | bearer | `reports:staff`                                        | reports.routes.ts      | `getActivityDay`                        | `getActivityDay` (one shop day of audit_log, payment.* excluded, paginated)     |
+| GET `/reports/activity`                      | bearer | `reports:staff`                                        | reports.routes.ts      | `getActivityDay`                        | `getActivityDay` + `getActivityCounts` (one shop day, one category's log, paged) |
 | GET `/leads`                                  | bearer | `leads:read` (designer: own)                           | leads.routes.ts        | `list`                                  | `list` (stage/urgent/q/designer filters, paged, max 50)                           |
 | POST `/leads`                                 | bearer | `leads:manage`                                         | leads.routes.ts        | `createManual`                          | `createManual`                                                                    |
 | GET `/leads/summary`                          | bearer | `leads:read`                                           | leads.routes.ts        | `summary`                               | `summary` (counts by stage + urgent)                                              |

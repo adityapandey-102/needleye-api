@@ -5,6 +5,7 @@ import { logger } from "../logger/logger";
 import { instrumentPoolTiming } from "./query-timing";
 import { describeDbError, dbErrorLabel } from "./db-logging";
 import * as paymentsSchema from "../../modules/payments/infrastructure/payments.schema";
+import * as paymentAuditLogSchema from "../../modules/payments/infrastructure/payment-audit-log.schema";
 import * as usersSchema from "../../modules/users/infrastructure/profile.schema";
 import * as authSchema from "../../modules/auth/infrastructure/qr-login.schema";
 import * as orderSchema from "../../modules/orders/infrastructure/order.schema";
@@ -12,6 +13,7 @@ import * as orderImageSchema from "../../modules/orders/infrastructure/order-ima
 import * as orderCounterSchema from "../../modules/orders/infrastructure/order-counter.schema";
 import * as orderStatusHistorySchema from "../../modules/orders/infrastructure/order-status-history.schema";
 import * as orderPriceHistorySchema from "../../modules/orders/infrastructure/order-price-history.schema";
+import * as orderAuditLogSchema from "../../modules/orders/infrastructure/order-audit-log.schema";
 import * as orderRelationsSchema from "../../modules/orders/infrastructure/order.relations";
 import * as auditLogSchema from "../audit/audit-log.schema";
 import * as leadsSchema from "../../modules/leads/infrastructure/leads.schema";
@@ -33,6 +35,7 @@ import * as leadsSchema from "../../modules/leads/infrastructure/leads.schema";
  */
 const schema = {
   ...paymentsSchema,
+  ...paymentAuditLogSchema,
   ...usersSchema,
   ...authSchema,
   ...orderSchema,
@@ -40,6 +43,7 @@ const schema = {
   ...orderCounterSchema,
   ...orderStatusHistorySchema,
   ...orderPriceHistorySchema,
+  ...orderAuditLogSchema,
   ...orderRelationsSchema,
   ...auditLogSchema,
   ...leadsSchema,

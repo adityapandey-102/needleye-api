@@ -14,8 +14,20 @@ export interface DueDateCapacityFacts {
   previousDueDate: string | null;
 }
 
-/** Throws to veto a write; see OrdersRepositoryPort.create/update. */
-export type DueDateCapacityGuard = (facts: DueDateCapacityFacts) => void;
+/** A booking onto a full delivery day, confirmed with the Production Manager -- logged with the order's create / edit. */
+export interface DeliveryOverride {
+  dueDate: string;
+  /** Orders already on that day before this one. */
+  bookedBefore: number;
+  capacity: number;
+}
+
+/**
+ * Throws to veto a write; returns the override when the write books a full
+ * day with the PM's OK, so the repository logs it with the change (in the same
+ * transaction). See OrdersRepositoryPort.create/update.
+ */
+export type DueDateCapacityGuard = (facts: DueDateCapacityFacts) => DeliveryOverride | void;
 
 /**
  * "This order is for that lead": the lead is marked Converted in the SAME
@@ -196,14 +208,20 @@ export interface StaffReportRaw {
 }
 
 /** One payment-ledger audit event (created/updated/deleted), joined with the actor + order for display. */
+/** One payment_audit_log row (ADR 0008): typed values, money as 2dp strings. */
 export interface LedgerEventRaw {
   id: string;
-  action: string;
+  action: "created" | "updated" | "deleted";
   createdAt: string;
   actorName: string | null;
   orderId: string | null;
   orderNumber: string | null;
-  metadata: Record<string, unknown> | null;
+  amount: string;
+  method: string;
+  paidAt: string;
+  previousAmount: string | null;
+  previousMethod: string | null;
+  previousPaidAt: string | null;
 }
 
 export interface LedgerEventsResult {
@@ -231,7 +249,7 @@ export interface OrdersRepositoryPort {
    * person -> month -> this call).
    */
   getStaffReport(staffId: string, range: { from: string; to: string }): Promise<StaffReportRaw | null>;
-  /** Paginated payment-ledger audit events (created/updated/deleted) in a date range, newest first -- backs the ledger-activity history. */
+  /** Paginated payment-ledger events (payment_audit_log: created/updated/deleted) in a date range, newest first -- backs the ledger-activity history. */
   getLedgerEvents(range: { from: string; to: string }, page: OrderListPage): Promise<LedgerEventsResult>;
   findBasicById(id: string): Promise<OrderBasicInfo | null>;
   /**
@@ -243,7 +261,8 @@ export interface OrdersRepositoryPort {
    */
   countOrdersDueByDay(range: { from: string; to: string }, excludeOrderId?: string): Promise<{ date: string; count: number }[]>;
   /**
-   * Inserts the order + its first status-history row in one transaction.
+   * Inserts the order + its first status-history row + its "created" audit
+   * row (and, when priced at booking, its first price-history row) in one transaction.
    * `assertDueDateCapacity`, when given, runs inside that transaction AFTER a
    * per-date lock is taken, with how many orders already sit on the due date --
    * so two people booking the last slot at once serialise, and the second sees
@@ -252,7 +271,9 @@ export interface OrdersRepositoryPort {
    */
   create(data: NewOrderRecord, assertDueDateCapacity?: DueDateCapacityGuard, leadLink?: LeadLink): Promise<OrderEntity>;
   /**
-   * Updates the order and bumps its `version`. If `expectedVersion` is given,
+   * Updates the order, bumps its `version`, and logs the changed fields
+   * (before -> after, order_audit_log) in the same transaction -- against the
+   * row it locks first, so the "before" values are exact. If `expectedVersion` is given,
    * the write is guarded on it (optimistic lock) and throws ORDER_MODIFIED
    * when the stored version has moved on -- i.e. someone else edited it first.
    * `assertDueDateCapacity` (only meaningful when `data.dueDate` is set) runs
@@ -294,7 +315,8 @@ export interface OrdersRepositoryPort {
   listPriceHistory(orderId: string): Promise<OrderPriceChangeEntity[]>;
   upsertImage(data: NewImageRecord): Promise<void>;
   findImage(orderId: string, slot: number): Promise<OrderImageInfo | null>;
-  deleteImage(orderId: string, slot: number): Promise<void>;
+  /** Removes the image reference and logs it (order_audit_log) in one transaction. */
+  deleteImage(orderId: string, slot: number, actorId: string): Promise<void>;
   /** Real (not cached) sum of the payment ledger -- used to compute amountPaid/outstanding and the fully_paid consistency check. */
   sumPaymentsForOrder(orderId: string): Promise<string>;
   /** Batched form of sumPaymentsForOrder, for listOrders -- one grouped aggregate query, not one query per row. Money as 2dp strings. */

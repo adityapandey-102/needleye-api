@@ -33,7 +33,9 @@ export interface UpdatePaymentRecord {
  * enforces the no-overpayment invariant, writes the payment, and recomputes the
  * order's derived payment_status -- so two staff recording payments on the same
  * order at once serialize instead of both passing a stale overpayment check.
- * This mirrors OrdersRepository.updateStatus (see ADR 0005).
+ * This mirrors OrdersRepository.updateStatus (see ADR 0005). Each one also
+ * appends its payment_audit_log row (typed values, who, which request) in that
+ * same transaction -- the record of a money change can't be lost (ADR 0008).
  */
 export interface PaymentsRepositoryPort {
   findOrderContext(orderId: string): Promise<OrderLedgerContext | null>;
@@ -58,11 +60,11 @@ export interface PaymentsRepositoryPort {
    * recomputes payment_status (the next-payment schedule is left untouched).
    * Returns null if the payment doesn't exist on that order.
    */
-  editPayment(orderId: string, paymentId: string, data: UpdatePaymentRecord): Promise<PaymentEntity | null>;
+  editPayment(orderId: string, paymentId: string, data: UpdatePaymentRecord, actorId: string): Promise<PaymentEntity | null>;
   /**
    * Removes a payment atomically under an order row lock and recomputes the
    * order's payment_status from the reduced ledger. Returns false if the
    * payment doesn't exist on that order.
    */
-  removePayment(orderId: string, paymentId: string): Promise<boolean>;
+  removePayment(orderId: string, paymentId: string, actorId: string): Promise<boolean>;
 }

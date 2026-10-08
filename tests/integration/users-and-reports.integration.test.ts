@@ -6,7 +6,8 @@ import { createFixtureUser, deleteFixtureUser, deleteFixtureOrder, closeDb } fro
 import { db } from "../../src/common/database/drizzle-client";
 import { orderStatusHistory } from "../../src/modules/orders/infrastructure/order-status-history.schema";
 import { DrizzleOrdersRepository } from "../../src/modules/orders/infrastructure/drizzle-orders.repository";
-import { auditLog } from "../../src/common/audit/audit-log.schema";
+import { paymentAuditLog } from "../../src/modules/payments/infrastructure/payment-audit-log.schema";
+import { randomUUID } from "node:crypto";
 import { orders } from "../../src/modules/orders/infrastructure/order.schema";
 import { and, eq } from "drizzle-orm";
 import { businessToday } from "../../src/common/time/business-date";
@@ -402,53 +403,55 @@ describe("Users & reports (integration)", () => {
 
   it("exports one week/month of ledger activity unpaged, by SHOP day, and refuses longer windows", async () => {
     const owner = await createFixtureUser("owner_manager", "Export Owner");
-    createdUserIds.push(owner.id);
+    const master = await createFixtureUser("master_tailor", "Export Master");
+    createdUserIds.push(owner.id, master.id);
     const session = await authProvider.signInWithPassword(owner.email, owner.password);
     const auth = `Bearer ${session.accessToken}`;
+    const order = await new DrizzleOrdersRepository().create({
+      customerName: "Export", phone: "9000000000", billNumber: `EXP-${Date.now()}`,
+      bookingDate: "2026-10-01", dueDate: "2039-01-01", nextPaymentDate: null, designerId: owner.id, masterTailorId: master.id,
+      productCategory: "saree", orderDetails: "export", handWork: false, machineWork: false, purchaseRequired: false,
+      paymentStatus: "unpaid", totalAmount: "1000.00", productionStatus: "design_pending",
+      designerInstructions: null, specialNotes: null, createdBy: owner.id, updatedBy: owner.id,
+    });
+    createdOrderIds.push(order.id); // its log rows go with it (cascade)
     // Far-future instants so no real activity shares the window. 18:15Z = 23:45 IST on 30 Jun;
     // 18:45Z = 00:15 IST on 1 Jul -- a UTC-midnight cut would file BOTH under June.
-    const marker = `export-${Date.now()}`;
-    const inserted = await db
-      .insert(auditLog)
-      .values([
-        { actorId: owner.id, action: "payment.created", entityType: "payment", entityId: marker, metadata: { amount: "500.00", method: "cash" }, createdAt: new Date("2031-06-30T18:15:00Z") },
-        { actorId: owner.id, action: "payment.deleted", entityType: "payment", entityId: marker, metadata: { amount: "200.00", method: "upi" }, createdAt: new Date("2031-06-30T18:45:00Z") },
-      ])
-      .returning({ id: auditLog.id });
-    try {
-      const june = await request(app).get("/api/v1/orders/ledger-events/export?from=2031-06-01&to=2031-06-30").set("Authorization", auth);
-      expect(june.status).toBe(200);
-      const juneBody = june.body as { events: { id: string; action: string; actorName: string; snapshot?: { amount: string } }[]; total: number; timeZone: string };
-      expect(juneBody.timeZone).toBeTruthy();
-      expect(juneBody.events.map((e) => e.action)).toEqual(["created"]);
-      expect(juneBody.events[0]!.snapshot?.amount).toBe("500.00");
-      expect(juneBody.events[0]!.actorName).toBe("Export Owner");
+    await db.insert(paymentAuditLog).values([
+      { paymentId: randomUUID(), orderId: order.id, action: "created", amount: "500.00", method: "cash", paidAt: "2031-06-30", actorId: owner.id, createdAt: new Date("2031-06-30T18:15:00Z") },
+      { paymentId: randomUUID(), orderId: order.id, action: "deleted", amount: "200.00", method: "upi", paidAt: "2031-06-28", actorId: owner.id, createdAt: new Date("2031-06-30T18:45:00Z") },
+    ]);
+    const june = await request(app).get("/api/v1/orders/ledger-events/export?from=2031-06-01&to=2031-06-30").set("Authorization", auth);
+    expect(june.status).toBe(200);
+    const juneBody = june.body as { events: { id: string; action: string; actorName: string; snapshot?: { amount: string } }[]; total: number; timeZone: string };
+    expect(juneBody.timeZone).toBeTruthy();
+    expect(juneBody.events.map((e) => e.action)).toEqual(["created"]);
+    expect(juneBody.events[0]!.snapshot?.amount).toBe("500.00");
+    expect(juneBody.events[0]!.snapshot).toMatchObject({ method: "cash", paidAt: "2031-06-30" });
+    expect(juneBody.events[0]!.actorName).toBe("Export Owner");
 
-      const july = await request(app).get("/api/v1/orders/ledger-events/export?from=2031-07-01&to=2031-07-31").set("Authorization", auth);
-      expect((july.body as { events: { action: string }[] }).events.map((e) => e.action)).toEqual(["deleted"]);
+    const july = await request(app).get("/api/v1/orders/ledger-events/export?from=2031-07-01&to=2031-07-31").set("Authorization", auth);
+    expect((july.body as { events: { action: string }[] }).events.map((e) => e.action)).toEqual(["deleted"]);
 
-      // The paged Ledger Activity table uses the same shop-day window.
-      const table = await request(app).get("/api/v1/orders/ledger-events?from=2031-06-01&to=2031-06-30").set("Authorization", auth);
-      expect((table.body as { total: number }).total).toBe(1);
+    // The paged Ledger Activity table uses the same shop-day window.
+    const table = await request(app).get("/api/v1/orders/ledger-events?from=2031-06-01&to=2031-06-30").set("Authorization", auth);
+    expect((table.body as { total: number }).total).toBe(1);
 
-      // No yearly (or > 31-day) export, no backwards or fake dates.
-      for (const q of ["from=2031-01-01&to=2031-12-31", "from=2031-07-01&to=2031-08-01", "from=2031-07-10&to=2031-07-01", "from=2031-02-30&to=2031-03-01", "to=2031-07-31"]) {
-        const bad = await request(app).get(`/api/v1/orders/ledger-events/export?${q}`).set("Authorization", auth);
-        expect(bad.status, q).toBe(400);
-        expect((bad.body as { code: string }).code, q).toBe("LEDGER_EXPORT_RANGE_INVALID");
-      }
-
-      // Same audience as the ledger: a designer is refused.
-      const designer = await createFixtureUser("designer", "Export Nosy Designer");
-      createdUserIds.push(designer.id);
-      const dSession = await authProvider.signInWithPassword(designer.email, designer.password);
-      const forbidden = await request(app)
-        .get("/api/v1/orders/ledger-events/export?from=2031-06-01&to=2031-06-30")
-        .set("Authorization", `Bearer ${dSession.accessToken}`);
-      expect(forbidden.status).toBe(403);
-    } finally {
-      for (const row of inserted) await db.delete(auditLog).where(eq(auditLog.id, row.id));
+    // No yearly (or > 31-day) export, no backwards or fake dates.
+    for (const q of ["from=2031-01-01&to=2031-12-31", "from=2031-07-01&to=2031-08-01", "from=2031-07-10&to=2031-07-01", "from=2031-02-30&to=2031-03-01", "to=2031-07-31"]) {
+      const bad = await request(app).get(`/api/v1/orders/ledger-events/export?${q}`).set("Authorization", auth);
+      expect(bad.status, q).toBe(400);
+      expect((bad.body as { code: string }).code, q).toBe("LEDGER_EXPORT_RANGE_INVALID");
     }
+
+    // Same audience as the ledger: a designer is refused.
+    const designer = await createFixtureUser("designer", "Export Nosy Designer");
+    createdUserIds.push(designer.id);
+    const dSession = await authProvider.signInWithPassword(designer.email, designer.password);
+    const forbidden = await request(app)
+      .get("/api/v1/orders/ledger-events/export?from=2031-06-01&to=2031-06-30")
+      .set("Authorization", `Bearer ${dSession.accessToken}`);
+    expect(forbidden.status).toBe(403);
   });
 
   it("a ₹0 order (free work) is fully_paid and stays out of Pending Payments; editing the total re-derives it", async () => {

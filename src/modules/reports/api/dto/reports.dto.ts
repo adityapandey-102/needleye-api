@@ -1,5 +1,11 @@
 import { z } from "zod";
-import { TRACKED_STAFF_ROLES, type StaffStatus, type TrackedStaffRole } from "../../domain/staff-activity.rules";
+import {
+  ACTIVITY_CATEGORIES,
+  TRACKED_STAFF_ROLES,
+  type ActivityCategory,
+  type StaffStatus,
+  type TrackedStaffRole,
+} from "../../domain/staff-activity.rules";
 
 /** A real calendar date in YYYY-MM-DD (rejects 2026-02-31). */
 const isoDate = z
@@ -29,9 +35,10 @@ export const staffActivityQuerySchema = z.object({
 
 export type StaffActivityQuery = z.infer<typeof staffActivityQuerySchema>;
 
-/** GET /reports/activity?day=&limit=&offset= -- one day of the feed, a page at a time. */
+/** GET /reports/activity?day=&category=&limit=&offset= -- one day, one category, a page at a time. */
 export const activityQuerySchema = z.object({
   day: isoDate,
+  category: z.enum(ACTIVITY_CATEGORIES).default("orders"),
   limit: z.coerce.number().int().min(1).max(ACTIVITY_PAGE_MAX).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 });
@@ -72,22 +79,29 @@ export interface ActivityDaysResponseDto {
 
 export interface ActivityEventDto {
   id: string;
-  action: string;
-  entityType: string;
-  entityId: string | null;
+  category: ActivityCategory;
+  /** order.created, price.raise, stage.moved, payment.updated, lead.assigned, auth.login, ... */
+  kind: string;
   at: string;
   actorName: string | null;
   actorRole: string | null;
+  orderId: string | null;
   orderNumber: string | null;
+  leadId: string | null;
+  leadNumber: string | null;
   targetName: string | null;
-  metadata: Record<string, unknown> | null;
+  details: Record<string, unknown> | null;
 }
 
 /** GET /reports/activity */
 export interface ActivityDayResponseDto {
   day: string;
   timeZone: string;
+  category: ActivityCategory;
+  /** Events per category on this day -- the tab counts. */
+  counts: Record<ActivityCategory, number>;
   events: ActivityEventDto[];
+  /** Events in this category on this day (= counts[category]). */
   total: number;
   limit: number;
   offset: number;

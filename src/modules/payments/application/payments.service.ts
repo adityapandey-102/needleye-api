@@ -1,9 +1,6 @@
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
 import { toPaymentResponseDto } from "../api/payment.presenter";
-import { AUDIT_ACTIONS, AUDIT_ENTITIES } from "../../../common/audit/audit-actions";
-import { auditLogger as defaultAuditLogger } from "../../../common/audit/drizzle-audit-logger";
-import type { AuditLogger } from "../../../common/audit/audit-logger";
 import type { Profile } from "../../../domain";
 import type { OrderLedgerContext } from "../domain/payment.entity";
 import { assertPaidAtNotFuture } from "../domain/payment-ledger.rules";
@@ -22,19 +19,17 @@ interface AuthContext {
 }
 
 /**
- * Application/use-case layer for Payments: enforces access, translates domain
- * entities into response DTOs, and writes the audit trail. The money invariant
- * (no overpayment) and the derived-status recompute live in the repository's
- * atomic, order-locked mutations (recordPayment/editPayment/removePayment) so
- * concurrent writes to the same order can't race -- see ADR 0005. Depends only
- * on the PaymentsRepositoryPort interface, never on Drizzle or any concrete
- * adapter.
+ * Application/use-case layer for Payments: enforces access and translates
+ * domain entities into response DTOs. The money invariant (no overpayment),
+ * the derived-status recompute and the payment_audit_log row all live in the
+ * repository's atomic, order-locked mutations (recordPayment/editPayment/
+ * removePayment), so concurrent writes to the same order can't race and a
+ * money change can't happen without its log row -- see ADR 0005 and 0008.
+ * Depends only on the PaymentsRepositoryPort interface, never on Drizzle or
+ * any concrete adapter.
  */
 export class PaymentsService {
-  constructor(
-    private readonly paymentsRepository: PaymentsRepositoryPort,
-    private readonly audit: AuditLogger = defaultAuditLogger,
-  ) {}
+  constructor(private readonly paymentsRepository: PaymentsRepositoryPort) {}
 
   async listPayments(ctx: AuthContext, orderId: string): Promise<PaymentResponseDto[]> {
     await this.loadOrderForAccess(ctx, orderId);
@@ -62,12 +57,6 @@ export class PaymentsService {
       },
       dto.nextPaymentDate,
     );
-    await this.audit.record({
-      action: AUDIT_ACTIONS.PAYMENT_CREATED,
-      entityType: AUDIT_ENTITIES.PAYMENT,
-      entityId: entity.id,
-      metadata: { orderId, amount: dto.amount, method: dto.method, paidAt: entity.paidAt },
-    });
     return toPaymentResponseDto(entity);
   }
 
@@ -76,10 +65,6 @@ export class PaymentsService {
 
     await this.loadOrderForAccess(ctx, orderId);
     if (dto.paidAt !== undefined) assertPaidAtNotFuture(dto.paidAt, businessToday(new Date(), env.BUSINESS_TIMEZONE));
-    // Read the "before" snapshot for the audit trail (outside the lock is fine --
-    // the atomic edit re-reads and re-checks under the lock).
-    const existing = await this.paymentsRepository.findById(orderId, paymentId);
-    if (!existing) throw new NotFoundError("Payment not found", ERROR_CODES.PAYMENT_NOT_FOUND);
 
     const updates: UpdatePaymentRecord = {};
     if (dto.amount !== undefined) updates.amount = dto.amount;
@@ -87,37 +72,17 @@ export class PaymentsService {
     if (dto.paidAt !== undefined) updates.paidAt = dto.paidAt;
     if (dto.notes !== undefined) updates.notes = dto.notes || null;
 
-    const entity = await this.paymentsRepository.editPayment(orderId, paymentId, updates);
+    // The before/after record is written by the repository, in the edit's own transaction.
+    const entity = await this.paymentsRepository.editPayment(orderId, paymentId, updates, ctx.authUserId);
     if (!entity) throw new NotFoundError("Payment not found", ERROR_CODES.PAYMENT_NOT_FOUND);
-    // Record the full before/after so the ledger-event history can show what
-    // changed (e.g. amount ₹800 -> ₹1000).
-    await this.audit.record({
-      action: AUDIT_ACTIONS.PAYMENT_UPDATED,
-      entityType: AUDIT_ENTITIES.PAYMENT,
-      entityId: paymentId,
-      metadata: {
-        orderId,
-        before: { amount: existing.amount, method: existing.method, paidAt: existing.paidAt, notes: existing.notes },
-        after: { amount: entity.amount, method: entity.method, paidAt: entity.paidAt, notes: entity.notes },
-      },
-    });
     return toPaymentResponseDto(entity);
   }
 
   async deletePayment(ctx: AuthContext, orderId: string, paymentId: string): Promise<void> {
     await this.loadOrderForAccess(ctx, orderId);
-    const existing = await this.paymentsRepository.findById(orderId, paymentId);
-    if (!existing) throw new NotFoundError("Payment not found", ERROR_CODES.PAYMENT_NOT_FOUND);
-
-    const removed = await this.paymentsRepository.removePayment(orderId, paymentId);
+    // The removed values are logged by the repository, in the removal's own transaction.
+    const removed = await this.paymentsRepository.removePayment(orderId, paymentId, ctx.authUserId);
     if (!removed) throw new NotFoundError("Payment not found", ERROR_CODES.PAYMENT_NOT_FOUND);
-    await this.audit.record({
-      action: AUDIT_ACTIONS.PAYMENT_DELETED,
-      entityType: AUDIT_ENTITIES.PAYMENT,
-      entityId: paymentId,
-      // The removed values, so the ledger-event history can show what was deleted.
-      metadata: { orderId, amount: existing.amount, method: existing.method, paidAt: existing.paidAt },
-    });
   }
 
   /**

@@ -56,6 +56,16 @@ export function assertActivityDay(day: string, today: string): void {
   }
 }
 
-/** Payment events are the accountant's ledger (Revenue & Ledger), not staff activity. */
-export const EXCLUDED_ACTIVITY_PREFIXES = ["payment."] as const;
+/**
+ * The daily activity feed's categories (ADR 0008, phase 3) -- one tab each, so
+ * a busy day reads by kind instead of as one long list. Each is its own log,
+ * filtered and paged in the database:
+ *   orders    order_audit_log (created / edited / image removed) + order_price_history
+ *   stages    order_status_history (moves only -- not an order's starting stage)
+ *   payments  payment_audit_log
+ *   leads     lead_events
+ *   accounts  audit_log (sign-ins, sign-outs, passwords, accounts, QR cards)
+ */
+export const ACTIVITY_CATEGORIES = ["orders", "stages", "payments", "leads", "accounts"] as const;
+export type ActivityCategory = (typeof ACTIVITY_CATEGORIES)[number];
 

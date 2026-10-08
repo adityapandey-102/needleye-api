@@ -37,7 +37,18 @@ import { DrizzleLeadsRepository } from "../../src/modules/leads/infrastructure/d
 const TIME_BUDGET_MS = 150;
 /** A sequential scan over a table this big (actual rows read) fails the audit. */
 const SEQ_SCAN_ROW_LIMIT = 5_000;
-const BIG_TABLES = new Set(["orders", "order_status_history", "payments", "audit_log", "leads", "lead_comments", "lead_events"]);
+const BIG_TABLES = new Set([
+  "orders",
+  "order_status_history",
+  "payments",
+  "audit_log",
+  "leads",
+  "lead_comments",
+  "lead_events",
+  "order_audit_log",
+  "payment_audit_log",
+  "order_price_history",
+]);
 const VOLUME = { orders: 12_000, movesPerOrder: 12, paymentsPerOrder: 2, auditRows: 360_000, leads: 20_000, commentsPerLead: 2, eventsPerLead: 3 };
 
 const url = process.env.DATABASE_URL ?? "";
@@ -182,7 +193,14 @@ async function main() {
       expectedScan: SHOP_WIDE(["orders"], "shop-wide revenue for the year"),
     },
     { name: "staff report (one designer, month)", run: () => orders.getStaffReport(designerId, { from: `${month}-01`, to: today }) },
-    { name: "ledger events page", run: () => orders.getLedgerEvents({ from: yearStart, to: today }, { limit: 20, offset: 0 }) },
+    {
+      name: "ledger events page",
+      run: () => orders.getLedgerEvents({ from: yearStart, to: today }, { limit: 20, offset: 0 }),
+      expectedScan: SHOP_WIDE(
+        ["payment_audit_log"],
+        "the Year view counts a year of ledger events -- a third of this log at this size, so the planner may read it whole; a bigger log uses the created_at index",
+      ),
+    },
     { name: "delivery load (2 months)", run: () => orders.countOrdersDueByDay({ from: `${month}-01`, to: today }) },
     { name: "payments for an order", run: () => payments.findByOrderId(orderId) },
     {
@@ -199,11 +217,12 @@ async function main() {
     },
     { name: "reports: team status search", run: () => reports.getStaffWorkload({ ...W, search: "an", limit: 20, offset: 0 }) },
     { name: "reports: team status picker (masters)", run: () => reports.getStaffWorkload({ ...W, role: "master_tailor", limit: 20, offset: 0 }) },
-    {
-      name: "reports: activity day",
-      run: () =>
-        reports.getActivityDay({ day: today, timeZone: "Asia/Kolkata", excludePrefixes: ["payment."], limit: 50, offset: 0 }),
-    },
+    // The daily activity feed: one category of one day, plus every category's count (ADR 0008).
+    ...(["orders", "stages", "payments", "leads", "accounts"] as const).map((category) => ({
+      name: `reports: activity day (${category})`,
+      run: () => reports.getActivityDay({ day: today, timeZone: "Asia/Kolkata", category, limit: 50, offset: 0 }),
+    })),
+    { name: "reports: activity counts (one day)", run: () => reports.getActivityCounts(today, "Asia/Kolkata") },
   ];
 
   cases.push(
@@ -303,8 +322,8 @@ async function fillVolume(client: pg.Client) {
     [d, m, VOLUME.orders],
   );
   await client.query(
-    `insert into order_status_history (order_id, status, label, changed_by, created_at)
-     select o.id, 'cutting', 'Cutting', ($1::uuid[])[1 + floor(random() * cardinality($1::uuid[]))::int],
+    `insert into order_status_history (order_id, status, from_status, label, changed_by, created_at)
+     select o.id, 'cutting', 'marking', 'Cutting', ($1::uuid[])[1 + floor(random() * cardinality($1::uuid[]))::int],
             o.created_at + k * interval '1 day'
      from orders o cross join generate_series(1, $2::int) k
      where o.order_number like 'PERF-%'`,
@@ -341,6 +360,33 @@ async function fillVolume(client: pg.Client) {
      cross join lateral (select a.action, case when a.action like 'auth.%' then 'session' when a.action like 'payment.%' then 'payment' else 'order' end as entity) x`,
     [s, VOLUME.auditRows],
   );
+  // The split logs (ADR 0008): per order a "created" row + 2 edits and a first price; per payment a
+  // "recorded" row, a tenth of them edited. Stage moves and leads already have their own rows above / below.
+  await client.query(
+    `insert into order_audit_log (order_id, action, changes, details, actor_id, created_at)
+     select o.id, case when k = 0 then 'created' else 'updated' end,
+            case when k = 0 then null else '{"dueDate": {"from": "2026-01-01", "to": "2026-01-05"}}'::jsonb end,
+            null, o.created_by, o.created_at + k * interval '5 days'
+     from orders o cross join generate_series(0, 2) k
+     where o.order_number like 'PERF-%'`,
+  );
+  await client.query(
+    `insert into order_price_history (order_id, kind, previous_total, new_total, collected, changed_by, created_at)
+     select o.id, 'set', null, o.total_amount, 0, o.created_by, o.created_at + interval '1 hour'
+     from orders o where o.order_number like 'PERF-%'`,
+  );
+  // A tenth are edits, which carry their previous values (the table's own rule) -- set at insert,
+  // since the log is append-only. The lateral references p, so random() runs per row.
+  await client.query(
+    `insert into payment_audit_log (payment_id, order_id, action, amount, method, paid_at, previous_amount, previous_method, previous_paid_at, actor_id, created_at)
+     select p.id, p.order_id, x.action, p.amount, p.method, p.paid_at,
+            case when x.action = 'updated' then p.amount end, case when x.action = 'updated' then p.method end,
+            case when x.action = 'updated' then p.paid_at end, p.recorded_by, p.created_at
+     from payments p
+     join orders o on o.id = p.order_id
+     cross join lateral (select case when random() < 0.1 and p.id is not null then 'updated' else 'created' end as action) x
+     where o.order_number like 'PERF-%'`,
+  );
   // 20k leads over 3 years (~18 a day): most closed, a few hundred open, spread over the designers.
   await client.query(
     `insert into leads (lead_number, customer_name, phone, requirement, source, status, assigned_to, urgent, first_enquiry_at, last_enquiry_at, created_at, updated_at)
@@ -365,7 +411,9 @@ async function fillVolume(client: pg.Client) {
      from leads l cross join generate_series(1, $1::int) k where l.lead_number like 'PL-%'`,
     [VOLUME.eventsPerLead],
   );
-  await client.query("analyze orders; analyze order_status_history; analyze payments; analyze audit_log; analyze profiles; analyze leads; analyze lead_comments; analyze lead_events;");
+  await client.query(
+    "analyze orders; analyze order_status_history; analyze payments; analyze audit_log; analyze profiles; analyze leads; analyze lead_comments; analyze lead_events; analyze order_audit_log; analyze payment_audit_log; analyze order_price_history;",
+  );
 }
 
 // ── explain + budget ──────────────────────────────────────────────────────────

@@ -1355,25 +1355,37 @@ paths:
   /reports/activity:
     get:
       tags: [Reports]
-      summary: One day of staff activity from the audit trail (payments excluded)
+      summary: One day of activity in one category, with every category's count
       description: |
-        Owner/Manager only. Every audited action on `day` (midnight to midnight
-        in the shop's timezone), newest first, paginated. `payment.*` events are
-        left out: those are the Revenue & Ledger feed. A day outside the last 7
-        is a 400. Each event carries the actor's name and role, plus the order's
-        number (order events) or the account's name (user events).
+        Owner/Manager only. One CATEGORY of what happened on `day` (midnight to
+        midnight in the shop's timezone), newest first, paged -- each category
+        is its own log (ADR 0008, phase 3), so a busy day reads by kind:
+
+        | category | log | kinds |
+        |---|---|---|
+        | `orders` | order_audit_log + order_price_history | order.created, order.updated (`details.changes`: field -> {from, to}), order.image_deleted, price.set / price.raise / price.discount |
+        | `stages` | order_status_history (moves only) | stage.moved (`details.from`, `details.to`) |
+        | `payments` | payment_audit_log | payment.created / payment.updated / payment.deleted (typed amount, method, paidAt, previous*) |
+        | `leads` | lead_events | lead.created, lead.enquiry_merged, lead.assigned, lead.status_changed, lead.converted |
+        | `accounts` | audit_log | auth.login, auth.logout, auth.password_changed, user.* |
+
+        `counts` gives every category's count for the day (the tabs) and
+        `total` the chosen one's. A day outside the last 7 is a 400. Each event
+        carries the actor's name and role, plus the order's number, the lead's
+        number, or the account's name.
       parameters:
         - { name: day, in: query, required: true, schema: { type: string, format: date } }
+        - { name: category, in: query, required: false, schema: { type: string, enum: [orders, stages, payments, leads, accounts], default: orders } }
         - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
         - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0, default: 0 } }
       responses:
         "200":
-          description: A page of that day's events, plus the day's total
+          description: A page of that day's events in the category, plus every category's count
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ActivityDay" }
         "400":
-          description: Not a real date, or not one of the last 7 days
+          description: Not a real date, not one of the last 7 days, or an unknown category
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2224,16 +2236,17 @@ components:
 
     LedgerAmountSnapshot:
       type: object
-      description: A payment's amount + method at a point in time.
+      description: A payment's amount, method and date at a point in time.
       properties:
         amount: { $ref: "#/components/schemas/Money" }
         method: { type: string, description: "cash | card | upi | bank_transfer | cheque | other" }
+        paidAt: { type: string, format: date, description: "The payment's date (payment_audit_log keeps it typed, ADR 0008)." }
 
     LedgerEvent:
       type: object
-      description: One payment-ledger audit event, decoded for display.
+      description: One payment-ledger event (a payment_audit_log row, written in the same transaction as the payment change), decoded for display.
       properties:
-        id: { type: string, format: uuid, description: The audit_log row id. }
+        id: { type: string, format: uuid, description: The payment_audit_log row id. }
         action: { type: string, enum: [created, updated, deleted], description: "created = recorded, updated = edited, deleted = removed." }
         at: { type: string, format: date-time, description: When the action happened (UTC). }
         actorName: { type: string, nullable: true, description: Who did it (null if that account was since removed). }
@@ -2406,29 +2419,45 @@ components:
               lastSeenAt: { type: string, format: date-time, nullable: true, description: "Latest audited action of any kind." }
     ActivityDay:
       type: object
-      required: [day, timeZone, events, total, limit, offset]
+      required: [day, timeZone, category, counts, events, total, limit, offset]
       properties:
         day: { type: string, format: date }
         timeZone: { type: string, example: Asia/Kolkata }
-        total: { type: integer }
+        category: { type: string, enum: [orders, stages, payments, leads, accounts] }
+        counts:
+          type: object
+          description: Events per category on this day (the tabs).
+          properties:
+            orders: { type: integer }
+            stages: { type: integer }
+            payments: { type: integer }
+            leads: { type: integer }
+            accounts: { type: integer }
+        total: { type: integer, description: "Events in the chosen category on this day (= counts[category])." }
         limit: { type: integer }
         offset: { type: integer }
         events:
           type: array
           items:
             type: object
-            required: [id, action, entityType, at]
+            required: [id, category, kind, at]
             properties:
               id: { type: string, format: uuid }
-              action: { type: string, example: order.status_changed, description: "Dotted audit code; never payment.*." }
-              entityType: { type: string, example: order }
-              entityId: { type: string, nullable: true }
+              category: { type: string, enum: [orders, stages, payments, leads, accounts] }
+              kind: { type: string, example: stage.moved, description: "What happened -- see the table on GET /reports/activity." }
               at: { type: string, format: date-time }
-              actorName: { type: string, nullable: true }
+              actorName: { type: string, nullable: true, description: "Null for the public enquiry form, or an account since removed." }
               actorRole: { type: string, nullable: true }
+              orderId: { type: string, format: uuid, nullable: true }
               orderNumber: { type: string, nullable: true }
-              targetName: { type: string, nullable: true, description: "For user events: the account acted on." }
-              metadata: { type: object, nullable: true, additionalProperties: true }
+              leadId: { type: string, format: uuid, nullable: true }
+              leadNumber: { type: string, nullable: true }
+              targetName: { type: string, nullable: true, description: "For account events: the account acted on." }
+              details:
+                type: object
+                nullable: true
+                additionalProperties: true
+                description: "The category's facts: an edit's changes, a price's previousTotal / newTotal / reason, a stage's from / to, a payment's typed values, a lead's from / to / assignedTo / note."
     DeliveryLoad:
       type: object
       required: [capacity, nearCapacity, days]

@@ -5,8 +5,7 @@ import { createApp } from "../../src/app";
 import { orders } from "../../src/modules/orders/infrastructure/order.schema";
 import { env } from "../../src/config/env";
 import { db } from "../../src/common/database/drizzle-client";
-import { auditLog } from "../../src/common/audit/audit-log.schema";
-import { AUDIT_ACTIONS } from "../../src/common/audit/audit-actions";
+import { orderAuditLog } from "../../src/modules/orders/infrastructure/order-audit-log.schema";
 import { authProvider } from "../../src/common/auth/supabase-auth-provider";
 import {
   DELIVERY_DAY_LOCK_NAMESPACE,
@@ -103,11 +102,12 @@ describe("delivery-day capacity (integration)", () => {
     return days[0]?.count ?? 0;
   }
 
+  /** The order's log rows that record a full-day override (logged with the create / edit itself, ADR 0008). */
   async function overrideAudits(orderId: string) {
     return db
       .select()
-      .from(auditLog)
-      .where(and(eq(auditLog.entityId, orderId), eq(auditLog.action, AUDIT_ACTIONS.ORDER_DELIVERY_OVERRIDE)));
+      .from(orderAuditLog)
+      .where(and(eq(orderAuditLog.orderId, orderId), sql`${orderAuditLog.details} ? 'deliveryOverride'`));
   }
 
   beforeAll(async () => {
@@ -169,7 +169,7 @@ describe("delivery-day capacity (integration)", () => {
 
     const audits = await overrideAudits(orderId);
     expect(audits).toHaveLength(1);
-    expect(audits[0]?.metadata).toMatchObject({ dueDate: day, bookedBefore: capacity, capacity });
+    expect(audits[0]?.details?.deliveryOverride).toMatchObject({ dueDate: day, bookedBefore: capacity, capacity });
   });
 
   it("does not record an override when the confirmation was sent for a day that had room", async () => {

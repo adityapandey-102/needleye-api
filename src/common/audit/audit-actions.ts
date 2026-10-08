@@ -1,7 +1,13 @@
 /**
- * Registry of audited business actions. Like ERROR_CODES, these strings are a
- * stable vocabulary -- reports and future audit-viewing UIs group by them --
- * so add new ones here rather than inlining a literal at a call site.
+ * Registry of the actions `audit_log` records. Like ERROR_CODES, these strings
+ * are a stable vocabulary -- reports group by them -- so add new ones here
+ * rather than inlining a literal at a call site.
+ *
+ * Since ADR 0008 (phase 3) audit_log holds sign-ins and account events only.
+ * Order, stage, price and payment changes have their own typed logs, written in
+ * the same transaction as the change: order_audit_log, order_status_history,
+ * order_price_history, payment_audit_log. (Older order.* / payment.* rows stay
+ * in audit_log untouched; their content was copied into those logs.)
  *
  * Convention: `<entity>.<verb>` in past tense-ish dotted form.
  */
@@ -18,20 +24,6 @@ export const AUDIT_ACTIONS = {
   USER_REACTIVATED: "user.reactivated",
   USER_PASSWORD_REGENERATED: "user.password_regenerated",
   USER_QR_GENERATED: "user.qr_generated",
-
-  // Orders
-  ORDER_CREATED: "order.created",
-  ORDER_UPDATED: "order.updated",
-  ORDER_STATUS_CHANGED: "order.status_changed",
-  ORDER_PRICE_CHANGED: "order.price_changed",
-  ORDER_IMAGE_DELETED: "order.image_deleted",
-  /** Booked onto a delivery day that was already full, after confirming with the Production Manager. */
-  ORDER_DELIVERY_OVERRIDE: "order.delivery_override",
-
-  // Payments
-  PAYMENT_CREATED: "payment.created",
-  PAYMENT_UPDATED: "payment.updated",
-  PAYMENT_DELETED: "payment.deleted",
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];
@@ -39,8 +31,6 @@ export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];
 /** Entity types an audit record can reference. */
 export const AUDIT_ENTITIES = {
   USER: "user",
-  ORDER: "order",
-  PAYMENT: "payment",
   SESSION: "session",
 } as const;
 

@@ -67,6 +67,9 @@ to needleye_app;
 -- migration 20261009000001 -- which also does this when the role exists).
 grant select, insert on public.order_price_history to needleye_app;
 revoke update, delete, truncate on public.order_price_history from needleye_app;
+-- Same for the split audit logs (ADR 0008 phase 3, migration 20261010000001).
+grant select, insert on public.order_audit_log, public.payment_audit_log to needleye_app;
+revoke update, delete, truncate on public.order_audit_log, public.payment_audit_log from needleye_app;
 
 -- 4) Sequences (future-proofing: none today, since every PK is a uuid default,
 --    but any serial column added later needs this) and functions (the

@@ -6,6 +6,8 @@ import { db } from "../../../common/database/drizzle-client";
 import { orders } from "../../orders/infrastructure/order.schema";
 import { profiles } from "../../users/infrastructure/profile.schema";
 import { payments } from "./payments.schema";
+import { paymentAuditLog, type PaymentAuditAction } from "./payment-audit-log.schema";
+import { getRequestContext } from "../../../common/context/request-context";
 import { AppError, InternalError, NotFoundError } from "../../../common/errors/app-error";
 import { ERROR_CODES } from "../../../common/errors/error-codes";
 import { addMoney, subtractMoney, toMoneyString } from "../../../common/money/money";
@@ -29,6 +31,50 @@ import type { PaymentMethod } from "../../../domain";
 
 /** The transactional client Drizzle hands the `db.transaction` callback. */
 type TxLike = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/** A payment's loggable values. Money as a 2dp string, date as YYYY-MM-DD. */
+interface PaymentValues {
+  amount: string;
+  method: string;
+  paidAt: string;
+  notes: string | null;
+}
+
+/**
+ * Appends one payment_audit_log row inside the caller's transaction (ADR 0008):
+ * the payment's values after the action (or as removed), and for an edit the
+ * values before it. The request id ties it to the application log.
+ */
+async function logPayment(
+  tx: TxLike,
+  entry: { paymentId: string; orderId: string; action: PaymentAuditAction; actorId: string; now: PaymentValues; before?: PaymentValues },
+): Promise<void> {
+  await tx.insert(paymentAuditLog).values({
+    paymentId: entry.paymentId,
+    orderId: entry.orderId,
+    action: entry.action,
+    amount: toMoneyString(entry.now.amount),
+    method: entry.now.method,
+    paidAt: entry.now.paidAt,
+    notes: entry.now.notes,
+    previousAmount: entry.before ? toMoneyString(entry.before.amount) : null,
+    previousMethod: entry.before?.method ?? null,
+    previousPaidAt: entry.before?.paidAt ?? null,
+    previousNotes: entry.before?.notes ?? null,
+    actorId: entry.actorId,
+    requestId: getRequestContext()?.requestId ?? null,
+  });
+}
+
+/** The full row an edit or removal logs as "before" -- read under the order lock. */
+async function loadPaymentValues(tx: TxLike, orderId: string, paymentId: string): Promise<PaymentValues | null> {
+  const [row] = await tx
+    .select({ amount: payments.amount, method: payments.method, paidAt: payments.paidAt, notes: payments.notes })
+    .from(payments)
+    .where(and(eq(payments.id, paymentId), eq(payments.orderId, orderId)))
+    .limit(1);
+  return row ? { amount: toMoneyString(row.amount), method: row.method, paidAt: row.paidAt, notes: row.notes } : null;
+}
 
 const PAYMENT_ROW_SELECT = {
   id: payments.id,
@@ -180,6 +226,13 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
           })
           .returning({ id: payments.id });
         if (!inserted) throw new InternalError("Failed to record payment");
+        await logPayment(tx, {
+          paymentId: inserted.id,
+          orderId: record.orderId,
+          action: "created",
+          actorId: record.recordedBy,
+          now: { amount: toMoneyString(record.amount), method: record.method, paidAt: record.paidAt, notes: record.notes },
+        });
 
         // Recompute the derived order state from the new ledger total: clear the
         // schedule once fully paid, otherwise reschedule to the supplied date
@@ -202,20 +255,14 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
     return entity;
   }
 
-  async editPayment(orderId: string, paymentId: string, data: UpdatePaymentRecord): Promise<PaymentEntity | null> {
+  async editPayment(orderId: string, paymentId: string, data: UpdatePaymentRecord, actorId: string): Promise<PaymentEntity | null> {
     let found: boolean;
     try {
       found = await db.transaction(async (tx) => {
         const { total, productionStatus } = await this.lockOrder(tx, orderId);
         assertPaymentsCorrectable(productionStatus); // 409 once delivered (ADR 0008)
         assertOrderPriced(total); // a recorded payment implies a price; belt and braces
-        const existing = (
-          await tx
-            .select({ amount: payments.amount })
-            .from(payments)
-            .where(and(eq(payments.id, paymentId), eq(payments.orderId, orderId)))
-            .limit(1)
-        )[0];
+        const existing = await loadPaymentValues(tx, orderId, paymentId);
         if (!existing) return false;
 
         const patch: Partial<typeof payments.$inferInsert> = {};
@@ -235,6 +282,17 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
         } else {
           await tx.update(payments).set(patch).where(eq(payments.id, paymentId));
         }
+
+        // Log the edit with both sides -- only when something actually changed.
+        const now: PaymentValues = {
+          amount: data.amount !== undefined ? toMoneyString(data.amount) : existing.amount,
+          method: data.method ?? existing.method,
+          paidAt: data.paidAt ?? existing.paidAt,
+          notes: data.notes !== undefined ? data.notes : existing.notes,
+        };
+        const changed =
+          now.amount !== existing.amount || now.method !== existing.method || now.paidAt !== existing.paidAt || now.notes !== existing.notes;
+        if (changed) await logPayment(tx, { paymentId, orderId, action: "updated", actorId, now, before: existing });
         return true;
       });
     } catch (error) {
@@ -248,21 +306,17 @@ export class DrizzlePaymentsRepository implements PaymentsRepositoryPort {
     return entity;
   }
 
-  async removePayment(orderId: string, paymentId: string): Promise<boolean> {
+  async removePayment(orderId: string, paymentId: string, actorId: string): Promise<boolean> {
     try {
       return await db.transaction(async (tx) => {
         const { total, productionStatus } = await this.lockOrder(tx, orderId);
         assertPaymentsCorrectable(productionStatus); // 409 once delivered (ADR 0008)
-        const existing = (
-          await tx
-            .select({ id: payments.id })
-            .from(payments)
-            .where(and(eq(payments.id, paymentId), eq(payments.orderId, orderId)))
-            .limit(1)
-        )[0];
+        const existing = await loadPaymentValues(tx, orderId, paymentId);
         if (!existing) return false;
 
         await tx.delete(payments).where(eq(payments.id, paymentId));
+        // The removed payment's values are kept in the log (the row itself is gone).
+        await logPayment(tx, { paymentId, orderId, action: "deleted", actorId, now: existing });
         // Reduced ledger -> re-derive status (schedule left untouched).
         const newSum = await this.sumInTx(tx, orderId);
         await tx.update(orders).set({ paymentStatus: derivePaymentStatus(newSum, total) }).where(eq(orders.id, orderId));

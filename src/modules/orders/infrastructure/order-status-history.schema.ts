@@ -11,6 +11,8 @@ export const orderStatusHistory = pgTable("order_status_history", {
   id: uuid("id").primaryKey().defaultRandom(),
   orderId: uuid("order_id").notNull(),
   status: text("status").notNull().$type<GranularStatus>(),
+  /** The stage it moved from; null on an order's first row (its starting stage). ADR 0008. */
+  fromStatus: text("from_status").$type<GranularStatus>(),
   label: text("label").notNull(),
   changedBy: uuid("changed_by"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

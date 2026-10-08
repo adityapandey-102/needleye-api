@@ -4,7 +4,6 @@ import {
   assertActivityDay,
   businessToday,
   DESIGNER_WORKING_WINDOW_DAYS,
-  EXCLUDED_ACTIVITY_PREFIXES,
   FLOOR_WORKING_WINDOW_DAYS,
   staffStatus,
 } from "../domain/staff-activity.rules";
@@ -62,15 +61,23 @@ export class ReportsService {
     return { timeZone: this.options.timeZone, today, days: activityDays(today) };
   }
 
+  /** One page of one category of one day, plus every category's count for that day (the tabs). */
   async getActivityDay(query: ActivityQuery): Promise<ActivityDayResponseDto> {
     assertActivityDay(query.day, businessToday(this.now(), this.options.timeZone));
-    const { events, total } = await this.repository.getActivityDay({
+    const timeZone = this.options.timeZone;
+    const [events, counts] = await Promise.all([
+      this.repository.getActivityDay({ day: query.day, timeZone, category: query.category, limit: query.limit, offset: query.offset }),
+      this.repository.getActivityCounts(query.day, timeZone),
+    ]);
+    return {
       day: query.day,
-      timeZone: this.options.timeZone,
-      excludePrefixes: EXCLUDED_ACTIVITY_PREFIXES,
+      timeZone,
+      category: query.category,
+      counts,
+      events,
+      total: counts[query.category],
       limit: query.limit,
       offset: query.offset,
-    });
-    return { day: query.day, timeZone: this.options.timeZone, events, total, limit: query.limit, offset: query.offset };
+    };
   }
 }

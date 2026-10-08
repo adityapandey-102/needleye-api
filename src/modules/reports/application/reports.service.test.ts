@@ -5,9 +5,10 @@ import type { ReportsRepositoryPort } from "./ports/reports-repository.port";
 /** A stub repository plus direct handles on its mocks (so assertions never touch unbound methods). */
 function repo(workload: unknown[] = []) {
   const getStaffWorkload = vi.fn().mockResolvedValue({ rows: workload, total: workload.length, counts: { working: 1, idle: 1 } });
-  const getActivityDay = vi.fn().mockResolvedValue({ events: [], total: 0 });
-  const port: ReportsRepositoryPort = { getStaffWorkload, getActivityDay };
-  return { port, getStaffWorkload, getActivityDay };
+  const getActivityDay = vi.fn().mockResolvedValue([]);
+  const getActivityCounts = vi.fn().mockResolvedValue({ orders: 3, stages: 5, payments: 1, leads: 0, accounts: 2 });
+  const port: ReportsRepositoryPort = { getStaffWorkload, getActivityDay, getActivityCounts };
+  return { port, getStaffWorkload, getActivityDay, getActivityCounts };
 }
 
 const at = (iso: string) => () => new Date(iso);
@@ -41,18 +42,14 @@ describe("ReportsService", () => {
     expect(days.days.at(-1)).toBe("2026-09-19");
   });
 
-  it("loads one day with payment events excluded, and refuses days outside the window", async () => {
+  it("loads one category of one day with every category's count, and refuses days outside the window", async () => {
     const r = repo();
     const svc = new ReportsService(r.port, { timeZone: "Asia/Kolkata", now: at("2026-09-24T06:00:00Z") });
-    await svc.getActivityDay({ day: "2026-09-20", limit: 50, offset: 0 });
-    expect(r.getActivityDay).toHaveBeenCalledWith({
-      day: "2026-09-20",
-      timeZone: "Asia/Kolkata",
-      excludePrefixes: ["payment."],
-      limit: 50,
-      offset: 0,
-    });
-    await expect(svc.getActivityDay({ day: "2026-09-10", limit: 50, offset: 0 })).rejects.toThrow(/last 7 days/);
+    const out = await svc.getActivityDay({ day: "2026-09-20", category: "stages", limit: 50, offset: 0 });
+    expect(r.getActivityDay).toHaveBeenCalledWith({ day: "2026-09-20", timeZone: "Asia/Kolkata", category: "stages", limit: 50, offset: 0 });
+    expect(r.getActivityCounts).toHaveBeenCalledWith("2026-09-20", "Asia/Kolkata");
+    expect(out).toMatchObject({ category: "stages", total: 5, counts: { orders: 3, stages: 5, payments: 1, leads: 0, accounts: 2 } });
+    await expect(svc.getActivityDay({ day: "2026-09-10", category: "orders", limit: 50, offset: 0 })).rejects.toThrow(/last 7 days/);
     expect(r.getActivityDay).toHaveBeenCalledTimes(1);
   });
 });

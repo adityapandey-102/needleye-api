@@ -16,11 +16,7 @@ import { checkDeliveryDayCapacity, nearCapacityThreshold } from "../domain/deliv
 import { toOrderListItemDto, toOrderResponseDto } from "../api/order.presenter";
 import { toOrderStatusHistoryResponseDto } from "../api/order-status-history.presenter";
 import { toOrderStatsResponseDto } from "../api/order-stats.presenter";
-import { AUDIT_ACTIONS, AUDIT_ENTITIES } from "../../../common/audit/audit-actions";
-import { auditLogger as defaultAuditLogger } from "../../../common/audit/drizzle-audit-logger";
 import { logger } from "../../../common/logger/logger";
-import { toMoneyString, type MoneyLike } from "../../../common/money/money";
-import type { AuditLogger } from "../../../common/audit/audit-logger";
 import { getCapabilityScope, type GranularStatus, type Profile } from "../../../domain";
 import type { StorageProvider } from "../../../common/storage/storage-provider";
 import type { OrderEntity } from "../domain/order.entity";
@@ -56,32 +52,25 @@ interface AuthContext {
   authUserId: string;
 }
 
-/** Pulls a {amount, method} snapshot out of a slice of audit metadata, coercing defensively (old records may predate a field). */
-function readSnapshot(source: unknown): LedgerAmountSnapshot {
-  const obj = (source ?? {}) as Record<string, unknown>;
-  return { amount: toMoneyString(obj.amount as MoneyLike), method: typeof obj.method === "string" ? obj.method : "" };
-}
-
-/** Decodes one raw payment-audit record into the display DTO, keying off its action verb. */
+/** One payment_audit_log row -> the display DTO: created/deleted carry the payment, an edit its before and after. */
 function toLedgerEventDto(raw: LedgerEventRaw): LedgerEventDto {
-  const meta = raw.metadata ?? {};
-  const verb: LedgerEventDto["action"] =
-    raw.action === AUDIT_ACTIONS.PAYMENT_CREATED ? "created" : raw.action === AUDIT_ACTIONS.PAYMENT_DELETED ? "deleted" : "updated";
-
   const base: LedgerEventDto = {
     id: raw.id,
-    action: verb,
+    action: raw.action,
     at: raw.createdAt,
     actorName: raw.actorName,
     orderId: raw.orderId,
     orderNumber: raw.orderNumber,
   };
-
-  if (verb === "updated") {
-    return { ...base, before: readSnapshot(meta.before), after: readSnapshot(meta.after) };
+  const now: LedgerAmountSnapshot = { amount: raw.amount, method: raw.method, paidAt: raw.paidAt };
+  if (raw.action === "updated") {
+    return {
+      ...base,
+      before: { amount: raw.previousAmount ?? raw.amount, method: raw.previousMethod ?? raw.method, paidAt: raw.previousPaidAt ?? raw.paidAt },
+      after: now,
+    };
   }
-  // created/deleted both record the payment's amount+method at top level.
-  return { ...base, snapshot: readSnapshot(meta) };
+  return { ...base, snapshot: now };
 }
 
 /** A page of orders plus the total matching the filters, so the client can render a pager. */
@@ -102,7 +91,6 @@ export class OrdersService {
   constructor(
     private readonly ordersRepository: OrdersRepositoryPort,
     private readonly storageProvider: StorageProvider,
-    private readonly audit: AuditLogger = defaultAuditLogger,
   ) {}
 
   /**
@@ -159,15 +147,11 @@ export class OrdersService {
 
   /**
    * Builds the capacity guard handed to repository.create/update, which calls it
-   * under the per-date lock. Records the day's count in `outcome` when the
-   * booking is an override, so the caller can audit it AFTER the write commits
-   * (an audit row for a write that then rolled back would be a lie).
+   * under the per-date lock. It returns the override when the booking takes a
+   * full day with the PM's OK, and the repository logs that with the create /
+   * edit in the same transaction (ADR 0008) -- never for a write that rolls back.
    */
-  private deliveryCapacityGuard(
-    dueDate: string,
-    confirmedWithProductionManager: boolean,
-    outcome: { overriddenAt?: number },
-  ): DueDateCapacityGuard {
+  private deliveryCapacityGuard(dueDate: string, confirmedWithProductionManager: boolean): DueDateCapacityGuard {
     return ({ booked, previousDueDate }) => {
       const { overridden } = checkDeliveryDayCapacity({
         dueDate,
@@ -176,17 +160,8 @@ export class OrdersService {
         capacity: env.DELIVERY_DAY_CAPACITY,
         confirmedWithProductionManager,
       });
-      if (overridden) outcome.overriddenAt = booked;
+      return overridden ? { dueDate, bookedBefore: booked, capacity: env.DELIVERY_DAY_CAPACITY } : undefined;
     };
-  }
-
-  private async auditDeliveryOverride(orderId: string, dueDate: string, booked: number): Promise<void> {
-    await this.audit.record({
-      action: AUDIT_ACTIONS.ORDER_DELIVERY_OVERRIDE,
-      entityType: AUDIT_ENTITIES.ORDER,
-      entityId: orderId,
-      metadata: { dueDate, bookedBefore: booked, capacity: env.DELIVERY_DAY_CAPACITY },
-    });
   }
 
   /**
@@ -219,21 +194,12 @@ export class OrdersService {
       createdBy: ctx.authUserId,
       updatedBy: ctx.authUserId,
     };
-    const capacity: { overriddenAt?: number } = {};
+    // The "created" log row (with the lead and any full-day override) is written by the repository, in the same transaction.
     const entity = await this.ordersRepository.create(
       record,
-      this.deliveryCapacityGuard(record.dueDate, confirmedWithProductionManager, capacity),
+      this.deliveryCapacityGuard(record.dueDate, confirmedWithProductionManager),
       leadLink,
     );
-    await this.audit.record({
-      action: AUDIT_ACTIONS.ORDER_CREATED,
-      entityType: AUDIT_ENTITIES.ORDER,
-      entityId: entity.id,
-      metadata: { orderNumber: entity.orderNumber, ...(leadId ? { leadId } : {}) },
-    });
-    if (capacity.overriddenAt !== undefined) {
-      await this.auditDeliveryOverride(entity.id, record.dueDate, capacity.overriddenAt);
-    }
     // A brand-new order has no ledger entries yet, but fetch for real rather
     // than assume 0 -- keeps this call site identical to every other one.
     const amountPaid = await this.ordersRepository.sumPaymentsForOrder(entity.id);
@@ -266,21 +232,9 @@ export class OrdersService {
     const record: UpdateOrderRecord = { ...fields, updatedBy: ctx.authUserId };
     // Only a submitted due date can move the order onto a full day; the guard
     // itself skips an unchanged date (the edit form resends every field).
-    const capacity: { overriddenAt?: number } = {};
-    const guard =
-      fields.dueDate !== undefined
-        ? this.deliveryCapacityGuard(fields.dueDate, confirmedWithProductionManager, capacity)
-        : undefined;
+    const guard = fields.dueDate !== undefined ? this.deliveryCapacityGuard(fields.dueDate, confirmedWithProductionManager) : undefined;
+    // The repository logs the changed fields (before -> after) in the edit's own transaction.
     const entity = await this.ordersRepository.update(orderId, record, expectedVersion, guard);
-    await this.audit.record({
-      action: AUDIT_ACTIONS.ORDER_UPDATED,
-      entityType: AUDIT_ENTITIES.ORDER,
-      entityId: orderId,
-      metadata: { fields: submittedKeys },
-    });
-    if (capacity.overriddenAt !== undefined && fields.dueDate !== undefined) {
-      await this.auditDeliveryOverride(orderId, fields.dueDate, capacity.overriddenAt);
-    }
     const amountPaid = await this.ordersRepository.sumPaymentsForOrder(orderId);
     return toOrderResponseDto(entity, amountPaid, ctx.profile.role, await this.signImageUrls([entity]));
   }
@@ -298,15 +252,10 @@ export class OrdersService {
     const role = ctx.profile.role;
     assertCanChangeStage(role, status);
 
+    // The stage-history row (from -> to, who) is the record of the move -- written in the same transaction.
     const entity = await this.ordersRepository.updateStatus(orderId, status, ctx.authUserId, (current) =>
       assertCanSkipStages(role, current, status),
     );
-    await this.audit.record({
-      action: AUDIT_ACTIONS.ORDER_STATUS_CHANGED,
-      entityType: AUDIT_ENTITIES.ORDER,
-      entityId: orderId,
-      metadata: { to: status },
-    });
     const amountPaid = await this.ordersRepository.sumPaymentsForOrder(orderId);
     return toOrderResponseDto(entity, amountPaid, ctx.profile.role, await this.signImageUrls([entity]));
   }
@@ -407,12 +356,6 @@ export class OrdersService {
       { newTotal: dto.totalAmount, changedBy: ctx.authUserId },
       (state) => decidePriceChange({ role, callerId: ctx.authUserId, newTotal: dto.totalAmount, reason: dto.reason }, state),
     );
-    await this.audit.record({
-      action: AUDIT_ACTIONS.ORDER_PRICE_CHANGED,
-      entityType: AUDIT_ENTITIES.ORDER,
-      entityId: orderId,
-      metadata: { kind: change.kind, from: change.previousTotal, to: change.newTotal, reason: change.reason },
-    });
     const entity = await this.ordersRepository.findAnyById(orderId);
     if (!entity) throw new NotFoundError("Order not found", ERROR_CODES.ORDER_NOT_FOUND);
     const amountPaid = await this.ordersRepository.sumPaymentsForOrder(orderId);
@@ -495,15 +438,8 @@ export class OrdersService {
     // Remove the DB reference FIRST, then the storage object. This ordering
     // means a storage failure can only leave an orphaned (invisible) object,
     // never a dangling DB row that renders as a broken image in the UI.
-    await this.ordersRepository.deleteImage(orderId, slot);
+    await this.ordersRepository.deleteImage(orderId, slot, ctx.authUserId);
     await this.deleteStorageObjectSafely(image.storagePath);
-
-    await this.audit.record({
-      action: AUDIT_ACTIONS.ORDER_IMAGE_DELETED,
-      entityType: AUDIT_ENTITIES.ORDER,
-      entityId: orderId,
-      metadata: { slot },
-    });
   }
 
   /** Deletes a storage object without letting a storage failure surface -- logs and moves on. */

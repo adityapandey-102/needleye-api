@@ -65,6 +65,14 @@ replay of history. So for the initial cutover:
 > with payments can no longer be deleted. Before running it, list any `₹0`
 > orders that were placeholders rather than free work and price them: once
 > delivered, a price is locked.
+>
+> **`20261010000001_split_audit_logs.sql` (ADR 0008, phase 3)** -- the order
+> and payment logs, `from_status` on stage history, and a COPY of the older
+> `order.*` / `payment.*` audit rows into them (originals untouched). Run it
+> right before the matching API: the API it replaces keeps writing order and
+> payment events to `audit_log` only, so anything done between this migration
+> and the new API lands only there (still kept, just not in the new logs). The
+> migration prints how many old payment rows it couldn't copy (expected 0).
 
 ### 1a. Least-privilege runtime database role (recommended)
 

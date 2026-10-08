@@ -11,7 +11,7 @@ Production rollout happens only when the owner asks (see "Rollout").
 |---|---|---|
 | 1 | Marking and Ready stages; Alteration <-> Ready loop; Delivered only from Ready; dashboard cards | built |
 | 2 | Pricing and payment rules (orders without a price, raise / discount, locks) + price history | built |
-| 3 | Separate payment and order audit logs, daily-activity categories | planned |
+| 3 | Separate payment and order audit logs, daily-activity categories | built |
 | 4 | Ledger daily totals, calendar months, Revenue page cards + paged month table + export | planned |
 | 5 | Nightly reconciliation, closing the books | planned |
 
@@ -153,7 +153,9 @@ can't silently change. A review of the current code found:
 1. **Separate, typed logs**, append-only, written **in the same transaction** as
    the change (no more best-effort audit for money):
    - `payment_audit_log` -- every payment create / edit / delete with typed
-     before/after amount, method, paid-at date and reason;
+     amount, method, paid-at date and notes, and the previous values for an edit
+     (no separate reason: corrections are already limited to the Owner and
+     Accountant, before delivery);
    - `order_audit_log` -- order create / edit with the changed fields' before and
      after values;
    - `order_price_history` -- built in phase 2 (see above);
@@ -164,6 +166,37 @@ can't silently change. A review of the current code found:
    counts: **Orders** (created, edited, pricing), **Stages**, **Payments**,
    **Leads**, **Sign-ins & accounts**. Each tab is filtered and paged by the API;
    nothing loads every row at once.
+
+### How phase 3 is built
+
+- **Same transaction, every time.** `DrizzlePaymentsRepository` writes the
+  payment_audit_log row inside the order-locked transaction that records /
+  edits / removes the payment; `DrizzleOrdersRepository` writes order_audit_log
+  inside create / edit / image removal, and `from_status` with every stage
+  move. The services no longer write order or payment events to `audit_log`.
+- **An edit records only what changed.** The edit transaction locks the order
+  row first (that also checks the optimistic-lock version and reads the current
+  due date for the capacity rule), then `diffOrderFields` compares the
+  submitted fields with it: blank and null are the same, unchanged fields are
+  dropped, and a save that changes nothing writes no row. A designer / master
+  tailor change also stores both names.
+- **A full-day delivery override** is no longer a separate event: the capacity
+  guard returns it and it is stored on the create / edit row
+  (`details.deliveryOverride`).
+- **Append-only, enforced by the database**: a trigger refuses updates and
+  deletes on both logs, except a cascade from deleting the parent order (the
+  app never deletes orders) or an account (actor_id set to null).
+- **History copied, nothing deleted.** Migration `20261010000001` copied the
+  content of the older `order.*` / `payment.*` audit_log rows into the new logs
+  (a delivery override joins its create / edit row by request id; the earliest
+  "payment removed" rows, which carried no amount, take it from that payment's
+  previous row) and filled `from_status` from each order's previous history
+  row. The audit_log originals stay where they are.
+- **"Last seen"** on the team status page is the latest row in ANY log -- one
+  indexed top-1 probe per log -- since order and payment actions no longer
+  reach audit_log.
+- **Ledger Activity** reads payment_audit_log and now shows each payment's
+  paid-on date (also a CSV column).
 
 ## Decisions -- ledger totals and the Revenue page (phase 4)
 

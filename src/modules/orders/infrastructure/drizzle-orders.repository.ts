@@ -4,6 +4,11 @@ import { orders } from "./order.schema";
 import { orderImages } from "./order-image.schema";
 import { orderStatusHistory } from "./order-status-history.schema";
 import { orderPriceHistory } from "./order-price-history.schema";
+import { orderAuditLog } from "./order-audit-log.schema";
+// Cross-module Infrastructure-only read of Payments' log, for the Ledger
+// Activity feed -- see docs/adr/0003-per-module-schema-ownership.md.
+import { paymentAuditLog } from "../../payments/infrastructure/payment-audit-log.schema";
+import { getRequestContext } from "../../../common/context/request-context";
 // Cross-module Infrastructure-only read of Payments' schema, for the ledger
 // sum aggregates below -- see docs/adr/0003-per-module-schema-ownership.md.
 import { payments } from "../../payments/infrastructure/payments.schema";
@@ -26,6 +31,7 @@ import { assertStageMove } from "../domain/order-status.rules";
 import { assertPricedForDelivery, type PriceChangeDecision, type PriceState } from "../domain/order-pricing.rules";
 import { derivePaymentStatus } from "../domain/order-ledger.rules";
 import type { OrderPriceChangeEntity } from "../domain/order-price-change.entity";
+import { diffOrderFields, PERSON_FIELDS, type OrderAuditAction, type OrderFieldChanges } from "../domain/order-audit.rules";
 import { OrderMapper, type OrderQueryResult } from "./order.mapper";
 import { OrderStatusHistoryMapper, type OrderStatusHistoryRow } from "./order-status-history.mapper";
 import type { OrderEntity } from "../domain/order.entity";
@@ -88,6 +94,36 @@ const OWED_PAYMENT_STATUSES = ["unpaid", "advance_paid"] as const;
 /** SQL-safe `'a','b'` lists of the status groups, for raw queries (values are code constants, never user input). */
 const COMPLETED_STATUS_SQL_LIST = COMPLETED_STATUSES.map((s) => `'${s}'`).join(", ");
 const IN_PRODUCTION_STATUS_SQL_LIST = IN_PRODUCTION_STATUSES.map((s) => `'${s}'`).join(", ");
+
+/** Appends one order_audit_log row inside the caller's transaction (ADR 0008). */
+async function logOrder(
+  tx: Tx,
+  entry: { orderId: string; action: OrderAuditAction; actorId: string; changes?: OrderFieldChanges | null; details?: Record<string, unknown> | null },
+): Promise<void> {
+  await tx.insert(orderAuditLog).values({
+    orderId: entry.orderId,
+    action: entry.action,
+    changes: entry.changes ?? null,
+    details: entry.details && Object.keys(entry.details).length > 0 ? entry.details : null,
+    actorId: entry.actorId,
+    requestId: getRequestContext()?.requestId ?? null,
+  });
+}
+
+/** A designer / master tailor change is logged with both people's names (an id alone means nothing in a report). */
+async function labelPeople(tx: Tx, changes: OrderFieldChanges): Promise<void> {
+  const ids = PERSON_FIELDS.flatMap((field) => {
+    const change = changes[field];
+    return change ? [change.from, change.to].filter((v): v is string => typeof v === "string") : [];
+  });
+  if (ids.length === 0) return;
+  const people = await tx.select({ id: profiles.id, fullName: profiles.fullName }).from(profiles).where(inArray(profiles.id, ids));
+  const nameOf = (value: unknown) => people.find((p) => p.id === value)?.fullName ?? null;
+  for (const field of PERSON_FIELDS) {
+    const change = changes[field];
+    if (change) changes[field] = { ...change, fromLabel: nameOf(change.from), toLabel: nameOf(change.to) };
+  }
+}
 
 /**
  * Midnight on the 1st of the current month in the SHOP's timezone, as an
@@ -489,49 +525,40 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     const startsAt = sql`((${range.from}::date)::timestamp at time zone ${env.BUSINESS_TIMEZONE})`;
     const endsBefore = sql`(((${range.to}::date) + 1)::timestamp at time zone ${env.BUSINESS_TIMEZONE})`;
     try {
-      const rows = await db.execute(sql`
-        select
-          a.id::text as id,
-          a.action,
-          to_char(a.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as created_at,
-          pr.full_name as actor_name,
-          (a.metadata->>'orderId') as order_id,
-          o.order_number as order_number,
-          a.metadata as metadata
-        from audit_log a
-        left join profiles pr on pr.id = a.actor_id
-        left join orders o on o.id = nullif(a.metadata->>'orderId', '')::uuid
-        where a.entity_type = 'payment'
-          and a.created_at >= ${startsAt}
-          and a.created_at < ${endsBefore}
-        order by a.created_at desc
-        limit ${page.limit} offset ${page.offset}
-      `);
-      const list = (rows.rows ?? (rows as unknown as Record<string, unknown>[])) as {
-        id: string;
-        action: string;
-        created_at: string;
-        actor_name: string | null;
-        order_id: string | null;
-        order_number: string | null;
-        metadata: Record<string, unknown> | null;
-      }[];
-      events = list.map((r) => ({
-        id: r.id,
-        action: r.action,
-        createdAt: r.created_at,
-        actorName: r.actor_name,
-        orderId: r.order_id,
-        orderNumber: r.order_number,
-        metadata: r.metadata,
+      // payment_audit_log (ADR 0008): typed values, written in each payment's own transaction.
+      const rows = await db
+        .select({
+          id: paymentAuditLog.id,
+          action: paymentAuditLog.action,
+          createdAt: sql<string>`to_char(${paymentAuditLog.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`,
+          actorName: profiles.fullName,
+          orderId: paymentAuditLog.orderId,
+          orderNumber: orders.orderNumber,
+          amount: paymentAuditLog.amount,
+          method: paymentAuditLog.method,
+          paidAt: paymentAuditLog.paidAt,
+          previousAmount: paymentAuditLog.previousAmount,
+          previousMethod: paymentAuditLog.previousMethod,
+          previousPaidAt: paymentAuditLog.previousPaidAt,
+        })
+        .from(paymentAuditLog)
+        .leftJoin(profiles, eq(profiles.id, paymentAuditLog.actorId))
+        .leftJoin(orders, eq(orders.id, paymentAuditLog.orderId))
+        .where(and(sql`${paymentAuditLog.createdAt} >= ${startsAt}`, sql`${paymentAuditLog.createdAt} < ${endsBefore}`))
+        .orderBy(desc(paymentAuditLog.createdAt))
+        .limit(page.limit)
+        .offset(page.offset);
+      events = rows.map((r) => ({
+        ...r,
+        amount: toMoneyString(r.amount),
+        previousAmount: r.previousAmount === null ? null : toMoneyString(r.previousAmount),
       }));
 
       const countRes = await db.execute(sql`
         select count(*)::int as total
-        from audit_log a
-        where a.entity_type = 'payment'
-          and a.created_at >= ${startsAt}
-          and a.created_at < ${endsBefore}
+        from payment_audit_log l
+        where l.created_at >= ${startsAt}
+          and l.created_at < ${endsBefore}
       `);
       const countRows = (countRes.rows ?? (countRes as unknown as { total: number }[])) as { total: number }[];
       total = Number(countRows[0]?.total ?? 0);
@@ -599,9 +626,9 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     let insertedId: string;
     try {
       insertedId = await db.transaction(async (tx) => {
-        if (assertDueDateCapacity) {
-          assertDueDateCapacity({ booked: await lockDayAndCount(tx, data.dueDate), previousDueDate: null });
-        }
+        const deliveryOverride = assertDueDateCapacity
+          ? assertDueDateCapacity({ booked: await lockDayAndCount(tx, data.dueDate), previousDueDate: null })
+          : undefined;
         const [inserted] = await tx
           .insert(orders)
           .values({
@@ -660,6 +687,16 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
           changedBy: data.createdBy,
         });
 
+        await logOrder(tx, {
+          orderId: inserted.id,
+          action: "created",
+          actorId: data.createdBy,
+          details: {
+            ...(leadLink ? { leadId: leadLink.leadId } : {}),
+            ...(deliveryOverride ? { deliveryOverride } : {}),
+          },
+        });
+
         return inserted.id;
       });
     } catch (error) {
@@ -685,51 +722,66 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     // bumped so the next reader/editor sees a moved-on value (optimistic lock).
     const record: Partial<typeof orders.$inferInsert> = { ...data };
 
-    // When a version is supplied, the write only lands if the stored version
-    // still matches -- so a concurrent edit (holding the old version) hits 0 rows.
-    const where =
-      expectedVersion !== undefined ? and(eq(orders.id, id), eq(orders.version, expectedVersion)) : eq(orders.id, id);
-
-    let updated: { id: string }[];
     try {
-      updated = await db.transaction(async (tx) => {
-        const newDueDate = data.dueDate;
-        if (assertDueDateCapacity && newDueDate !== undefined) {
-          // Lock the order row to read its CURRENT due date (the rule skips an
-          // edit that doesn't move it), then the day lock + count, excluding
-          // this order so it doesn't count against itself. A missing row falls
-          // through to the update below, which matches nothing -> 404.
-          const [current] = await tx
-            .select({ dueDate: orders.dueDate })
-            .from(orders)
-            .where(eq(orders.id, id))
-            .for("update");
-          if (current) {
-            assertDueDateCapacity({
-              booked: await lockDayAndCount(tx, newDueDate, id),
-              previousDueDate: current.dueDate,
-            });
-          }
+      await db.transaction(async (tx) => {
+        // Lock the row and read what an edit can change: the optimistic-lock
+        // version, the CURRENT due date (the capacity rule skips an edit that
+        // doesn't move it), and the "before" values the audit log records.
+        const [current] = await tx
+          .select({
+            version: orders.version,
+            customerName: orders.customerName,
+            phone: orders.phone,
+            billNumber: orders.billNumber,
+            bookingDate: orders.bookingDate,
+            dueDate: orders.dueDate,
+            nextPaymentDate: orders.nextPaymentDate,
+            designerId: orders.designerId,
+            masterTailorId: orders.masterTailorId,
+            productCategory: orders.productCategory,
+            orderDetails: orders.orderDetails,
+            handWork: orders.handWork,
+            machineWork: orders.machineWork,
+            purchaseRequired: orders.purchaseRequired,
+            designerInstructions: orders.designerInstructions,
+            specialNotes: orders.specialNotes,
+          })
+          .from(orders)
+          .where(eq(orders.id, id))
+          .for("update");
+        if (!current) throw new NotFoundError("Order not found", ERROR_CODES.ORDER_NOT_FOUND);
+        // A version is the client's "as I loaded it": someone else saved since -> refuse, don't overwrite.
+        if (expectedVersion !== undefined && current.version !== expectedVersion) {
+          throw new ConflictError("This order was changed by someone else. Reload and try again.", ERROR_CODES.ORDER_MODIFIED);
         }
-        return tx
+
+        const deliveryOverride =
+          assertDueDateCapacity && data.dueDate !== undefined
+            ? assertDueDateCapacity({ booked: await lockDayAndCount(tx, data.dueDate, id), previousDueDate: current.dueDate })
+            : undefined;
+
+        await tx
           .update(orders)
           .set({ ...record, version: sql`${orders.version} + 1` })
-          .where(where)
-          .returning({ id: orders.id });
+          .where(eq(orders.id, id));
+
+        // Log only what actually changed (an edit form resends every field).
+        const changes = diffOrderFields(current, data);
+        await labelPeople(tx, changes);
+        if (Object.keys(changes).length > 0 || deliveryOverride) {
+          await logOrder(tx, {
+            orderId: id,
+            action: "updated",
+            actorId: data.updatedBy,
+            changes,
+            details: deliveryOverride ? { deliveryOverride } : null,
+          });
+        }
       });
     } catch (error) {
-      // Preserve domain errors (e.g. 409 DELIVERY_DAY_FULL); wrap the unexpected.
+      // Preserve domain errors (404, 409 ORDER_MODIFIED, 409 DELIVERY_DAY_FULL); wrap the unexpected.
       if (error instanceof AppError) throw error;
       throw new InternalError("Failed to save order", error);
-    }
-
-    if (updated.length === 0) {
-      // Nothing matched. With a version guard, disambiguate "gone" from
-      // "changed under me" so the client can show the right message.
-      if (expectedVersion !== undefined && (await this.findByIdUnscoped(id))) {
-        throw new ConflictError("This order was changed by someone else. Reload and try again.", ERROR_CODES.ORDER_MODIFIED);
-      }
-      throw new NotFoundError("Order not found", ERROR_CODES.ORDER_NOT_FOUND);
     }
 
     const entity = await this.findByIdUnscoped(id);
@@ -775,6 +827,7 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         await tx.insert(orderStatusHistory).values({
           orderId: id,
           status,
+          fromStatus: current,
           label: granularLabel(status),
           changedBy,
         });
@@ -947,8 +1000,14 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     return rows[0] ?? null;
   }
 
-  async deleteImage(orderId: string, slot: number): Promise<void> {
-    await db.delete(orderImages).where(and(eq(orderImages.orderId, orderId), eq(orderImages.slot, slot)));
+  async deleteImage(orderId: string, slot: number, actorId: string): Promise<void> {
+    await db.transaction(async (tx) => {
+      const removed = await tx
+        .delete(orderImages)
+        .where(and(eq(orderImages.orderId, orderId), eq(orderImages.slot, slot)))
+        .returning({ id: orderImages.id });
+      if (removed.length > 0) await logOrder(tx, { orderId, action: "image_deleted", actorId, details: { slot } });
+    });
   }
 
   async sumPaymentsForOrder(orderId: string): Promise<string> {
