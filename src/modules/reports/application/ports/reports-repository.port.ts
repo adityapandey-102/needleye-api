@@ -3,7 +3,8 @@ import type { ActivityCounts, ActivityEventEntity, StaffWorkloadEntity } from ".
 
 export interface StaffWorkloadQuery {
   designerWindowDays: number;
-  floorWindowDays: number;
+  /** Master tailors / production managers / workers: their latest stage move within this many hours. */
+  floorWindowHours: number;
   /** Case-insensitive name contains. */
   search?: string;
   role?: TrackedStaffRole;

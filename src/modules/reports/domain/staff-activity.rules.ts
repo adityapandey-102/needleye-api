@@ -11,18 +11,19 @@ export const TRACKED_STAFF_ROLES = ["designer", "master_tailor", "production_man
 export type TrackedStaffRole = (typeof TRACKED_STAFF_ROLES)[number];
 
 /**
- * How far back "working" looks, per kind of work:
+ * How far back "working" looks, per kind of work (the owner, 2026-10-09):
  * - a designer is Working while they have CREATED an undelivered order in the
- *   last 45 days (design work starts at booking and runs long);
+ *   last 30 days (design work starts at booking and runs long);
  * - master tailor / production manager / worker are Working while they made
- *   the MOST RECENT stage move on an undelivered order in the last 30 days --
- *   i.e. that order is currently in their hands.
+ *   the MOST RECENT stage move on an undelivered order in the last 24 HOURS --
+ *   i.e. they're on it right now.
  */
-export const DESIGNER_WORKING_WINDOW_DAYS = 45;
-export const FLOOR_WORKING_WINDOW_DAYS = 30;
+export const DESIGNER_WORKING_WINDOW_DAYS = 30;
+export const FLOOR_WORKING_WINDOW_HOURS = 24;
 
-export function workingWindowDays(role: TrackedStaffRole): number {
-  return role === "designer" ? DESIGNER_WORKING_WINDOW_DAYS : FLOOR_WORKING_WINDOW_DAYS;
+/** The role's window, in hours. */
+export function workingWindowHours(role: TrackedStaffRole): number {
+  return role === "designer" ? DESIGNER_WORKING_WINDOW_DAYS * 24 : FLOOR_WORKING_WINDOW_HOURS;
 }
 
 export type StaffStatus = "working" | "idle";

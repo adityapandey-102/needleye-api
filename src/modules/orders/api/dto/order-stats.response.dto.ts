@@ -21,9 +21,17 @@ export interface OrderStatsResponseDto {
   overdue: number;
   /** Active orders due within 3 days (not overdue). Visible to all roles. */
   urgent: number;
+  /** Orders booked today (booking date = the shop's today). Visible to all roles. */
+  bookedToday: number;
+  /** Not delivered, due today (the shop's day) -- to deliver today. Visible to all roles. */
+  dueToday: number;
   pendingPayments?: number;
   /** Orders with no price yet (ADR 0008). Absent for roles without payments:read. */
   notPriced?: number;
+  /** Still owing, next payment due today -- to collect today. Absent for roles without payments:read. */
+  paymentDueToday?: number;
+  /** Still owing, next payment date already past. Absent for roles without payments:read. */
+  paymentOverdue?: number;
   // Money as 2dp strings.
   collectedRevenue?: string;
   outstandingRevenue?: string;

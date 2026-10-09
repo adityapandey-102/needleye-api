@@ -21,8 +21,8 @@ describe("ReportsService", () => {
     ]);
     const out = await new ReportsService(r.port, { timeZone: "Asia/Kolkata" }).getStaffActivity({ q: "an", role: "worker", status: "idle", limit: 20, offset: 40 });
     expect(r.getStaffWorkload).toHaveBeenCalledWith({
-      designerWindowDays: 45,
-      floorWindowDays: 30,
+      designerWindowDays: 30,
+      floorWindowHours: 24,
       search: "an",
       role: "worker",
       status: "idle",
@@ -30,7 +30,7 @@ describe("ReportsService", () => {
       offset: 40,
     });
     expect(out).toMatchObject({ total: 2, limit: 20, offset: 40, counts: { working: 1, idle: 1 } });
-    expect(out.windows).toEqual({ designerDays: 45, floorDays: 30 });
+    expect(out.windows).toEqual({ designerDays: 30, floorHours: 24 });
     expect(out.staff.map((s) => s.status)).toEqual(["working", "idle"]);
   });
 

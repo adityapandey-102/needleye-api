@@ -552,7 +552,10 @@ paths:
             `active`, `production` (Falls/Kutchu..Alteration), `completed`,
             `ready` (in Ready now), `delivered`, `delivered_this_month`
             (reached Delivered since the 1st, shop timezone), `pending_payment`,
-            `payment_overdue`, `payment_upcoming`, `overdue`, `urgent`,
+            `payment_overdue` (next payment before today), `payment_due_today`
+            (next payment today), `payment_upcoming` (after today), `due_today`
+            (not delivered, due today), `booked_today` (booking date today),
+            `overdue`, `urgent`,
             `this_month` (booked since the 1st, shop timezone), `not_priced`
             (no price yet), and the dashboard pipeline's steps
             `pipeline_design`, `pipeline_received`, `pipeline_production`,
@@ -1332,10 +1335,11 @@ paths:
       description: |
         Owner/Manager only (`reports:staff`). The owner and accountant are never
         listed. A **designer** is `working` while they have *created* an
-        undelivered order in the last `windows.designerDays` (45) days; a
+        undelivered order in the last `windows.designerDays` (30) days; a
         **master tailor, production manager or worker** while they made the
         *most recent* stage move on an undelivered order in the last
-        `windows.floorDays` (30) days. `counts` (the summary tiles) cover the
+        `windows.floorHours` (24) hours -- the order is in their hands right
+        now (the owner, 2026-10-09). `counts` (the summary tiles) cover the
         search + role filters but ignore `status`; `total` counts every filter.
         Ordered Working first, then role, then most orders in hand, then name.
         Also backs the Staff Report's person picker (`role=designer` /
@@ -2413,6 +2417,10 @@ components:
         overdue: { type: integer, description: "Active orders past their delivery due date. Visible to all roles." }
         urgent: { type: integer, description: "Active orders due within 3 days (not overdue). Visible to all roles." }
         pendingPayments: { type: integer, description: "Absent for master_tailor. Orders still owing (unpaid / advance_paid) -- a not-priced order owes nothing yet." }
+        bookedToday: { type: integer, description: "Orders booked today (booking date = the shop's today; bucket booked_today). Visible to all roles." }
+        dueToday: { type: integer, description: "Orders not yet delivered whose due date is today (the shop's day) -- to deliver today (bucket due_today). Visible to all roles." }
+        paymentDueToday: { type: integer, description: "Absent for master_tailor. Orders still owing whose next payment is due today -- to collect today (bucket payment_due_today)." }
+        paymentOverdue: { type: integer, description: "Absent for master_tailor. Orders still owing whose next payment date has passed (bucket payment_overdue)." }
         notPriced: { type: integer, description: "Absent for master_tailor. Orders with no price yet (the Price not set card / bucket not_priced)." }
         collectedRevenue:
           allOf: [{ $ref: "#/components/schemas/Money" }]
@@ -2771,10 +2779,10 @@ components:
         offset: { type: integer }
         windows:
           type: object
-          required: [designerDays, floorDays]
+          required: [designerDays, floorHours]
           properties:
-            designerDays: { type: integer, example: 45 }
-            floorDays: { type: integer, example: 30 }
+            designerDays: { type: integer, example: 30 }
+            floorHours: { type: integer, example: 24 }
         staff:
           type: array
           items:

@@ -281,7 +281,7 @@ src/
         reports.service.ts                 # applies the rules; injectable clock so "today" is testable
         ports/reports-repository.port.ts
       domain/
-        staff-activity.rules.ts            # tracked roles, 45/30-day Working windows, shop-timezone "today", the 7-day window, ACTIVITY_CATEGORIES
+        staff-activity.rules.ts            # tracked roles, Working windows (designers 30 days, floor 24 hours), shop-timezone "today", the 7-day window, ACTIVITY_CATEGORIES
         staff-activity.entity.ts
       infrastructure/
         drizzle-reports.repository.ts      # raw-SQL reads over profiles / orders / the order, stage, price and payment logs / leads / audit_log (see ADR 0003)
@@ -861,9 +861,10 @@ gated by `reports:staff`, which only `owner_manager` has.
   tailor, production manager and worker as `working` or `idle`. The owner and
   accountant are never listed.
   - A **designer** is Working while they have **created** an undelivered order
-    in the last **45** days.
+    in the last **30** days.
   - Everyone else is Working while they made the **most recent stage move** on
-    an undelivered order in the last **30** days. "Most recent" matters: when a
+    an undelivered order in the last **24 hours** (the owner, 2026-10-09: the
+    order is in their hands right now). "Most recent" matters: when a
     later stage move by someone else happens, the order passes to that person.
     For each OPEN order it takes the single latest move
     (`LATERAL … ORDER BY created_at DESC LIMIT 1` on
@@ -980,12 +981,16 @@ the `:id` param.
 
 Each dashboard card deep-links into a matching filtered list via the
 `?bucket=` query param on `GET /orders` (`active`, `production`, `completed`,
-`ready`, `delivered`, `pending_payment`, `payment_overdue`, `payment_upcoming`,
-`overdue`, `urgent`, `this_month`); `DrizzleOrdersRepository.bucketCondition`
+`ready`, `delivered`, `pending_payment`, `payment_overdue`, `payment_due_today`,
+`payment_upcoming`, `due_today`, `overdue`, `urgent`, `this_month`, `not_priced`,
+the pipeline steps `pipeline_*`); `DrizzleOrdersRepository.bucketCondition`
 translates the bucket into the same WHERE clause the stat count used, so a card
-and the list it opens always agree. The `payment_overdue`/`payment_upcoming`
-buckets (outstanding balance with a next-payment date past / still ahead) back
-the dedicated pending-payments page's Overdue / Upcoming filter.
+and the list it opens always agree. The `payment_overdue` / `payment_due_today` /
+`payment_upcoming` buckets (outstanding balance with a next-payment date before
+/ on / after the shop's today) back the pending-payments page's Overdue / Due
+today / Upcoming tabs; `due_today` (not delivered, due today) backs the
+dashboard's Deliver today. Stats carry the matching counts: `dueToday` (every
+role), `paymentDueToday` and `paymentOverdue` (roles that see payments).
 
 ### Revenue: the daily ledger (ADR 0008, phase 4)
 

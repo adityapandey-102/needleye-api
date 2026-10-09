@@ -5,9 +5,9 @@ import type { OrderStatsResponseDto } from "./dto/order-stats.response.dto";
 
 /** Raw aggregates -> API response DTO: strips payment-related fields the caller's role can't see (same rule as toOrderResponseDto). */
 export function toOrderStatsResponseDto(stats: OrderStatsRaw, role: Role): OrderStatsResponseDto {
-  const { pendingPayments, notPriced, collectedRevenue, outstandingRevenue, ...counts } = stats;
+  const { pendingPayments, notPriced, collectedRevenue, outstandingRevenue, paymentDueToday, paymentOverdue, ...counts } = stats;
 
   if (!canViewPaymentFields(role)) return counts;
 
-  return { ...counts, pendingPayments, notPriced, collectedRevenue, outstandingRevenue };
+  return { ...counts, pendingPayments, notPriced, collectedRevenue, outstandingRevenue, paymentDueToday, paymentOverdue };
 }

@@ -151,6 +151,11 @@ async function labelPeople(tx: Tx, changes: OrderFieldChanges): Promise<void> {
  * concrete bound the planner can estimate how few rows match, where a now()
  * expression made it guess "a third of the table" and scan every order.
  */
+/** The shop's today (YYYY-MM-DD in BUSINESS_TIMEZONE), as a bound value -- "today" for due dates. */
+function shopToday(): string {
+  return businessToday(new Date(), env.BUSINESS_TIMEZONE);
+}
+
 function shopMonthStart() {
   const monthStart = monthStartMonthsBack(businessToday(new Date(), env.BUSINESS_TIMEZONE), 0);
   return sql`((${monthStart}::date)::timestamp at time zone ${env.BUSINESS_TIMEZONE})`;
@@ -268,12 +273,22 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         return inArray(orders.paymentStatus, [...OWED_PAYMENT_STATUSES]);
       case "not_priced":
         return eq(orders.paymentStatus, "not_priced");
+      // Payment due dates against the SHOP's today (not the database's UTC day).
       case "payment_overdue":
         // Outstanding balance whose scheduled next-payment date has passed.
-        return and(inArray(orders.paymentStatus, [...OWED_PAYMENT_STATUSES]), sql`${orders.nextPaymentDate} < current_date`);
+        return and(inArray(orders.paymentStatus, [...OWED_PAYMENT_STATUSES]), sql`${orders.nextPaymentDate} < ${shopToday()}::date`);
+      case "payment_due_today":
+        // Outstanding balance whose next payment is due today -- to collect today.
+        return and(inArray(orders.paymentStatus, [...OWED_PAYMENT_STATUSES]), sql`${orders.nextPaymentDate} = ${shopToday()}::date`);
       case "payment_upcoming":
-        // Outstanding balance with a next-payment date still ahead (or today).
-        return and(inArray(orders.paymentStatus, [...OWED_PAYMENT_STATUSES]), sql`${orders.nextPaymentDate} >= current_date`);
+        // Outstanding balance with a next-payment date after today.
+        return and(inArray(orders.paymentStatus, [...OWED_PAYMENT_STATUSES]), sql`${orders.nextPaymentDate} > ${shopToday()}::date`);
+      case "booked_today":
+        // Booked today, by booking date (orders_booking_date_idx).
+        return sql`${orders.bookingDate} = ${shopToday()}::date`;
+      case "due_today":
+        // To deliver today: not delivered yet, due today (orders_due_date_idx).
+        return and(ne(orders.productionStatus, "delivered"), sql`${orders.dueDate} = ${shopToday()}::date`);
       case "overdue":
         return and(notInArray(orders.productionStatus, COMPLETED_STATUSES), sql`${orders.dueDate} < current_date`);
       case "urgent":
@@ -353,6 +368,11 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
           overdue: sql<string>`count(*) filter (where ${notInArray(orders.productionStatus, COMPLETED_STATUSES)} and ${orders.dueDate} < current_date)`,
           urgent: sql<string>`count(*) filter (where ${notInArray(orders.productionStatus, COMPLETED_STATUSES)} and ${orders.dueDate} >= current_date and ${orders.dueDate} < current_date + 3)`,
           pendingPayments: sql<string>`count(*) filter (where ${inArray(orders.paymentStatus, [...OWED_PAYMENT_STATUSES])})`,
+          // Today (the shop's day): orders to deliver, and payments to collect / already late.
+          bookedToday: sql<string>`count(*) filter (where ${orders.bookingDate} = ${shopToday()}::date)`,
+          dueToday: sql<string>`count(*) filter (where ${ne(orders.productionStatus, "delivered")} and ${orders.dueDate} = ${shopToday()}::date)`,
+          paymentDueToday: sql<string>`count(*) filter (where ${inArray(orders.paymentStatus, [...OWED_PAYMENT_STATUSES])} and ${orders.nextPaymentDate} = ${shopToday()}::date)`,
+          paymentOverdue: sql<string>`count(*) filter (where ${inArray(orders.paymentStatus, [...OWED_PAYMENT_STATUSES])} and ${orders.nextPaymentDate} < ${shopToday()}::date)`,
           notPriced: sql<string>`count(*) filter (where ${eq(orders.paymentStatus, "not_priced")})`,
           totalValue: sql<string>`coalesce(sum(${orders.totalAmount}), 0)`,
           // The pipeline (ADR 0008 dashboard): four more counts in the same pass (ready is above).
@@ -410,6 +430,10 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
       urgent: row ? Number(row.urgent) : 0,
       pendingPayments: row ? Number(row.pendingPayments) : 0,
       notPriced: row ? Number(row.notPriced) : 0,
+      bookedToday: row ? Number(row.bookedToday) : 0,
+      dueToday: row ? Number(row.dueToday) : 0,
+      paymentDueToday: row ? Number(row.paymentDueToday) : 0,
+      paymentOverdue: row ? Number(row.paymentOverdue) : 0,
       collectedRevenue: toMoneyString(collectedRevenue),
       outstandingRevenue: toMoneyString(outstanding(totalValue, collectedRevenue)),
       pipeline: {

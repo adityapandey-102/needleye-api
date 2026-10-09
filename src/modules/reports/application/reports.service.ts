@@ -4,7 +4,7 @@ import {
   assertActivityDay,
   businessToday,
   DESIGNER_WORKING_WINDOW_DAYS,
-  FLOOR_WORKING_WINDOW_DAYS,
+  FLOOR_WORKING_WINDOW_HOURS,
   staffStatus,
 } from "../domain/staff-activity.rules";
 import type {
@@ -39,7 +39,7 @@ export class ReportsService {
   async getStaffActivity(query: StaffActivityQuery): Promise<StaffActivityResponseDto> {
     const page = await this.repository.getStaffWorkload({
       designerWindowDays: DESIGNER_WORKING_WINDOW_DAYS,
-      floorWindowDays: FLOOR_WORKING_WINDOW_DAYS,
+      floorWindowHours: FLOOR_WORKING_WINDOW_HOURS,
       search: query.q,
       role: query.role,
       status: query.status,
@@ -47,7 +47,7 @@ export class ReportsService {
       offset: query.offset,
     });
     return {
-      windows: { designerDays: DESIGNER_WORKING_WINDOW_DAYS, floorDays: FLOOR_WORKING_WINDOW_DAYS },
+      windows: { designerDays: DESIGNER_WORKING_WINDOW_DAYS, floorHours: FLOOR_WORKING_WINDOW_HOURS },
       counts: page.counts,
       staff: page.rows.map((r) => ({ ...r, status: staffStatus(r.openOrders) })),
       total: page.total,

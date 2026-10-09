@@ -132,7 +132,7 @@ async function main() {
   const leads = new DrizzleLeadsRepository();
   const ledger = new DrizzleLedgerRepository();
   const leadId = await pick("select coalesce((select id::text from leads order by created_at desc limit 1), '00000000-0000-0000-0000-000000000000') as id");
-  const W = { designerWindowDays: 45, floorWindowDays: 30 };
+  const W = { designerWindowDays: 30, floorWindowHours: 24 };
 
   const cases: Case[] = [
     {

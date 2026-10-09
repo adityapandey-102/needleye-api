@@ -6,6 +6,8 @@ import { authProvider } from "../../src/common/auth/supabase-auth-provider";
 import { db } from "../../src/common/database/drizzle-client";
 import { orderAuditLog } from "../../src/modules/orders/infrastructure/order-audit-log.schema";
 import { createFixtureUser, deleteFixtureUser, deleteFixtureOrder, closeDb } from "./helpers";
+import { businessToday } from "../../src/common/time/business-date";
+import { env } from "../../src/config/env";
 
 /**
  * API-endpoint integration coverage: the real Express app (`createApp()`),
@@ -40,7 +42,7 @@ describe("API endpoints (integration)", () => {
     const phone = `7${String(Math.floor(Math.random() * 1e9)).padStart(9, "0")}`;
     const iso = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
 
-    const create = async (customerName: string, bookingDate: string, dueDate: string) => {
+    const create = async (customerName: string, bookingDate: string, dueDate: string, extra: Record<string, unknown> = {}) => {
       const res = await request(app)
         .post("/api/v1/orders")
         .set("Authorization", ownerAuth)
@@ -55,6 +57,7 @@ describe("API endpoints (integration)", () => {
           productCategory: "saree",
           orderDetails: "filters fixture",
           productionStatus: "design_pending",
+          ...extra,
         });
       expect(res.status).toBe(201);
       const id = (res.body as { order: { id: string } }).order.id;
@@ -85,13 +88,45 @@ describe("API endpoints (integration)", () => {
       expect((await request(app).get(`/api/v1/orders?${bad}`).set("Authorization", ownerAuth)).status, bad).toBe(400);
     }
 
+    // Today, by the shop's clock: an order due today (to deliver), and one whose next payment is due today (to collect).
+    const today = businessToday(new Date(), env.BUSINESS_TIMEZONE);
+    // Today may already be a full delivery day locally: the booking confirms it with the PM, as the form does.
+    const deliverToday = await create("Filter Deliver Today", "2025-09-01", today, { confirmedWithProductionManager: true });
+    const collectToday = await create("Filter Collect Today", "2025-09-02", iso(30));
+    expect((await request(app).put(`/api/v1/orders/${collectToday}/price`).set("Authorization", ownerAuth).send({ totalAmount: 5000 })).status).toBe(200);
+    const paid = await request(app)
+      .post(`/api/v1/orders/${collectToday}/payments`)
+      .set("Authorization", ownerAuth)
+      .send({ amount: 1000, method: "cash", nextPaymentDate: today });
+    expect(paid.status).toBe(201);
+    const inBucket = async (bucket: string) =>
+      ((await request(app).get(`/api/v1/orders?limit=100&bucket=${bucket}&search=Filter`).set("Authorization", ownerAuth)).body as { orders: { id: string }[] }).orders.map((o) => o.id);
+    const bookedToday = await create("Filter Booked Today", today, iso(60));
+    expect(await inBucket("booked_today")).toEqual([bookedToday]);
+    expect(await inBucket("due_today")).toEqual([deliverToday]);
+    expect(await inBucket("payment_due_today")).toEqual([collectToday]);
+    expect(await inBucket("payment_upcoming")).not.toContain(collectToday);
+    expect(await inBucket("payment_overdue")).not.toContain(collectToday);
+    const stats = (await request(app).get("/api/v1/orders/stats").set("Authorization", ownerAuth)).body as Record<string, number>;
+    expect(stats.bookedToday).toBeGreaterThanOrEqual(1);
+    expect(stats.dueToday).toBeGreaterThanOrEqual(1);
+    expect(stats.paymentDueToday).toBeGreaterThanOrEqual(1);
+    expect(typeof stats.paymentOverdue).toBe("number");
+    // A master tailor sees what's due today, never the money.
+    const asMaster = (await request(app).get("/api/v1/orders/stats").set("Authorization", masterAuth)).body as Record<string, unknown>;
+    expect(typeof asMaster.dueToday).toBe("number");
+    expect(asMaster.paymentDueToday).toBeUndefined();
+    expect(asMaster.paymentOverdue).toBeUndefined();
+
     // "Fetch customer details": newest first, only on request, only roles that create orders.
     const lookup = await request(app).get(`/api/v1/orders/customer-lookup?phone=${phone}`).set("Authorization", pmAuth);
     expect(lookup.status).toBe(200);
     expect((lookup.body as { matches: { customerName: string }[] }).matches.map((m) => m.customerName)).toEqual([
+      "Filter Booked Today",
+      "Filter Collect Today",
+      "Filter Deliver Today",
       "Filter Later",
       "Filter Soon",
-      "Filter Overdue",
     ]);
     expect((await request(app).get(`/api/v1/orders/customer-lookup?phone=${phone}`).set("Authorization", masterAuth)).status).toBe(403);
     expect((await request(app).get("/api/v1/orders/customer-lookup?phone=12345").set("Authorization", ownerAuth)).status).toBe(400);

@@ -4,15 +4,15 @@ import {
   assertActivityDay,
   businessToday,
   staffStatus,
-  workingWindowDays,
+  workingWindowHours,
 } from "./staff-activity.rules";
 
 describe("staff activity rules", () => {
-  it("windows: 45 days for designers, 30 for everyone on the floor", () => {
-    expect(workingWindowDays("designer")).toBe(45);
-    expect(workingWindowDays("master_tailor")).toBe(30);
-    expect(workingWindowDays("production_manager")).toBe(30);
-    expect(workingWindowDays("worker")).toBe(30);
+  it("windows (owner, 2026-10-09): 30 days for designers, 24 hours for everyone on the floor", () => {
+    expect(workingWindowHours("designer")).toBe(30 * 24);
+    expect(workingWindowHours("master_tailor")).toBe(24);
+    expect(workingWindowHours("production_manager")).toBe(24);
+    expect(workingWindowHours("worker")).toBe(24);
   });
 
   it("Working iff at least one qualifying undelivered order", () => {

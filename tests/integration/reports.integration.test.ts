@@ -14,8 +14,8 @@ import { createFixtureUser, deleteFixtureOrder, deleteFixtureUser, closeDb, type
 
 /**
  * Batch E's owner Reports, against the real database: the Working / Idle rules
- * (designer = created an undelivered order in 45 days; floor = made the latest
- * stage move on an undelivered order in 30 days), the activity feed's
+ * (designer = created an undelivered order in 30 days; floor = made the latest
+ * stage move on an undelivered order in the last 24 hours), the activity feed's
  * shop-timezone day boundaries and categories, and owner-only access.
  */
 describe("owner reports (integration)", () => {
@@ -63,7 +63,7 @@ describe("owner reports (integration)", () => {
     return entity.id;
   }
 
-  const WINDOWS = { designerWindowDays: 45, floorWindowDays: 30 };
+  const WINDOWS = { designerWindowDays: 30, floorWindowHours: 24 };
 
   /** The fixture's row, found by searching its (unique) name -- also exercises the search. */
   async function row(user: FixtureUser) {
@@ -110,10 +110,10 @@ describe("owner reports (integration)", () => {
     expect((await row(designer))?.openOrders).toBe(0);
   });
 
-  it("an order created more than 45 days ago no longer makes its designer Working", async () => {
+  it("an order created more than 30 days ago no longer makes its designer Working", async () => {
     const id = await newOrder();
     expect((await row(designer))?.openOrders).toBe(1);
-    await db.update(orders).set({ createdAt: new Date(Date.now() - 46 * 86_400_000) }).where(eq(orders.id, id));
+    await db.update(orders).set({ createdAt: new Date(Date.now() - 31 * 86_400_000) }).where(eq(orders.id, id));
     expect((await row(designer))?.openOrders).toBe(0);
     await deliver(id);
   });
@@ -128,10 +128,10 @@ describe("owner reports (integration)", () => {
     expect((await row(workerA))?.openOrders).toBe(0);
     expect(await row(workerB)).toMatchObject({ openOrders: 1 });
 
-    // A move older than 30 days doesn't count.
+    // A move older than 24 hours doesn't count (the owner, 2026-10-09).
     await db
       .update(orderStatusHistory)
-      .set({ createdAt: new Date(Date.now() - 31 * 86_400_000) })
+      .set({ createdAt: new Date(Date.now() - 25 * 3_600_000) })
       .where(eq(orderStatusHistory.orderId, id));
     expect((await row(workerB))?.openOrders).toBe(0);
   });
@@ -213,7 +213,7 @@ describe("owner reports (integration)", () => {
     const ok = await request(app).get("/api/v1/reports/staff-activity?limit=5").set("Authorization", ownerAuth);
     expect(ok.status).toBe(200);
     const okBody = ok.body as { windows: unknown; staff: unknown[]; limit: number };
-    expect(okBody.windows).toEqual({ designerDays: 45, floorDays: 30 });
+    expect(okBody.windows).toEqual({ designerDays: 30, floorHours: 24 });
     expect(okBody.staff.length).toBeLessThanOrEqual(5);
     expect((await request(app).get("/api/v1/reports/staff-activity?limit=500").set("Authorization", ownerAuth)).status).toBe(400);
 

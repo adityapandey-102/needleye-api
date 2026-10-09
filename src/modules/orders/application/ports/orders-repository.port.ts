@@ -51,7 +51,7 @@ export interface OrderListFilters {
   status?: string;
   designerId?: string;
   masterTailorId?: string;
-  /** Dashboard/list filter: active | production | completed | ready | delivered | delivered_this_month | pending_payment | payment_overdue | payment_upcoming | overdue | urgent | this_month | not_priced | pipeline_design | pipeline_received | pipeline_production | pipeline_checks (the pipeline steps). */
+  /** Dashboard/list filter: active | production | completed | ready | delivered | delivered_this_month | pending_payment | payment_overdue | payment_upcoming | overdue | urgent | this_month | not_priced | booked_today | due_today | payment_due_today | pipeline_design | pipeline_received | pipeline_production | pipeline_checks (the pipeline steps). */
   bucket?: string;
   /**
    * Only orders created on or after this shop day (YYYY-MM-DD, business
@@ -177,6 +177,13 @@ export interface OrderStatsRaw {
   pendingPayments: number;
   /** Orders with no price yet (ADR 0008). */
   notPriced: number;
+  /** Booked today (booking date = the shop's today). */
+  bookedToday: number;
+  /** Not delivered, due today (the shop's day). */
+  dueToday: number;
+  /** Still owing, next payment due today / already past. */
+  paymentDueToday: number;
+  paymentOverdue: number;
   /** Money as 2dp strings. */
   collectedRevenue: string;
   outstandingRevenue: string;

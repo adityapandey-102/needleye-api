@@ -58,8 +58,8 @@ export interface StaffActivityRowDto {
 
 /** GET /reports/staff-activity */
 export interface StaffActivityResponseDto {
-  /** The look-back windows the statuses were computed with, in days. */
-  windows: { designerDays: number; floorDays: number };
+  /** The look-back windows the statuses were computed with: designers in days, floor staff in hours. */
+  windows: { designerDays: number; floorHours: number };
   /** Working / Idle across the search + role filters (ignores `status`) -- the summary tiles. */
   counts: { working: number; idle: number };
   /** This page. */

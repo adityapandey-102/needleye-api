@@ -150,7 +150,7 @@ export class DrizzleReportsRepository implements ReportsRepositoryPort {
             order by h.created_at desc
             limit 1
           ) lm
-          where lm.created_at >= now() - make_interval(days => ${query.floorWindowDays})
+          where lm.created_at >= now() - make_interval(hours => ${query.floorWindowHours})
           group by lm.changed_by
         ),
         scored as (
@@ -262,13 +262,18 @@ export class DrizzleReportsRepository implements ReportsRepositoryPort {
           ld.lead_number,
           target.full_name as target_name,
           e.details
-        from (${categorySource(query.category, from, to)}) e
+        -- The page FIRST, then the names: a busy day's hundreds of events never
+        -- get joined to orders / leads (the planner turned that into full scans).
+        from (
+          select * from (${categorySource(query.category, from, to)}) day_events
+          order by at desc, id desc
+          limit ${query.limit} offset ${query.offset}
+        ) e
         left join profiles actor on actor.id = e.actor_id
         left join orders o on o.id = e.order_id
         left join leads ld on ld.id = e.lead_id
         left join profiles target on target.id = e.target_id
         order by e.at desc, e.id desc
-        limit ${query.limit} offset ${query.offset}
       `);
       return rowsOf<{
         id: string;
