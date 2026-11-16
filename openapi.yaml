@@ -874,23 +874,24 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
-  /orders/payment-overdue/export:
+  /orders/overdue/export:
     get:
       tags: [Orders]
-      summary: Payment-overdue export -- every overdue order at once, unpaged
+      summary: Overdue-orders export -- every overdue order at once, unpaged
       description: |
         Owner/Manager and Accountant only (`reports:financial` -- it carries
-        money and customer phone numbers). EVERY order still owing
-        (unpaid / advance_paid) whose next payment date is before the shop's
-        today -- the same set as the `payment_overdue` bucket -- in ONE
-        response, oldest next-payment date first. The web builds the CSV from
-        it and renders the printable PDF page. One query: the paid amount and
-        last payment date come from a single aggregate per order. More than
-        5000 orders is refused with `OVERDUE_EXPORT_TOO_LARGE` rather than
-        returning a partial file.
+        money and customer phone numbers). EVERY order past its delivery due
+        date and not delivered -- exactly the `overdue` bucket
+        (/orders/bucket/overdue), whatever month it was booked in -- in ONE
+        response, most overdue (oldest due date) first, with each order's
+        payment details. The web builds the CSV from it and renders the
+        printable PDF page. One query: the paid amount and last payment date
+        come from a single aggregate per order. More than 5000 orders is
+        refused with `OVERDUE_EXPORT_TOO_LARGE` rather than returning a
+        partial file.
       responses:
         "200":
-          description: Every payment-overdue order, plus the shop day it was taken on
+          description: Every overdue order, plus the shop day it was taken on
           content:
             application/json:
               schema: { $ref: "#/components/schemas/OverdueExportResult" }
@@ -2698,7 +2699,7 @@ components:
             timeZone: { type: string, example: Asia/Kolkata, description: "IANA zone of the shop (BUSINESS_TIMEZONE)." }
 
     OverdueExportResult:
-      description: GET /orders/payment-overdue/export -- every order with an overdue payment.
+      description: GET /orders/overdue/export -- every order past its due date and not delivered.
       type: object
       required: [orders, total, asOf, timeZone]
       properties:
@@ -2706,7 +2707,7 @@ components:
           type: array
           items: { $ref: "#/components/schemas/OverdueExportOrder" }
         total: { type: integer, description: "How many orders (equals orders.length)." }
-        asOf: { type: string, format: date, description: "The shop's day the list was taken on; overdue = next payment before it." }
+        asOf: { type: string, format: date, description: "The shop's day the list was taken on." }
         timeZone: { type: string, example: Asia/Kolkata }
 
     OverdueExportOrder:
@@ -2719,14 +2720,14 @@ components:
         phone: { type: string }
         designerName: { type: string, nullable: true }
         productionStatus: { type: string, description: "The order's stage (granular status)." }
-        paymentStatus: { type: string, enum: [unpaid, advance_paid] }
+        paymentStatus: { type: string, enum: [not_priced, unpaid, advance_paid, fully_paid] }
         bookingDate: { type: string, format: date }
         dueDate: { type: string, format: date, description: "Delivery due date." }
-        totalAmount: { type: string, example: "12000.00" }
+        totalAmount: { type: string, nullable: true, example: "12000.00", description: "Null while the order has no price yet." }
         amountPaid: { type: string, example: "5000.00" }
-        outstanding: { type: string, example: "7000.00" }
+        outstanding: { type: string, nullable: true, example: "7000.00", description: "Null while the order has no price yet." }
         lastPaymentDate: { type: string, format: date, nullable: true, description: "Newest payment's date; null when nothing is paid yet." }
-        nextPaymentDate: { type: string, format: date, description: "The scheduled next payment (before asOf)." }
+        nextPaymentDate: { type: string, format: date, nullable: true, description: "The expected next payment, when one was scheduled." }
 
     CreateOrderRequest:
       type: object

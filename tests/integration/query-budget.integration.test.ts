@@ -67,8 +67,8 @@ describe("query budget: no N+1, bounded pages (integration)", () => {
     });
   }
 
-  it("payment-overdue export: every overdue order in a fixed number of queries (no N+1)", async () => {
-    const { n, body } = await queriesFor("/api/v1/orders/payment-overdue/export");
+  it("overdue-orders export: every overdue order in a fixed number of queries (no N+1)", async () => {
+    const { n, body } = await queriesFor("/api/v1/orders/overdue/export");
     expect(Array.isArray((body as { orders: unknown[] }).orders)).toBe(true);
     expect(n).toBeLessThanOrEqual(2); // auth profile + one query (rows + total together)
   });

@@ -318,16 +318,20 @@ export class OrdersService {
    * window holding more rows than one export may carry.
    */
   /**
-   * The payment-overdue export (owner / accountant): every order still owing
-   * whose next payment date has passed, at once -- the CSV and the printable
-   * PDF both read it. Refuses (400) rather than return a cut-short list.
+   * The overdue-orders export (owner / accountant): every order past its
+   * delivery due date and not delivered (/orders/bucket/overdue), at once, with
+   * its payment details -- the CSV and the printable PDF both read it. Refuses
+   * (400) rather than return a cut-short list.
    */
-  async getPaymentOverdueExport(): Promise<OverdueExportResponseDto> {
+  async getOverdueOrdersExport(): Promise<OverdueExportResponseDto> {
     const today = businessToday(new Date(), env.BUSINESS_TIMEZONE);
-    const { rows, total } = await this.ordersRepository.getPaymentOverdueExport(today, OVERDUE_EXPORT_MAX_ROWS + 1);
+    const { rows, total } = await this.ordersRepository.getOverdueOrdersExport(OVERDUE_EXPORT_MAX_ROWS + 1);
     assertOverdueExportSize(total);
     return {
-      orders: rows.map((r) => ({ ...r, outstanding: toMoneyString(outstanding(r.totalAmount, r.amountPaid)) })),
+      orders: rows.map((r) => ({
+        ...r,
+        outstanding: r.totalAmount === null ? null : toMoneyString(outstanding(r.totalAmount, r.amountPaid)),
+      })),
       total,
       asOf: today,
       timeZone: env.BUSINESS_TIMEZONE,

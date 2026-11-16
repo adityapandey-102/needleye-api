@@ -449,7 +449,7 @@ describe("Users & reports (integration)", () => {
     expect(forbidden.status).toBe(403);
   });
 
-  it("exports EVERY payment-overdue order at once with its designer, paid amount and last payment date", async () => {
+  it("exports EVERY overdue order (past its due date, not delivered) at once with its payment details", async () => {
     const owner = await createFixtureUser("owner_manager", "Overdue Export Owner");
     const master = await createFixtureUser("master_tailor", "Overdue Export Master");
     createdUserIds.push(owner.id, master.id);
@@ -457,17 +457,18 @@ describe("Users & reports (integration)", () => {
     const auth = `Bearer ${session.accessToken}`;
     const today = businessToday(new Date(), env.BUSINESS_TIMEZONE);
     const base = {
-      phone: "9000011111", bookingDate: today, dueDate: "2039-01-01", designerId: owner.id, masterTailorId: master.id,
+      phone: "9000011111", bookingDate: today, designerId: owner.id, masterTailorId: master.id,
       productCategory: "saree" as const, orderDetails: "overdue export", handWork: false, machineWork: false, purchaseRequired: false,
-      totalAmount: "1000.00", productionStatus: "design_pending" as const,
+      productionStatus: "design_pending" as const,
       designerInstructions: null, specialNotes: null, createdBy: owner.id, updatedBy: owner.id,
     };
     const repo = new DrizzleOrdersRepository();
     const stamp = Date.now();
-    // Overdue (next payment yesterday-ish, part paid), and NOT overdue (next payment in the future).
-    const overdue = await repo.create({ ...base, customerName: "Overdue Export Asha", billNumber: `OVX-${stamp}`, nextPaymentDate: "2000-01-15", paymentStatus: "unpaid" });
-    const later = await repo.create({ ...base, customerName: "Overdue Export Later", billNumber: `OVL-${stamp}`, nextPaymentDate: "2039-01-01", paymentStatus: "unpaid" });
-    createdOrderIds.push(overdue.id, later.id);
+    // Overdue and part paid; overdue with no price yet; and NOT overdue (due in the future).
+    const overdue = await repo.create({ ...base, customerName: "Overdue Export Asha", billNumber: `OVX-${stamp}`, dueDate: "2000-01-15", nextPaymentDate: "2000-01-20", totalAmount: "1000.00", paymentStatus: "unpaid" });
+    const unpriced = await repo.create({ ...base, customerName: "Overdue Export Unpriced", billNumber: `OVU-${stamp}`, dueDate: "2000-01-16", nextPaymentDate: null, totalAmount: null, paymentStatus: "not_priced" });
+    const later = await repo.create({ ...base, customerName: "Overdue Export Later", billNumber: `OVL-${stamp}`, dueDate: "2039-01-01", nextPaymentDate: null, totalAmount: "1000.00", paymentStatus: "unpaid" });
+    createdOrderIds.push(overdue.id, unpriced.id, later.id);
     await db.insert(payments).values([
       { orderId: overdue.id, amount: "100.00", method: "cash", paidAt: today, recordedBy: owner.id },
       { orderId: overdue.id, amount: "150.00", method: "upi", paidAt: today, recordedBy: owner.id },
@@ -475,34 +476,44 @@ describe("Users & reports (integration)", () => {
     // Payments inserted directly skip the service that re-derives the order's status; set what it would.
     await db.update(orders).set({ paymentStatus: "advance_paid" }).where(eq(orders.id, overdue.id));
 
-    const res = await request(app).get("/api/v1/orders/payment-overdue/export").set("Authorization", auth);
+    const res = await request(app).get("/api/v1/orders/overdue/export").set("Authorization", auth);
     expect(res.status).toBe(200);
     const body = res.body as { orders: Record<string, unknown>[]; total: number; asOf: string; timeZone: string };
     expect(body.asOf).toBe(today);
     expect(body.total).toBe(body.orders.length);
-    const row = body.orders.find((o) => o.id === overdue.id);
-    expect(row).toMatchObject({
+    // The same orders, and as many, as the Overdue list (/orders/bucket/overdue).
+    const list = await request(app).get("/api/v1/orders?bucket=overdue&limit=1").set("Authorization", auth);
+    expect(body.total).toBe((list.body as { total: number }).total);
+    expect(body.orders.find((o) => o.id === overdue.id)).toMatchObject({
       customerName: "Overdue Export Asha",
       phone: "9000011111",
       designerName: "Overdue Export Owner",
       productionStatus: "design_pending",
       paymentStatus: "advance_paid",
       bookingDate: today,
+      dueDate: "2000-01-15",
       totalAmount: "1000.00",
       amountPaid: "250.00",
       outstanding: "750.00",
       lastPaymentDate: today,
-      nextPaymentDate: "2000-01-15",
+      nextPaymentDate: "2000-01-20",
+    });
+    expect(body.orders.find((o) => o.id === unpriced.id)).toMatchObject({
+      totalAmount: null,
+      amountPaid: "0.00",
+      outstanding: null,
+      lastPaymentDate: null,
+      nextPaymentDate: null,
     });
     expect(body.orders.some((o) => o.id === later.id)).toBe(false);
-    // Oldest next-payment date first.
-    const dates = body.orders.map((o) => o.nextPaymentDate as string);
+    // Most overdue (oldest due date) first.
+    const dates = body.orders.map((o) => o.dueDate as string);
     expect([...dates].sort()).toEqual(dates);
 
     const designer = await createFixtureUser("designer", "Overdue Export Nosy Designer");
     createdUserIds.push(designer.id);
     const dSession = await authProvider.signInWithPassword(designer.email, designer.password);
-    const forbidden = await request(app).get("/api/v1/orders/payment-overdue/export").set("Authorization", `Bearer ${dSession.accessToken}`);
+    const forbidden = await request(app).get("/api/v1/orders/overdue/export").set("Authorization", `Bearer ${dSession.accessToken}`);
     expect(forbidden.status).toBe(403);
   });
 

@@ -174,14 +174,15 @@ ordersRouter.get(
   }),
 );
 
-// The payment-overdue export (CSV / PDF): every order still owing whose next
-// payment date has passed, unpaged. Owner / accountant only -- it carries money
-// and customer phone numbers. Registered before "/:id".
+// The overdue-orders export (CSV / PDF): every order past its delivery due
+// date and not delivered (/orders/bucket/overdue), unpaged, with payment
+// details. Owner / accountant only -- it carries money and customer phone
+// numbers. Registered before "/:id".
 ordersRouter.get(
-  "/payment-overdue/export",
+  "/overdue/export",
   requireCapability("reports:financial"),
   asyncHandler(async (_req, res) => {
-    res.json(await ordersService.getPaymentOverdueExport());
+    res.json(await ordersService.getOverdueOrdersExport());
   }),
 );
 

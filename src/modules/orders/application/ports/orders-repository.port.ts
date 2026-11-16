@@ -243,7 +243,7 @@ export interface LedgerEventRaw {
   previousPaidAt: string | null;
 }
 
-/** One order in the payment-overdue export (raw from the repository; money as 2dp strings). */
+/** One order in the overdue-orders export (raw from the repository; money as 2dp strings). */
 export interface OverdueExportRow {
   id: string;
   orderNumber: string;
@@ -254,10 +254,10 @@ export interface OverdueExportRow {
   paymentStatus: PaymentStatus;
   bookingDate: string;
   dueDate: string;
-  totalAmount: string;
+  totalAmount: string | null;
   amountPaid: string;
   lastPaymentDate: string | null;
-  nextPaymentDate: string;
+  nextPaymentDate: string | null;
 }
 
 export interface LedgerEventsResult {
@@ -286,12 +286,12 @@ export interface OrdersRepositoryPort {
   /** Paginated payment-ledger events (payment_audit_log: created/updated/deleted) in a date range, newest first -- backs the ledger-activity history. */
   getLedgerEvents(range: { from: string; to: string }, page: OrderListPage): Promise<LedgerEventsResult>;
   /**
-   * EVERY order still owing whose next payment date is before `today` (the
-   * payment_overdue bucket), unpaged up to `limit`, with its designer, money
-   * paid and last payment date -- one query. `total` counts them all, so a
-   * caller can refuse an export that would be cut short.
+   * EVERY order past its delivery due date and not delivered (the `overdue`
+   * bucket, /orders/bucket/overdue), unpaged up to `limit`, with its designer,
+   * money paid and last payment date -- one query. `total` counts them all,
+   * so a caller can refuse an export that would be cut short.
    */
-  getPaymentOverdueExport(today: string, limit: number): Promise<{ rows: OverdueExportRow[]; total: number }>;
+  getOverdueOrdersExport(limit: number): Promise<{ rows: OverdueExportRow[]; total: number }>;
   findBasicById(id: string): Promise<OrderBasicInfo | null>;
   /** The newest orders for one phone number (exact match), at most `limit` -- the order form's "Fetch customer details". */
   findCustomersByPhone(phone: string, limit: number): Promise<CustomerMatch[]>;

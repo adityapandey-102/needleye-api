@@ -650,10 +650,11 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
     return this.findByIdUnscoped(id);
   }
 
-  async getPaymentOverdueExport(today: string, limit: number): Promise<{ rows: OverdueExportRow[]; total: number }> {
+  async getOverdueOrdersExport(limit: number): Promise<{ rows: OverdueExportRow[]; total: number }> {
     try {
-      // Same set as the payment_overdue bucket (owed + next payment before the
-      // shop's today), bounded by the live set of owing orders. Paid amount and
+      // Exactly the `overdue` bucket's set (not delivered + due date passed,
+      // the same date test as the list so the counts agree), bounded by the
+      // live set of undelivered orders. Paid amount and
       // last payment date come from ONE lateral aggregate per order over
       // payments(order_id) -- no N+1, no second round trip; count(*) over()
       // carries the full total alongside the (capped) rows.
@@ -670,9 +671,10 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
           select coalesce(sum(pm.amount), 0) as paid, max(pm.paid_at) as last_paid
           from payments pm where pm.order_id = o.id
         ) p on true
-        where o.payment_status in (${sql.raw(OWED_PAYMENT_STATUSES.map((s) => `'${s}'`).join(", "))})
-          and o.next_payment_date < ${today}::date
-        order by o.next_payment_date asc, o.order_number asc
+        where o.production_status not in (${sql.raw(COMPLETED_STATUS_SQL_LIST)})
+          and o.production_status <> 'delivered' -- lets the planner use the open-orders partial index (orders_open_created_idx)
+          and o.due_date < current_date
+        order by o.due_date asc, o.order_number asc
         limit ${limit}
       `);
       const raw = (res.rows ?? (res as unknown as Record<string, unknown>[])) as Record<string, string | number | null>[];
@@ -686,14 +688,14 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
         paymentStatus: r.payment_status as OverdueExportRow["paymentStatus"],
         bookingDate: String(r.booking_date),
         dueDate: String(r.due_date),
-        totalAmount: toMoneyString(String(r.total_amount ?? "0")),
+        totalAmount: r.total_amount === null ? null : toMoneyString(String(r.total_amount)),
         amountPaid: toMoneyString(String(r.amount_paid ?? "0")),
         lastPaymentDate: r.last_payment_date === null ? null : String(r.last_payment_date),
-        nextPaymentDate: String(r.next_payment_date),
+        nextPaymentDate: r.next_payment_date === null ? null : String(r.next_payment_date),
       }));
       return { rows, total: raw.length ? Number(raw[0]!.total) : 0 };
     } catch (error) {
-      throw new InternalError("Failed to load overdue payments", error);
+      throw new InternalError("Failed to load overdue orders", error);
     }
   }
 

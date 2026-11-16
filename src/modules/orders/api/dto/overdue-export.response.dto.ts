@@ -1,6 +1,6 @@
 import type { GranularStatus, PaymentStatus } from "../../../../domain";
 
-/** One order in the payment-overdue export -- the columns the owner asked for. Money as 2dp strings, dates YYYY-MM-DD. */
+/** One order in the overdue-orders export -- the columns the owner asked for. Money as 2dp strings, dates YYYY-MM-DD. */
 export interface OverdueExportOrderDto {
   id: string;
   orderNumber: string;
@@ -11,20 +11,22 @@ export interface OverdueExportOrderDto {
   paymentStatus: PaymentStatus;
   bookingDate: string;
   dueDate: string;
-  totalAmount: string;
+  /** Null while the order has no price yet (payment status not_priced). */
+  totalAmount: string | null;
   amountPaid: string;
-  outstanding: string;
+  /** Null while the order has no price yet. */
+  outstanding: string | null;
   /** The newest payment's date; null when nothing has been paid yet. */
   lastPaymentDate: string | null;
-  /** The scheduled next payment -- always set here, and before today (that's what makes it overdue). */
-  nextPaymentDate: string;
+  /** The expected next payment, when one was scheduled. */
+  nextPaymentDate: string | null;
 }
 
-/** GET /orders/payment-overdue/export: every overdue order at once, unpaged, oldest payment date first. */
+/** GET /orders/overdue/export: every order past its due date and not delivered, at once, unpaged, most overdue first. */
 export interface OverdueExportResponseDto {
   orders: OverdueExportOrderDto[];
   total: number;
-  /** The shop's day the list was taken on (YYYY-MM-DD) -- "overdue" means a next payment date before it. */
+  /** The shop's day the list was taken on (YYYY-MM-DD). */
   asOf: string;
   timeZone: string;
 }

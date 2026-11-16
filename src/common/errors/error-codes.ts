@@ -69,7 +69,7 @@ export const ERROR_CODES = {
   LEDGER_EXPORT_RANGE_INVALID: "LEDGER_EXPORT_RANGE_INVALID",
   /** Ledger export window holds more rows than one export may carry. */
   LEDGER_EXPORT_TOO_LARGE: "LEDGER_EXPORT_TOO_LARGE",
-  /** More orders with an overdue payment than one export may carry. */
+  /** More overdue orders than one export may carry. */
   OVERDUE_EXPORT_TOO_LARGE: "OVERDUE_EXPORT_TOO_LARGE",
   /** Revenue months range isn't YYYY-MM, is backwards, outside 2000..this month, or (export) over 240 months. */
   LEDGER_MONTHS_RANGE_INVALID: "LEDGER_MONTHS_RANGE_INVALID",

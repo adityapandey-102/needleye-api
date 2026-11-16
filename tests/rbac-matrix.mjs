@@ -381,10 +381,10 @@ async function main() {
   check("GET /ledger/months as designer -> 403", (await req("/ledger/months", {}, designerAToken)).status, 403);
   check("GET /ledger/summary as production_manager -> 403", (await req("/ledger/summary", {}, pmToken)).status, 403);
   check("GET /ledger/months/export as master_tailor -> 403", (await req("/ledger/months/export?from=2026-01&to=2026-02", {}, masterAToken)).status, 403);
-  check("GET /orders/payment-overdue/export as owner_manager -> 200", (await req("/orders/payment-overdue/export", {}, ownerToken)).status, 200);
-  check("GET /orders/payment-overdue/export as accountant -> 200", (await req("/orders/payment-overdue/export", {}, accountantToken)).status, 200);
-  check("GET /orders/payment-overdue/export as designer -> 403", (await req("/orders/payment-overdue/export", {}, designerAToken)).status, 403);
-  check("GET /orders/payment-overdue/export as worker -> 403", (await req("/orders/payment-overdue/export", {}, workerToken)).status, 403);
+  check("GET /orders/overdue/export as owner_manager -> 200", (await req("/orders/overdue/export", {}, ownerToken)).status, 200);
+  check("GET /orders/overdue/export as accountant -> 200", (await req("/orders/overdue/export", {}, accountantToken)).status, 200);
+  check("GET /orders/overdue/export as designer -> 403", (await req("/orders/overdue/export", {}, designerAToken)).status, 403);
+  check("GET /orders/overdue/export as worker -> 403", (await req("/orders/overdue/export", {}, workerToken)).status, 403);
 
   console.log("\n--- closing the books + the check (ADR 0008 phase 5) ---");
   // January 2002: nothing else uses it. Reopen it first if an interrupted run left it closed.

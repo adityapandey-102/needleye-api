@@ -1076,15 +1076,17 @@ refused with `LEDGER_EXPORT_RANGE_INVALID`, and more than 5000 entries with
 The web builds the CSV in the browser and the PDF is a print page -- no new
 table, no migration.
 
-`GET /orders/payment-overdue/export` (`getPaymentOverdueExport`, same
-audience -- it carries money and phone numbers) backs the **Overdue payments
-Export CSV / PDF** buttons (orders dashboard + Revenue & Ledger): EVERY order
-still owing whose next payment date is before the shop's today (the
-`payment_overdue` bucket), unpaged, oldest next-payment date first, with
-designer, stage, booking/due dates, total/paid/outstanding, last payment date
-and next payment date. One query (a lateral aggregate over `payments(order_id)`
-for paid + last payment, `count(*) over()` for the total); more than 5000 is
-refused with `OVERDUE_EXPORT_TOO_LARGE` (`orders/domain/overdue-export.rules.ts`).
+`GET /orders/overdue/export` (`getOverdueOrdersExport`, same audience -- it
+carries money and phone numbers) backs the **Overdue orders Export CSV / PDF**
+buttons (the Overdue list /orders/bucket/overdue, the orders dashboard and
+Revenue & Ledger): EVERY order past its delivery due date and not delivered
+(exactly the `overdue` bucket, any booking month), unpaged, most overdue
+first, with designer, stage, payment status, booking/due dates,
+total/paid/outstanding, last payment date and expected next payment date. One
+query, bounded by the open-orders partial index (a lateral aggregate over
+`payments(order_id)` for paid + last payment, `count(*) over()` for the
+total); more than 5000 is refused with `OVERDUE_EXPORT_TOO_LARGE`
+(`orders/domain/overdue-export.rules.ts`).
 
 ### Authentication
 
@@ -1597,7 +1599,7 @@ sequenceDiagram
 | GET `/orders/staff-report`                    | bearer | `reports:staff`                                        | orders.routes.ts       | `getStaffReport`                        | `getStaffReport` (one designer/master on demand; registered before `/:id`)        |
 | GET `/orders/ledger-events`                   | bearer | `reports:financial`                                    | orders.routes.ts       | `getLedgerEvents`                       | `getLedgerEvents` (payment_audit_log; paginated; registered before `/:id`)       |
 | GET `/orders/ledger-events/export`            | bearer | `reports:financial`                                    | orders.routes.ts       | `getLedgerExport`                       | `getLedgerEvents` (one week/month, unpaged; > 31 days refused)                    |
-| GET `/orders/payment-overdue/export`          | bearer | `reports:financial`                                    | orders.routes.ts       | `getPaymentOverdueExport`               | `getPaymentOverdueExport` (every overdue order, unpaged; > 5000 refused)          |
+| GET `/orders/overdue/export`                  | bearer | `reports:financial`                                    | orders.routes.ts       | `getOverdueOrdersExport`                | `getOverdueOrdersExport` (every overdue order, unpaged; > 5000 refused)           |
 | GET `/orders/:id`                             | bearer | `orders:read`                                          | orders.routes.ts       | `getOrder`                              | `findById` row-scoped, else `findAnyById` (view-only outsider, payments stripped) |
 | PATCH `/orders/:id`                           | bearer | field-split, see below                                 | orders.routes.ts       | `updateOrder`                           | `findBasicById`, `update`                                                         |
 | PATCH `/orders/:id/status`                    | bearer | stage-split, see "Order status history & Kanban" below | orders.routes.ts       | `updateStatus`                          | `findBasicById`, `updateStatus`                                                   |
