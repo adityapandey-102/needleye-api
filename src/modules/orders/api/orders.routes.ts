@@ -174,6 +174,17 @@ ordersRouter.get(
   }),
 );
 
+// The payment-overdue export (CSV / PDF): every order still owing whose next
+// payment date has passed, unpaged. Owner / accountant only -- it carries money
+// and customer phone numbers. Registered before "/:id".
+ordersRouter.get(
+  "/payment-overdue/export",
+  requireCapability("reports:financial"),
+  asyncHandler(async (_req, res) => {
+    res.json(await ordersService.getPaymentOverdueExport());
+  }),
+);
+
 // Delivery-day load for the order form's availability check + calendar.
 // Registered before "/:id" so "delivery-load" isn't matched as an order id.
 // Gated on orders:create -- exactly the roles that pick due dates (owner,

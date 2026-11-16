@@ -50,6 +50,7 @@ import type {
   NewImageRecord,
   OrderBasicInfo,
   CustomerMatch,
+  OverdueExportRow,
   OrderImageInfo,
   OrderStatsRaw,
   StaffReportRaw,
@@ -647,6 +648,53 @@ export class DrizzleOrdersRepository implements OrdersRepositoryPort {
   /** Public, row-scope-ignoring lookup for the view-only path (see the port). */
   findAnyById(id: string): Promise<OrderEntity | null> {
     return this.findByIdUnscoped(id);
+  }
+
+  async getPaymentOverdueExport(today: string, limit: number): Promise<{ rows: OverdueExportRow[]; total: number }> {
+    try {
+      // Same set as the payment_overdue bucket (owed + next payment before the
+      // shop's today), bounded by the live set of owing orders. Paid amount and
+      // last payment date come from ONE lateral aggregate per order over
+      // payments(order_id) -- no N+1, no second round trip; count(*) over()
+      // carries the full total alongside the (capped) rows.
+      const res = await db.execute(sql`
+        select o.id, o.order_number, o.customer_name, o.phone, d.full_name as designer_name,
+               o.production_status, o.payment_status, o.booking_date::text as booking_date,
+               o.due_date::text as due_date, o.total_amount::text as total_amount,
+               p.paid::text as amount_paid, p.last_paid::text as last_payment_date,
+               o.next_payment_date::text as next_payment_date,
+               count(*) over()::int as total
+        from orders o
+        left join profiles d on d.id = o.designer_id
+        left join lateral (
+          select coalesce(sum(pm.amount), 0) as paid, max(pm.paid_at) as last_paid
+          from payments pm where pm.order_id = o.id
+        ) p on true
+        where o.payment_status in (${sql.raw(OWED_PAYMENT_STATUSES.map((s) => `'${s}'`).join(", "))})
+          and o.next_payment_date < ${today}::date
+        order by o.next_payment_date asc, o.order_number asc
+        limit ${limit}
+      `);
+      const raw = (res.rows ?? (res as unknown as Record<string, unknown>[])) as Record<string, string | number | null>[];
+      const rows: OverdueExportRow[] = raw.map((r) => ({
+        id: String(r.id),
+        orderNumber: String(r.order_number),
+        customerName: String(r.customer_name),
+        phone: String(r.phone),
+        designerName: r.designer_name === null ? null : String(r.designer_name),
+        productionStatus: r.production_status as OverdueExportRow["productionStatus"],
+        paymentStatus: r.payment_status as OverdueExportRow["paymentStatus"],
+        bookingDate: String(r.booking_date),
+        dueDate: String(r.due_date),
+        totalAmount: toMoneyString(String(r.total_amount ?? "0")),
+        amountPaid: toMoneyString(String(r.amount_paid ?? "0")),
+        lastPaymentDate: r.last_payment_date === null ? null : String(r.last_payment_date),
+        nextPaymentDate: String(r.next_payment_date),
+      }));
+      return { rows, total: raw.length ? Number(raw[0]!.total) : 0 };
+    } catch (error) {
+      throw new InternalError("Failed to load overdue payments", error);
+    }
   }
 
   async findBasicById(id: string): Promise<OrderBasicInfo | null> {

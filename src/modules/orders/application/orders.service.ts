@@ -44,6 +44,9 @@ import type {
   LedgerExportResponseDto,
 } from "../api/dto/ledger-events.response.dto";
 import type { CustomerMatch, LedgerEventRaw, LeadLink } from "./ports/orders-repository.port";
+import type { OverdueExportResponseDto } from "../api/dto/overdue-export.response.dto";
+import { assertOverdueExportSize, OVERDUE_EXPORT_MAX_ROWS } from "../domain/overdue-export.rules";
+import { outstanding, toMoneyString } from "../../../common/money/money";
 import { businessToday } from "../../../common/time/business-date";
 
 interface AuthContext {
@@ -314,6 +317,23 @@ export class OrdersService {
    * not paged. Refuses a window longer than 31 days (no yearly exports) and a
    * window holding more rows than one export may carry.
    */
+  /**
+   * The payment-overdue export (owner / accountant): every order still owing
+   * whose next payment date has passed, at once -- the CSV and the printable
+   * PDF both read it. Refuses (400) rather than return a cut-short list.
+   */
+  async getPaymentOverdueExport(): Promise<OverdueExportResponseDto> {
+    const today = businessToday(new Date(), env.BUSINESS_TIMEZONE);
+    const { rows, total } = await this.ordersRepository.getPaymentOverdueExport(today, OVERDUE_EXPORT_MAX_ROWS + 1);
+    assertOverdueExportSize(total);
+    return {
+      orders: rows.map((r) => ({ ...r, outstanding: toMoneyString(outstanding(r.totalAmount, r.amountPaid)) })),
+      total,
+      asOf: today,
+      timeZone: env.BUSINESS_TIMEZONE,
+    };
+  }
+
   async getLedgerExport(range: { from: string; to: string }): Promise<LedgerExportResponseDto> {
     assertLedgerExportRange(range.from, range.to);
     const page = { limit: LEDGER_EXPORT_MAX_ROWS, offset: 0 };

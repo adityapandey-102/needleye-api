@@ -67,6 +67,12 @@ describe("query budget: no N+1, bounded pages (integration)", () => {
     });
   }
 
+  it("payment-overdue export: every overdue order in a fixed number of queries (no N+1)", async () => {
+    const { n, body } = await queriesFor("/api/v1/orders/payment-overdue/export");
+    expect(Array.isArray((body as { orders: unknown[] }).orders)).toBe(true);
+    expect(n).toBeLessThanOrEqual(2); // auth profile + one query (rows + total together)
+  });
+
   it("order list rows carry no images (no image query, no storage signing)", async () => {
     const res = await request(app).get("/api/v1/orders?limit=5").set("Authorization", auth);
     const rows = (res.body as { orders: Record<string, unknown>[] }).orders;

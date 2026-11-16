@@ -161,6 +161,7 @@ async function main() {
     { name: "orders filter: booked in a month", run: () => orders.findMany(owner, { bookedYear: Number(month.slice(0, 4)), bookedMonth: Number(month.slice(5, 7)) }, { limit: 20, offset: 0 }) },
     { name: "orders filter count: booked in a month", run: () => orders.countMany(owner, { bookedYear: Number(month.slice(0, 4)), bookedMonth: Number(month.slice(5, 7)) }) },
     { name: "fetch customer details (by phone)", run: () => orders.findCustomersByPhone("9811122233", 5) },
+    { name: "payment-overdue export (every overdue order)", run: () => orders.getPaymentOverdueExport(today, 5001) },
     { name: "orders bucket: pending_payment", run: () => orders.findMany(owner, { bucket: "pending_payment" }, { limit: 20, offset: 0 }) },
     { name: "orders bucket: ready", run: () => orders.findMany(owner, { bucket: "ready" }, { limit: 20, offset: 0 }) },
     { name: "orders bucket: price not set", run: () => orders.findMany(owner, { bucket: "not_priced" }, { limit: 20, offset: 0 }) },
